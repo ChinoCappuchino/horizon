@@ -73,6 +73,10 @@ pub struct Facts<'a> {
     /// From the jar: classes, and whether it has blocks, items or data.
     pub classes: Option<usize>,
     pub has_content: bool,
+    /// From the jar: world-generation data or structures.
+    pub has_worldgen: bool,
+    /// From the jar: at least one Mixin configuration.
+    pub has_mixins: bool,
 }
 
 /// Class, tier and confidence (`known` is set by the caller).
@@ -96,7 +100,7 @@ pub fn rules(f: &Facts) -> (&'static str, &'static str, &'static str) {
     if f.client == "unsupported" && f.server != "unsupported" && !f.server.is_empty() {
         return ("server-only", "logic", "sides");
     }
-    if f.classes == Some(0) && f.has_content {
+    if f.classes == Some(0) && (f.has_content || f.has_worldgen) {
         return ("content", "data", "jar");
     }
     let content = [
@@ -129,6 +133,11 @@ pub fn rules(f: &Facts) -> (&'static str, &'static str, &'static str) {
     }
     if has("utility") || has("management") || has("social") {
         return ("other", "logic", "guess");
+    }
+    // No categories (a mod not on Modrinth, or not found by hash): the jar itself still says
+    // whether it adds content. Code that patches the game with Mixins needs new hooks: deep.
+    if f.classes.is_some_and(|n| n > 0) && (f.has_content || f.has_worldgen) {
+        return ("content", if f.has_mixins { "deep" } else { "logic" }, "jar");
     }
     ("unknown", "none", "unknown")
 }
@@ -214,6 +223,28 @@ mod tests {
             ("content", "data", "categories")
         );
         assert_eq!(f("", "", &[]).0, "unknown");
+    }
+
+    #[test]
+    fn jar_facts_classify_mods_without_categories() {
+        let f = |classes, has_content, has_worldgen, has_mixins| {
+            rules(&Facts {
+                kind: "mods",
+                classes: Some(classes),
+                has_content,
+                has_worldgen,
+                has_mixins,
+                ..Facts::default()
+            })
+        };
+        // a world-generation mod with code and Mixins (no blocks of its own)
+        assert_eq!(f(347, false, true, true), ("content", "deep", "jar"));
+        // blocks and code, no Mixins
+        assert_eq!(f(120, true, false, false), ("content", "logic", "jar"));
+        // world-generation data only
+        assert_eq!(f(0, false, true, false), ("content", "data", "jar"));
+        // code with nothing to show: still unknown
+        assert_eq!(f(40, false, false, true).0, "unknown");
     }
 
     #[test]

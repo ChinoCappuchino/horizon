@@ -93,6 +93,8 @@ pub fn build(pack: &Pack, cache: &Cache, work: &Path) -> Vec<Record> {
             categories: &categories,
             classes: census.map(|c| c.classes),
             has_content: census.is_some_and(|c| c.blockstates + c.item_models + c.recipes > 0),
+            has_worldgen: census.is_some_and(|c| c.worldgen + c.structures > 0),
+            has_mixins: census.is_some_and(|c| c.mixin_configs > 0),
         };
         let name = info
             .as_ref()
