@@ -63,8 +63,23 @@ public final class WorldgenProbe {
                 JsonWriter json = new JsonWriter(w)) {
             write(server.overworld(), json, radius, cx0, cz0);
         } catch (Throwable e) {
+            // A mod that fails while generating is a result, not a probe failure: record it next to the
+            // output, then stop at once. System.exit would wait for the server's own shutdown hook,
+            // which waits for this thread: the server would hang until the driver's timeout.
             e.printStackTrace();
-            System.exit(3);
+            try {
+                Files.deleteIfExists(out);
+                Throwable root = e;
+                while (root.getCause() != null && root.getCause() != root) {
+                    root = root.getCause();
+                }
+                java.io.StringWriter trace = new java.io.StringWriter();
+                root.printStackTrace(new java.io.PrintWriter(trace));
+                Files.writeString(Path.of(out + ".error"), root + "\n" + trace, StandardCharsets.UTF_8);
+            } catch (IOException ignored) {
+                // nothing more to record
+            }
+            Runtime.getRuntime().halt(3);
         }
         System.out.println("horizon-worldgen-probe: wrote " + out);
         server.halt(false);

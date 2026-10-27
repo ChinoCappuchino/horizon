@@ -19,6 +19,7 @@ import json
 import os
 import random
 import shutil
+import subprocess
 import sys
 import tomllib
 import zipfile
@@ -157,9 +158,17 @@ def run(args):
     (run_dir / 'server.properties').write_text(PROPERTIES.format(seed=args.seed, preset=preset))
     out = OUT / row['name'] / f'seed-{args.seed}-order-{args.order}.json'
     out.parent.mkdir(parents=True, exist_ok=True)
-    seconds, log = oracle.start(home, run_dir, {
-        'horizon.probe.out': out, 'horizon.probe.radius': args.radius,
-        'horizon.probe.cx': args.cx, 'horizon.probe.cz': args.cz}, timeout=args.timeout)
+    error = Path(f'{out}.error')
+    for stale in (out, error):
+        stale.unlink(missing_ok=True)
+    try:
+        seconds, log = oracle.start(home, run_dir, {
+            'horizon.probe.out': out, 'horizon.probe.radius': args.radius,
+            'horizon.probe.cx': args.cx, 'horizon.probe.cz': args.cz}, timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        sys.exit(f'timed out after {args.timeout} s (server log: {run_dir / "server.log"})')
+    if error.exists():
+        sys.exit(f'generation crashed: {error.read_text().splitlines()[0]} (details: {error})')
     if not out.exists():
         tail = '\n'.join(log.splitlines()[-30:])
         sys.exit(f'no probe output after {seconds:.0f} s; the server log ends with:\n{tail}')
@@ -216,6 +225,10 @@ def matrix(args):
         for seed in m.get('seeds', [1]):
             files = []
             for order in m.get('orders', [0]):
+                done = OUT / row['name'] / f'seed-{seed}-order-{order}.json'
+                if args.resume and done.exists() and 'base' in json.loads(done.read_text())['chunks'][0]:
+                    files.append(done)                      # already probed with this probe version
+                    continue
                 ns = argparse.Namespace(row=row['name'], seed=seed, order=order, radius=args.radius, cx=0, cz=0,
                                         timeout=args.timeout, accept_eula=args.accept_eula)
                 try:
@@ -224,6 +237,10 @@ def matrix(args):
                     print(f'{row["name"]} seed {seed} order {order}: FAILED: {e}')
                     files.append(None)
             ok = [f for f in files if f]
+            if not ok:
+                results[f'{row["name"]}/{seed}'] = {'terrain_identical': False, 'failed': True, 'runs': 0}
+                lines.append(f'| {row["name"]} | {seed} | FAILED | - | - | - | - | - | - | - |')
+                continue
             same = len(ok) == len(files) and all(terrain(f) == terrain(ok[0]) for f in ok)
             spread = decoration_spread(ok) if ok else None
             s = summarise(ok[0]) if ok else {}
@@ -261,6 +278,7 @@ def main():
     mx = sub.add_parser('matrix', help='every row x seed x load order, then the determinism check')
     mx.add_argument('rows', nargs='*', help='only these rows (default: all)')
     mx.add_argument('--tag', default='', help='name of the summary files (default: summary)')
+    mx.add_argument('--resume', action='store_true', help='keep runs already probed with this probe version')
     mx.add_argument('--radius', type=int, default=4)
     mx.add_argument('--timeout', type=int, default=1800)
     mx.add_argument('--accept-eula', action='store_true')
