@@ -1,0 +1,48 @@
+# Rows of the world-generation matrix (docs/research/worldgen-hooks.md). Mod ids, not jar names:
+# tools/worldgen_probe.py finds the jars and their required dependencies in HORIZON_PACK_MODS.
+# Farview's preset is a placeholder until the pack's owner names the baseline preset(s).
+
+# Seeds with land around chunk (0, 0) on vanilla 1.21.1 (surveyed 2026-10-27: 66 %, 99 %, 58 % land);
+# seeds 1, 1234 and 20261027 are all ocean there. Load orders: 0 = file names, 1 = shuffled.
+seeds = [2, 42, 8675309]
+orders = [0, 1]
+
+[[row]]
+name = "vanilla"
+preset = "minecraft:normal"
+mods = []
+
+[[row]]
+name = "farview"
+preset = "afterwinter_worldgen:earth"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "biomesoplenty"
+preset = "minecraft:normal"
+mods = ["biomesoplenty"]
+
+[[row]]
+name = "towns-and-towers"
+preset = "minecraft:normal"
+mods = ["t_and_t"]
+
+[[row]]
+name = "large-ore-deposits"
+preset = "minecraft:normal"
+mods = ["adlods"]
+
+[[row]]
+name = "farview+biomesoplenty"
+preset = "afterwinter_worldgen:earth"
+mods = ["afterwinter_worldgen", "biomesoplenty"]
+
+[[row]]
+name = "farview+towns-and-towers"
+preset = "afterwinter_worldgen:earth"
+mods = ["afterwinter_worldgen", "t_and_t"]
+
+[[row]]
+name = "pack-worldgen"
+preset = "afterwinter_worldgen:earth"
+mods = ["afterwinter_worldgen", "farview_settlements", "farview_tracks", "biomesoplenty", "t_and_t", "adlods"]
