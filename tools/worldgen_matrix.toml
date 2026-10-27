@@ -1,6 +1,7 @@
 # Rows of the world-generation matrix (docs/research/worldgen-hooks.md). Mod ids, not jar names:
 # tools/worldgen_probe.py finds the jars and their required dependencies in HORIZON_PACK_MODS.
-# Farview's preset is a placeholder until the pack's owner names the baseline preset(s).
+# Farview: `earth` is the baseline (the owner, 2026-10-28); every other preset has a row of its own so the
+# port cannot assume one terrain version, palette or dimension type.
 
 # Seeds with land around chunk (0, 0) on vanilla 1.21.1 (surveyed 2026-10-27: 66 %, 99 %, 58 % land);
 # seeds 1, 1234 and 20261027 are all ocean there. Load orders: 0 = file names, 1 = shuffled.
@@ -46,3 +47,65 @@ mods = ["afterwinter_worldgen", "t_and_t"]
 name = "pack-worldgen"
 preset = "afterwinter_worldgen:earth"
 mods = ["afterwinter_worldgen", "farview_settlements", "farview_tracks", "biomesoplenty", "t_and_t", "adlods"]
+
+# The other Farview presets, alone.
+
+[[row]]
+name = "farview-coastal-life"
+preset = "afterwinter_worldgen:coastal_life"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-living-wilds"
+preset = "afterwinter_worldgen:living_wilds"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-landscapes"
+preset = "afterwinter_worldgen:landscapes"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-temperate"
+preset = "afterwinter_worldgen:temperate"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-watersheds"
+preset = "afterwinter_worldgen:watersheds"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-integrated"
+preset = "afterwinter_worldgen:integrated"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-alpine"
+preset = "afterwinter_worldgen:alpine"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-civilisation"
+preset = "afterwinter_worldgen:civilisation"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-rugged"
+preset = "afterwinter_worldgen:rugged"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-wildlands"
+preset = "afterwinter_worldgen:wildlands"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-highlands"
+preset = "afterwinter_worldgen:highlands"
+mods = ["afterwinter_worldgen"]
+
+[[row]]
+name = "farview-atlas"
+preset = "afterwinter_worldgen:atlas"
+mods = ["afterwinter_worldgen"]

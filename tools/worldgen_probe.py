@@ -169,17 +169,42 @@ def run(args):
     return out
 
 
+TERRAIN = ('base', 'biomes', 'starts')     # the generator's own height, biomes there, structure starts: identical
+DECORATION = ('logs', 'leaves', 'ores')    # vanilla itself varies here (feature order): compared as totals
+
+
 def summarise(path):
-    """Land share, height range, structure starts and tree/ore totals of one probe file."""
+    """Land share, ground range, structure starts and tree/ore totals of one probe file."""
     d = json.loads(Path(path).read_text())
     biomes = [b for c in d['chunks'] for b in c['biomes']]
-    heights = [h for c in d['chunks'] for h in c['surface']]
+    heights = [h for c in d['chunks'] for h in c['ground']]
     land = sum(1 for b in biomes if 'ocean' not in b and 'river' not in b) / max(1, len(biomes))
     starts = sorted({s['id'] for c in d['chunks'] for s in c['starts']})
     return {'generator': d['generator'].rsplit('.', 1)[-1], 'land': round(100 * land),
-            'height': [min(heights), max(heights)], 'starts': starts,
+            'ground': [min(heights), max(heights)], 'starts': starts,
             'logs': sum(c['logs'] for c in d['chunks']),
+            'leaves': sum(c['leaves'] for c in d['chunks']),
             'ores': sum(sum(c['ores'].values()) for c in d['chunks'])}
+
+
+def terrain(path):
+    d = json.loads(Path(path).read_text())
+    return [[c[k] for k in TERRAIN] for c in d['chunks']]
+
+
+def decoration_spread(paths):
+    """Largest relative difference between the runs, in percent: the decoration totals, and the share of
+    ground columns (terrain plus what features put on it) that differ."""
+    worst = 0.0
+    grounds = [[g for c in json.loads(Path(p).read_text())['chunks'] for g in c['ground']] for p in paths]
+    for g in grounds[1:]:
+        worst = max(worst, 100 * sum(1 for a, b in zip(grounds[0], g) if a != b) / max(1, len(g)))
+    sums = [summarise(p) for p in paths]
+    for k in DECORATION:
+        vals = [s[k] for s in sums]
+        if max(vals):
+            worst = max(worst, 100 * (max(vals) - min(vals)) / max(vals))
+    return round(worst, 2)
 
 
 def matrix(args):
@@ -199,20 +224,24 @@ def matrix(args):
                     print(f'{row["name"]} seed {seed} order {order}: FAILED: {e}')
                     files.append(None)
             ok = [f for f in files if f]
-            same = len(ok) == len(files) and len({Path(f).read_bytes() for f in ok}) == 1
+            same = len(ok) == len(files) and all(terrain(f) == terrain(ok[0]) for f in ok)
+            spread = decoration_spread(ok) if ok else None
             s = summarise(ok[0]) if ok else {}
-            results[f'{row["name"]}/{seed}'] = {'deterministic': same, 'runs': len(ok), **s}
-            lines.append(f'| {row["name"]} | {seed} | {"yes" if same else "NO"} | {s.get("generator", "-")} | '
-                         f'{s.get("land", "-")} % | {s.get("height", "-")} | {len(s.get("starts", []))} | '
-                         f'{s.get("logs", "-")} | {s.get("ores", "-")} |')
+            results[f'{row["name"]}/{seed}'] = {'terrain_identical': same, 'decoration_spread_percent': spread,
+                                                'runs': len(ok), **s}
+            lines.append(f'| {row["name"]} | {seed} | {"yes" if same else "NO"} | {spread} % | '
+                         f'{s.get("generator", "-")} | {s.get("land", "-")} % | {s.get("ground", "-")} | '
+                         f'{len(s.get("starts", []))} | {s.get("logs", "-")} | {s.get("ores", "-")} |')
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / 'summary.json').write_text(json.dumps(results, indent=1))
-    table = ['| row | seed | same in every load order | generator | land | surface | structure types | logs | ores |',
-             '|---|---:|---|---|---:|---|---:|---:|---:|', *lines]
-    (OUT / 'summary.md').write_text('\n'.join(table) + '\n')
+    tag = args.tag or 'summary'
+    (OUT / f'{tag}.json').write_text(json.dumps(results, indent=1))
+    table = ['| row | seed | terrain identical in every load order | decoration spread | generator | land | ground '
+             '| structure types | logs | ores |',
+             '|---|---:|---|---:|---|---:|---|---:|---:|---:|', *lines]
+    (OUT / f'{tag}.md').write_text('\n'.join(table) + '\n')
     print('\n'.join(table))
-    if not all(r['deterministic'] for r in results.values()):
-        sys.exit('load order changed the generated world in at least one row')
+    if not all(r['terrain_identical'] for r in results.values()):
+        sys.exit('load order changed the terrain in at least one row')
 
 
 def main():
@@ -231,6 +260,7 @@ def main():
     r.add_argument('--accept-eula', action='store_true')
     mx = sub.add_parser('matrix', help='every row x seed x load order, then the determinism check')
     mx.add_argument('rows', nargs='*', help='only these rows (default: all)')
+    mx.add_argument('--tag', default='', help='name of the summary files (default: summary)')
     mx.add_argument('--radius', type=int, default=4)
     mx.add_argument('--timeout', type=int, default=1800)
     mx.add_argument('--accept-eula', action='store_true')

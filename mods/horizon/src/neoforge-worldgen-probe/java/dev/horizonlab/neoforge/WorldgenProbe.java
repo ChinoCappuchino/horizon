@@ -21,6 +21,8 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -112,11 +114,44 @@ public final class WorldgenProbe {
             }
         }
         json.endArray();
-        json.name("biomes").beginArray();
+        // Ground: the terrain without what decoration puts on it. Vanilla places trees and other
+        // features in the order neighbouring chunks finish, which differs between runs, so the heights
+        // above (they include trees) are decoration; ground and the biomes sampled at it are terrain.
+        int[] ground = new int[16];
+        int i = 0;
         for (int z = 0; z < 16; z += STEP) {
             for (int x = 0; x < 16; x += STEP) {
-                int y = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
-                json.value(key(level.getBiome(new BlockPos((cx << 4) + x, y, (cz << 4) + z))));
+                ground[i++] = ground(chunk, x, z);
+            }
+        }
+        json.name("ground").beginArray();
+        for (int g : ground) {
+            json.value(g);
+        }
+        json.endArray();
+        // Base: the generator's own terrain height from its noise, before any feature runs. Unlike
+        // the ground (where a boulder or a fallen log still counts), it cannot depend on the order
+        // in which chunks finish, so it and the biomes sampled at it are the terrain to compare exactly.
+        ChunkGenerator generator = level.getChunkSource().getGenerator();
+        RandomState random = level.getChunkSource().randomState();
+        int[] base = new int[16];
+        i = 0;
+        for (int z = 0; z < 16; z += STEP) {
+            for (int x = 0; x < 16; x += STEP) {
+                base[i++] = generator.getBaseHeight((cx << 4) + x, (cz << 4) + z,
+                        Heightmap.Types.OCEAN_FLOOR_WG, level, random);
+            }
+        }
+        json.name("base").beginArray();
+        for (int b : base) {
+            json.value(b);
+        }
+        json.endArray();
+        json.name("biomes").beginArray();
+        i = 0;
+        for (int z = 0; z < 16; z += STEP) {
+            for (int x = 0; x < 16; x += STEP) {
+                json.value(key(level.getBiome(new BlockPos((cx << 4) + x, base[i++], (cz << 4) + z))));
             }
         }
         json.endArray();
@@ -169,6 +204,28 @@ public final class WorldgenProbe {
         }
         json.endObject();
         json.endObject();
+    }
+
+    /** Blocks that decoration features put on the terrain (trees, huge mushrooms, plants that block movement). */
+    private static final java.util.Set<String> DECORATION = java.util.Set.of(
+            "minecraft:cactus", "minecraft:bamboo", "minecraft:brown_mushroom_block",
+            "minecraft:red_mushroom_block", "minecraft:mushroom_stem", "minecraft:pumpkin",
+            "minecraft:melon", "minecraft:bee_nest", "minecraft:sugar_cane", "minecraft:big_dripleaf");
+
+    /** The y above the highest solid block that is not decoration (the heightmap convention). */
+    private static int ground(ChunkAccess chunk, int x, int z) {
+        int bottom = chunk.getMinBuildHeight();
+        for (int y = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z); y >= bottom; y--) {
+            BlockState state = chunk.getBlockState(new BlockPos(x, y, z));
+            if (!state.blocksMotion() || state.is(BlockTags.LOGS) || state.is(BlockTags.LEAVES)) {
+                continue;
+            }
+            if (DECORATION.contains(BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString())) {
+                continue;
+            }
+            return y + 1;
+        }
+        return bottom;
     }
 
     private static String key(Holder<?> holder) {
