@@ -89,6 +89,13 @@ fn possible_biomes(source: &ResolvedBiomeSource) -> Vec<String> {
             .iter()
             .map(|(_, name)| name.clone())
             .collect(),
+        // Region by region, each in its list's order.
+        ResolvedBiomeSource::Regions(source) => source
+            .regions()
+            .iter()
+            .flat_map(|(_, _, list)| list.parameters().entries())
+            .map(|(_, name)| name.clone())
+            .collect(),
         ResolvedBiomeSource::End(source) => [
             &source.center,
             &source.highlands,
@@ -110,6 +117,80 @@ fn possible_biomes(source: &ResolvedBiomeSource) -> Vec<String> {
         .filter(|name| seen.insert(name.clone()))
         .collect()
 }
+/// Which of vanilla's features vanilla's own biomes place before which, in
+/// each step (fork `afterwinter`). A mod's biome lists vanilla's features in
+/// the order vanilla's helpers gave them in the version it was made for; where
+/// the game's vanilla moved one (26.3 places pumpkins before sugar cane, 1.21.1
+/// after), vanilla's feature sorter would find the two orders a cycle and
+/// refuse the dimension. A mod built against this vanilla would list them as
+/// vanilla does now, so mods' biomes take vanilla's order where vanilla has
+/// one; features vanilla leaves unordered, and the mod's own, stay where the
+/// mod put them.
+struct VanillaOrder {
+    /// (step, feature) → every (step, feature) vanilla places after it.
+    after: BTreeMap<(usize, String), BTreeSet<(usize, String)>>,
+}
+impl VanillaOrder {
+    fn new(biomes: &[Vec<Vec<String>>]) -> Self {
+        let mut next: BTreeMap<(usize, String), BTreeSet<(usize, String)>> = BTreeMap::new();
+        for steps in biomes {
+            let flat: Vec<(usize, String)> = steps
+                .iter()
+                .enumerate()
+                .flat_map(|(i, step)| step.iter().map(move |f| (i, f.clone())))
+                .collect();
+            for f in &flat {
+                next.entry(f.clone()).or_default();
+            }
+            for pair in flat.windows(2) {
+                next.entry(pair[0].clone())
+                    .or_default()
+                    .insert(pair[1].clone());
+            }
+        }
+        // Everything reachable from each feature; vanilla's graph has no cycle.
+        let mut after = BTreeMap::new();
+        for start in next.keys() {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![start.clone()];
+            while let Some(at) = stack.pop() {
+                for n in next.get(&at).into_iter().flatten() {
+                    if seen.insert(n.clone()) {
+                        stack.push(n.clone());
+                    }
+                }
+            }
+            after.insert(start.clone(), seen);
+        }
+        VanillaOrder { after }
+    }
+    fn precedes(&self, step: usize, a: &str, b: &str) -> bool {
+        self.after
+            .get(&(step, a.to_owned()))
+            .is_some_and(|later| later.contains(&(step, b.to_owned())))
+    }
+    /// Step `step` of a mod's biome, its vanilla features in an order vanilla
+    /// agrees with: in the mod's order, each next one the earliest that no
+    /// other left must precede. The mod's own features keep their places.
+    fn follow(&self, step: usize, features: &mut [String]) {
+        let places: Vec<usize> = (0..features.len())
+            .filter(|&i| self.after.contains_key(&(step, features[i].clone())))
+            .collect();
+        let mut left: Vec<String> = places.iter().map(|&i| features[i].clone()).collect();
+        for &place in &places {
+            let pick = (0..left.len())
+                .find(|&i| {
+                    !left
+                        .iter()
+                        .enumerate()
+                        .any(|(j, other)| j != i && self.precedes(step, other, &left[i]))
+                })
+                .unwrap_or(0);
+            features[place] = left.remove(pick);
+        }
+    }
+}
+
 impl Decoration {
     pub(super) fn new(
         data: &Arc<GeneratorData>,
@@ -182,15 +263,12 @@ impl Decoration {
             })
         };
         let mut biome_features = vec![BTreeSet::new(); data.biome_names().len()];
-        let mut plan = Vec::new();
-        for name in possible_biomes(source) {
-            let id = data
-                .biome_id(&name)
-                .ok_or_else(|| resource(format!("unknown biome {name}")))?;
+        // Each biome's steps by name: vanilla's biomes, for the order mods'
+        // copies of vanilla's features follow, and the source's.
+        let steps_of = |id: BiomeId| -> Result<Vec<Vec<String>>, GeneratorError> {
             let json: Value = serde_json::from_str(data.biome_json(id))?;
             let mut steps = Vec::new();
             for step in json["features"].as_array().into_iter().flatten() {
-                let mut list = Vec::new();
                 let entries = match step {
                     Value::String(tag) if tag.starts_with('#') => tags
                         .get(&super::tags::identifier(&tag[1..])?)
@@ -207,8 +285,39 @@ impl Decoration {
                         .collect::<Result<_, _>>()?,
                     _ => return Err(resource("biome feature step")),
                 };
-                for entry in entries {
-                    let feature = identity(&super::tags::identifier(&entry)?);
+                steps.push(
+                    entries
+                        .iter()
+                        .map(|e| super::tags::identifier(e))
+                        .collect::<Result<_, _>>()?,
+                );
+            }
+            Ok(steps)
+        };
+        let vanilla = data
+            .biome_names()
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| name.starts_with("minecraft:"))
+            .map(|(i, _)| steps_of(BiomeId(i as u32)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let before = VanillaOrder::new(&vanilla);
+        let mut plan = Vec::new();
+        for name in possible_biomes(source) {
+            let id = data
+                .biome_id(&name)
+                .ok_or_else(|| resource(format!("unknown biome {name}")))?;
+            let mut named = steps_of(id)?;
+            if !name.starts_with("minecraft:") {
+                for (i, step) in named.iter_mut().enumerate() {
+                    before.follow(i, step);
+                }
+            }
+            let mut steps = Vec::new();
+            for step in named {
+                let mut list = Vec::new();
+                for entry in step {
+                    let feature = identity(&entry);
                     list.push(feature);
                     biome_features[id.0 as usize].insert(feature);
                 }
@@ -1226,4 +1335,77 @@ fn block_of(nbt: &crate::nbt::Compound) -> Option<[i32; 3]> {
         Some(crate::nbt::Tag::Double(b)) => f64::from_bits(*b).floor() as i32,
         _ => 0,
     }))
+}
+
+#[cfg(test)]
+mod vanilla_order_tests {
+    use super::VanillaOrder;
+
+    fn steps(lists: &[&[&str]]) -> Vec<Vec<String>> {
+        lists
+            .iter()
+            .map(|l| l.iter().map(|s| (*s).to_owned()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_mod_biome_follows_vanilla_where_vanilla_moved_a_feature() {
+        // 26.3's vanilla: pumpkins before sugar cane; 1.21.1's (Biomes O' Plenty's wetland): after.
+        let vanilla = [
+            steps(&[
+                &[],
+                &[
+                    "minecraft:patch_pumpkin",
+                    "minecraft:patch_sugar_cane",
+                    "minecraft:seagrass",
+                ],
+            ]),
+            steps(&[&[], &["minecraft:trees_plains", "minecraft:patch_pumpkin"]]),
+            steps(&[&[], &["minecraft:lone"]]),
+        ];
+        let order = VanillaOrder::new(&vanilla);
+        let mut wetland: Vec<String> = [
+            "bop:wetland_trees",
+            "minecraft:patch_sugar_cane",
+            "bop:cattail",
+            "minecraft:patch_pumpkin",
+            "minecraft:flower_default",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        order.follow(1, &mut wetland);
+        assert_eq!(
+            wetland,
+            [
+                "bop:wetland_trees",
+                "minecraft:patch_pumpkin",
+                "bop:cattail",
+                "minecraft:patch_sugar_cane",
+                "minecraft:flower_default",
+            ]
+        );
+        // Another step, or features vanilla leaves unordered, stay as written.
+        let mut other =
+            steps(&[&["minecraft:patch_sugar_cane", "minecraft:patch_pumpkin"]]).remove(0);
+        order.follow(0, &mut other);
+        assert_eq!(
+            other,
+            ["minecraft:patch_sugar_cane", "minecraft:patch_pumpkin"]
+        );
+        let mut loose = steps(&[&[
+            "minecraft:seagrass",
+            "minecraft:lone",
+            "minecraft:trees_plains",
+        ]])
+        .remove(0);
+        order.follow(1, &mut loose);
+        assert_eq!(
+            loose,
+            [
+                "minecraft:lone",
+                "minecraft:trees_plains",
+                "minecraft:seagrass"
+            ]
+        );
+    }
 }

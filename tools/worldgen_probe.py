@@ -5,6 +5,7 @@
     worldgen_probe.py run ROW [--seed N] [--order K] [--radius R] --accept-eula
     worldgen_probe.py list                                    the rows of tools/worldgen_matrix.toml
     worldgen_probe.py horizon [ROWS] [--tag T]                Horizon's generator on the same rows, compared
+    worldgen_probe.py regions CLIMATE.json OUT                a run's TerraBlender regions as data files
 
 `horizon` runs crates/horizon-world/examples/worldgen_probe.rs on the 26.3 resources, plus each row's
 mods as horizon-port-pack carried them (HORIZON_PORT_WORK: a port work folder with mods/<id>/carry/),
@@ -20,6 +21,7 @@ owns the game passes. Output: .local/worldgen-probe/<row>/seed-<seed>-order-<k>.
 shipped or committed; the jars stay the player's own.
 """
 import argparse
+import collections
 import io
 import json
 import os
@@ -187,7 +189,8 @@ def run(args):
             'horizon.probe.out': out, 'horizon.probe.radius': args.radius,
             'horizon.probe.cx': args.cx, 'horizon.probe.cz': args.cz,
             'horizon.probe.starts_radius': getattr(args, 'starts_radius', 0),
-            'horizon.probe.climate_radius': getattr(args, 'climate_radius', 0)}, timeout=args.timeout)
+            'horizon.probe.climate_radius': getattr(args, 'climate_radius', 0),
+            'horizon.probe.climate_step': getattr(args, 'climate_step', 16)}, timeout=args.timeout)
     except subprocess.TimeoutExpired:
         sys.exit(f'timed out after {args.timeout} s (server log: {run_dir / "server.log"})')
     if error.exists():
@@ -330,6 +333,69 @@ def compare_starts(name, seed, theirs, mine, mods, work):
     return f'| {name} | {seed} | {verdict} | {"; ".join(parts)} |'
 
 
+REGION_INSIDE = 0.995   # share of wide samples whose Horizon biome must be one of the regions' picks
+                        # (the rest: 26.3's new vanilla biomes, which the 1.21.1 dump's lists lack)
+
+
+def compare_regions(name, binary, resources):
+    """A row whose mods split the Overworld into climate regions (docs/research/climate-regions.md):
+    which region a place belongs to is Horizon's own, so biomes compare over a wide area, against
+    every NeoForge run with a climate dump (--climate-radius). Within a region a biome is exact: at
+    NeoForge's climate, Horizon's biome must be one of the regions' picks. Over the area, the biome
+    shares may differ by no more than NeoForge's own runs differ from each other."""
+    try:
+        import numpy as np
+    except ImportError:
+        return [f'| {name} | - | skipped: the wide comparison needs numpy | | |']
+    dumps = {int(p.name.split('-')[1]): p for p in (OUT / name).glob('seed-*-order-0.climate.json')}
+    if not dumps:
+        return []
+    lines, shares = [], {}
+    for seed, path in sorted(dumps.items()):
+        neo = json.loads(path.read_text())
+        step = neo.get('step', 16)
+        radius = max(abs(s[0]) for s in neo['samples']) // 16
+        out = OUT / 'horizon' / name / f'wide-{seed}.json'
+        subprocess.run([str(binary), str(resources), str(out), '--seed', str(seed), '--radius', '0',
+                        '--climate', str(radius), str(step)], check=True, cwd=ROOT, capture_output=True)
+        mine = {(x, z): b for x, z, b in json.loads(out.with_suffix('.climate.json').read_text())['samples']}
+        regions = []
+        for r in neo['regions']:
+            p = r['points']
+            regions.append((np.array([[q['parameters'][i][0] for i in range(6)] for q in p], dtype=np.int64),
+                            np.array([[q['parameters'][i][1] for i in range(6)] for q in p], dtype=np.int64),
+                            np.array([q['parameters'][6] for q in p], dtype=np.int64), [q['biome'] for q in p]))
+        inside = 0
+        theirs, ours = collections.Counter(), collections.Counter()
+        for x, z, biome, *climate in neo['samples']:
+            t = np.array(climate, dtype=np.int64)
+            picks = set()
+            for lo, hi, off, names in regions:
+                d = ((np.maximum(lo - t, 0) + np.maximum(t - hi, 0)) ** 2).sum(axis=1) + off ** 2
+                picks.add(names[int(np.argmin(d))])
+            inside += mine[(x, z)] in picks
+            theirs[biome] += 1
+            ours[mine[(x, z)]] += 1
+        n = len(neo['samples'])
+        tv = 0.5 * sum(abs(theirs[k] - ours[k]) for k in theirs | ours) / n
+        extent = (radius, step)
+        shares.setdefault(extent, []).append(theirs)
+        lines.append((seed, n, inside, tv, extent))
+    # NeoForge against itself: the largest difference between two of its runs over the same extent
+    # (a small square holds a few regions' patches, so its shares say little).
+    def spread(runs):
+        return max((0.5 * sum(abs(a[k] / sum(a.values()) - b[k] / sum(b.values())) for k in a | b)
+                    for i, a in enumerate(runs) for b in runs[i + 1:]), default=None)
+    table = []
+    for seed, n, inside, tv, extent in lines:
+        spread_ = spread(shares[extent])
+        ok = inside >= REGION_INSIDE * n and (spread_ is None or tv <= spread_)
+        against = (f'{100 * tv:.2f} % (NeoForge\'s runs: {100 * spread_:.2f} %)' if spread_ is not None
+                   else f'not compared ({extent[0] * 32 / 1000:.0f} km square: one run)')
+        table.append(f'| {name} | {seed} | {"yes" if ok else "NO"} | {inside}/{n} ({100 * inside / n:.2f} %) | {against} |')
+    return table
+
+
 def horizon(args):
     """Horizon's generator on the rows, against the NeoForge runs already in .local/worldgen-probe/."""
     import lab
@@ -340,7 +406,7 @@ def horizon(args):
     subprocess.run(['cargo', 'build', '--release', '-q', '-p', 'horizon-mods', '--features', 'world', '--example', 'worldgen_probe'],
                    check=True, cwd=ROOT)
     binary = lab.cargo_target() / 'release' / 'examples' / 'worldgen_probe'
-    lines, wide_lines, failed = [], [], False
+    lines, wide_lines, region_lines, failed = [], [], [], False
     for row in wanted:
         name, mods = row['name'], row.get('mods', [])
         if row.get('preset', 'minecraft:normal') != 'minecraft:normal':
@@ -350,7 +416,12 @@ def horizon(args):
         if missing := [mod for mod, d in zip(mods, data) if not d.is_dir()]:
             lines.append(f'| {name} | - | not carried: {", ".join(missing)} (horizon-port-pack carry) | | | |')
             continue
-        resources = layout.overlay(f'worldgen-{name}', data) if mods else lab.RESOURCES
+        resources = layout.overlay(f'worldgen-{name}', data, WORLDGEN_BUNDLES) if mods else lab.RESOURCES
+        regions = (resources / 'worldgen' / 'climate_regions.json').exists() and \
+            json.loads((resources / 'worldgen' / 'climate_regions.json').read_text())
+        if regions:
+            region_lines += compare_regions(name, binary, resources)
+            failed |= any('| NO |' in line for line in region_lines)
         for seed in m.get('seeds', [1]):
             out = OUT / 'horizon' / name / f'seed-{seed}.json'
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -362,7 +433,7 @@ def horizon(args):
                 lines.append(f'| {name} | {seed} | FAILED: {why} | | | |')
                 continue
             refs = sorted(r for r in (OUT / name).glob(f'seed-{seed}-order-*.json')
-                          if not r.name.endswith('.starts.json'))
+                          if not r.name.endswith(('.starts.json', '.climate.json')))
             if not refs:
                 lines.append(f'| {name} | {seed} | no NeoForge run to compare with | | | |')
                 continue
@@ -396,7 +467,8 @@ def horizon(args):
                 near = min(theirs, key=lambda t: abs(t - mine))
                 if max(mine, near):
                     worst = max(worst, 100 * abs(mine - near) / max(mine, near))
-            ok = (base == cols and not starts and cols - biomes <= BIOME_TOLERANCE * cols
+            # With climate regions, biomes compare over a wide area instead (compare_regions).
+            ok = (base == cols and not starts and (regions or cols - biomes <= BIOME_TOLERANCE * cols)
                   and worst <= DECORATION_TOLERANCE)
             failed |= not ok
             where = f'; starts differ in {starts[:4]}' if starts else ''
@@ -407,11 +479,50 @@ def horizon(args):
     if wide_lines:
         table += ['', '| row | seed | mod starts match | per namespace: both / NeoForge only / Horizon only |',
                   '|---|---:|---|---|', *wide_lines]
+    if region_lines:
+        table += ['', '| row | seed | regions as NeoForge\'s | biomes within the regions\' picks | biome shares differ by |',
+                  '|---|---:|---|---:|---:|', *region_lines]
     tag = args.tag or 'horizon'
     (OUT / f'{tag}.md').write_text('\n'.join(table) + '\n')
     print('\n'.join(table))
     if failed:
         sys.exit('Horizon differs from NeoForge beyond the tolerances in at least one row')
+
+
+# What a worldgen row's carried mods add, by worldgen folder: the bundle the game's mod_content.rs
+# merges it into.
+WORLDGEN_BUNDLES = {'structure': 'structures', 'structure_set': 'structure_sets', 'template_pool': 'template_pools',
+                    'processor_list': 'processor_lists', 'biome': 'biomes', 'configured_carver': 'carvers',
+                    'configured_feature': 'features', 'placed_feature': 'placed_features',
+                    'horizon_climate_region': 'climate_regions'}
+# TerraBlender's region types, and the vanilla parameter list each splits.
+REGION_PRESETS = {'overworld': 'minecraft:overworld', 'nether': 'minecraft:nether'}
+
+
+def regions(args):
+    """The mods' climate regions a run observed (`--climate-radius`), as the data files Horizon reads
+    (docs/research/climate-regions.md): OUT/data/<ns>/worldgen/horizon_climate_region/<path>.json, each
+    {"preset", "weight", "biomes": [{"coordinates", "offset", "biome"}]} in quantized climate units.
+    Vanilla's own region is the preset itself and is not written."""
+    dump = json.loads(Path(args.climate).read_text())
+    written = 0
+    for region in dump['regions']:
+        if 'error' in region:
+            sys.exit(f'the run could not read the regions: {region["error"]}')
+        name = region['name']
+        if name.startswith('minecraft:'):
+            continue
+        ns, path = name.split(':', 1)
+        biomes = [{'coordinates': [list(c) for c in p['parameters'][:6]], 'offset': p['parameters'][6],
+                   'biome': p['biome']} for p in region['points']]
+        out = Path(args.out) / 'data' / ns / 'worldgen' / 'horizon_climate_region' / f'{path}.json'
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({'preset': REGION_PRESETS[args.type], 'weight': region['weight'],
+                                   'biomes': biomes}, separators=(',', ':')))
+        print(f'{name}: weight {region["weight"]}, {len(biomes)} points -> {out}')
+        written += 1
+    if not written:
+        sys.exit('no mod regions in this run')
 
 
 def main():
@@ -427,7 +538,9 @@ def main():
     r.add_argument('--cx', type=int, default=0)
     r.add_argument('--cz', type=int, default=0)
     r.add_argument('--climate-radius', type=int, default=0,
-                   help='also sample climate and biome every 16 blocks this far out (chunks), and dump TerraBlender regions')
+                   help='also sample climate and biome this far out (chunks), and dump TerraBlender regions')
+    r.add_argument('--climate-step', type=int, default=16,
+                   help='blocks between climate samples (default 16)')
     r.add_argument('--starts-radius', type=int, default=0,
                    help='also list every structure start this far out (chunks), from STRUCTURE_STARTS only')
     r.add_argument('--timeout', type=int, default=1800)
@@ -435,6 +548,10 @@ def main():
     hz = sub.add_parser('horizon', help="Horizon's generator on the rows, against the NeoForge runs")
     hz.add_argument('rows', nargs='*')
     hz.add_argument('--tag')
+    rg = sub.add_parser('regions', help="a run's TerraBlender regions as Horizon's climate region files")
+    rg.add_argument('climate', help='a run\'s .climate.json')
+    rg.add_argument('out', help='the mod\'s carried folder (files go under data/)')
+    rg.add_argument('--type', choices=sorted(REGION_PRESETS), default='overworld')
     mx = sub.add_parser('matrix', help='every row x seed x load order, then the determinism check')
     mx.add_argument('rows', nargs='*', help='only these rows (default: all)')
     mx.add_argument('--tag', default='', help='name of the summary files (default: summary)')
@@ -455,6 +572,8 @@ def main():
         matrix(a)
     elif a.cmd == 'horizon':
         horizon(a)
+    elif a.cmd == 'regions':
+        regions(a)
     else:
         run(a)
 

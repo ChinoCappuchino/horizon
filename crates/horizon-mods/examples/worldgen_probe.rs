@@ -4,7 +4,7 @@
 //! generator, so the two can be compared chunk by chunk.
 //!
 //! worldgen_probe <client resource dir> <out.json> [--seed S] [--radius R]
-//!     [--center CX CZ] [--preset ID] [--starts-radius N]
+//!     [--center CX CZ] [--preset ID] [--starts-radius N] [--climate RADIUS STEP]
 //!     [--mod <file.hmod> [--settings JSON]]
 //!
 //! With `--mod`, the world-generation mod provides the terrain and biomes of
@@ -109,6 +109,7 @@ fn main() -> Result<(), Error> {
     let (mut seed, mut radius, mut center) = (1i64, 4i32, (0, 0));
     let mut preset = String::from("minecraft:normal");
     let mut starts_radius = 0i32;
+    let mut climate = (0i32, 16i32);
     let mut mod_path: Option<PathBuf> = None;
     let mut settings = String::new();
     while let Some(arg) = args.next() {
@@ -119,6 +120,7 @@ fn main() -> Result<(), Error> {
             "--center" => center = (next()?.parse()?, next()?.parse()?),
             "--preset" => preset = next()?,
             "--starts-radius" => starts_radius = next()?.parse()?,
+            "--climate" => climate = (next()?.parse()?, next()?.parse()?),
             "--mod" => mod_path = Some(PathBuf::from(next()?)),
             "--settings" => settings = next()?,
             _ => return Err(format!("unknown argument {arg}").into()),
@@ -334,6 +336,27 @@ fn main() -> Result<(), Error> {
         let path = out.with_extension("starts.json");
         std::fs::write(&path, serde_json::to_string(&all)?)?;
         println!("wrote {} structure starts to {}", all.len(), path.display());
+    }
+    if climate.0 > 0 {
+        // The biome every STEP blocks over a wide square, at quart y 16, as the
+        // Java probe's --climate-radius samples it: [x, z, biome] rows.
+        let (r, step) = (climate.0, climate.1.max(4));
+        let mut rows = Vec::new();
+        for z in ((center.1 - r) * 16..=(center.1 + r) * 16).step_by(step as usize) {
+            let xs: Vec<i32> = ((center.0 - r) * 16..=(center.0 + r) * 16)
+                .step_by(step as usize)
+                .collect();
+            let quarts: Vec<[i32; 3]> = xs.iter().map(|&x| [x >> 2, 16, z >> 2]).collect();
+            for (x, b) in xs.iter().zip(worker.noise_biomes(&quarts)) {
+                rows.push(json!([x, z, b.unwrap_or_else(|| "?".into())]));
+            }
+        }
+        let path = out.with_extension("climate.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&json!({"step": step, "samples": rows}))?,
+        )?;
+        println!("wrote {} biome samples to {}", rows.len(), path.display());
     }
     println!(
         "wrote {} chunks to {}",

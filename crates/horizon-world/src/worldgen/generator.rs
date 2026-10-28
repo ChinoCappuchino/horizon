@@ -14,9 +14,9 @@ use super::{
         AquiferConfig, AquiferField, AquiferSamplers, DisabledAquifer, GlobalFluidPicker,
         NoiseBasedAquifer, RegistryAquiferBlockStates,
     },
-    biome::BiomeId,
+    biome::{BiomeId, MultiNoiseBiomeSource},
     biome_chunk::{BiomeChunk, BiomeRegion},
-    biome_source::{BiomeSourceCatalog, ResolvedBiomeSource},
+    biome_source::{BiomeSourceCatalog, BiomeSourceDefinition, ResolvedBiomeSource},
     biome_temperature::{BiomeTemperature, BiomeTemperatureSettings},
     carver::{CarverCatalog, WorldCarver, generate_carving_mask},
     carving::{CarvingBlocks, apply_carving_mask},
@@ -171,6 +171,10 @@ pub struct GeneratorData {
     /// Dimension types beyond vanilla's (`dimension_types.json`, from mods'
     /// `data/<ns>/dimension_type/`): id → the type's JSON text.
     dimension_types: BTreeMap<String, String>,
+    /// Climate regions (fork `afterwinter`, `climate_regions.json`): by the
+    /// preset whose biomes they split, each region's (id, weight, quantized
+    /// parameter list), in id order.
+    climate_regions: BTreeMap<String, Vec<(String, u32, String)>>,
     conditions: MaterialConditionRegistry,
     source_catalog: BiomeSourceCatalog,
     biome_names: Vec<Arc<str>>,
@@ -208,6 +212,41 @@ fn read_optional_bundle(dir: &Path, name: &str) -> Result<Option<Bundle>, Genera
     } else {
         Ok(None)
     }
+}
+/// Climate regions by the preset they split (fork `afterwinter`): each file
+/// `{"preset": id, "weight": n, "biomes": [quantized entries]}`, as the
+/// worldgen probe observes a TerraBlender region. Entries naming a biome
+/// the registry lacks (a mod that is not installed) are left out, and a
+/// region left with none with them.
+fn read_climate_regions(
+    raw: &Bundle,
+    biomes: &Bundle,
+) -> Result<BTreeMap<String, Vec<(String, u32, String)>>, GeneratorError> {
+    let mut out: BTreeMap<String, Vec<(String, u32, String)>> = BTreeMap::new();
+    for (id, json) in raw {
+        let v: Value = serde_json::from_str(json)?;
+        let bad = |what: &str| resource(format!("climate region {id}: {what}"));
+        let preset = v["preset"].as_str().ok_or_else(|| bad("preset"))?;
+        let weight = v["weight"]
+            .as_u64()
+            .and_then(|w| u32::try_from(w).ok())
+            .ok_or_else(|| bad("weight"))?;
+        let entries: Vec<&Value> = v["biomes"]
+            .as_array()
+            .ok_or_else(|| bad("biomes"))?
+            .iter()
+            .filter(|e| e["biome"].as_str().is_some_and(|b| biomes.contains_key(b)))
+            .collect();
+        if entries.is_empty() {
+            continue;
+        }
+        out.entry(preset.to_owned()).or_default().push((
+            id.clone(),
+            weight,
+            serde_json::to_string(&entries)?,
+        ));
+    }
+    Ok(out)
 }
 fn build_tags(
     raw: &Bundle,
@@ -419,6 +458,10 @@ impl GeneratorData {
         let source_catalog =
             BiomeSourceCatalog::new(&biome_set, &biome_tags, &presets.keys().cloned().collect())?;
         let carvers = CarverCatalog::from_json(&read_bundle(dir, "carvers")?)?;
+        let climate_regions = read_climate_regions(
+            &read_optional_bundle(dir, "climate_regions")?.unwrap_or_default(),
+            &biomes,
+        )?;
         let mut biome_names = Vec::new();
         let mut biome_ids = BTreeMap::new();
         let mut biome_json = Vec::new();
@@ -481,6 +524,7 @@ impl GeneratorData {
             settings: read_bundle(dir, "settings")?,
             world_presets: read_bundle(dir, "world_presets")?,
             dimension_types: read_optional_bundle(dir, "dimension_types")?.unwrap_or_default(),
+            climate_regions,
             presets,
             conditions,
             source_catalog,
@@ -603,6 +647,42 @@ impl GeneratorData {
     }
     pub fn biome_id(&self, name: &str) -> Option<BiomeId> {
         self.biome_ids.get(name).copied()
+    }
+    /// A preset's biomes split by the climate regions that name it, with the
+    /// preset's own list as the first region; any other source as it is.
+    fn with_climate_regions(
+        &self,
+        definition: &BiomeSourceDefinition,
+        source: ResolvedBiomeSource,
+        seed: i64,
+    ) -> Result<ResolvedBiomeSource, GeneratorError> {
+        use super::biome_source::regions::{ClimateRegions, VANILLA_WEIGHT};
+        let (BiomeSourceDefinition::Preset { name, .. }, ResolvedBiomeSource::MultiNoise(own)) =
+            (definition, &source)
+        else {
+            return Ok(source);
+        };
+        let Some(regions) = self.climate_regions.get(name) else {
+            return Ok(source);
+        };
+        let ResolvedBiomeSource::MultiNoise(own) = source else {
+            unreachable!("matched above: {own:?}")
+        };
+        let mut lists = vec![(name.clone(), VANILLA_WEIGHT, own)];
+        for (id, weight, json) in regions {
+            let list = MultiNoiseBiomeSource::from_quantized_json(json)
+                .map_err(|e| resource(format!("climate region {id}: {e}")))?;
+            lists.push((id.clone(), *weight, list));
+        }
+        Ok(ResolvedBiomeSource::Regions(ClimateRegions::new(
+            seed, lists,
+        )))
+    }
+    /// The biome a sample that fails falls back to: plains, as vanilla's
+    /// registry defaults (ids follow the names' order, so with mods' biomes
+    /// the first id is not vanilla's).
+    pub fn fallback_biome(&self) -> BiomeId {
+        self.biome_id("minecraft:plains").unwrap_or(BiomeId(0))
     }
     /// The biome's resource JSON (climate, effects such as water/sky/foliage
     /// colors, attributes, carvers and features).
@@ -904,11 +984,17 @@ where
                 .collect::<Result<_, GeneratorError>>()?,
             _ => Vec::new(),
         };
-        let source = data
+        let definition = data
             .source_catalog
-            .decode(&generator["biome_source"].to_string())?
+            .decode(&generator["biome_source"].to_string())?;
+        let source = definition
             .resolve(&data.presets)
             .map_err(|e| resource(format!("biome source: {e}")))?;
+        let source = data.with_climate_regions(
+            &definition,
+            source,
+            root.from_hash_of("horizon:climate_regions").next_long(),
+        )?;
         let climate = router.climate_sampler();
         let mut noises = BTreeMap::new();
         for (name, json) in &data.noises {
@@ -1745,7 +1831,7 @@ where
                 .map(|&q| {
                     self.pipeline
                         .provided_biome(self.worker, q)
-                        .unwrap_or(BiomeId(0))
+                        .unwrap_or(self.pipeline.data.fallback_biome())
                 })
                 .collect();
         }
@@ -1760,7 +1846,7 @@ where
                     .sample(&mut self.worker.carver_context, quart)
                     .ok()
                     .and_then(|name| self.pipeline.data.biome_id(name))
-                    .unwrap_or(BiomeId(0))
+                    .unwrap_or(self.pipeline.data.fallback_biome())
             })
             .collect()
     }

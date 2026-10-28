@@ -8,7 +8,10 @@ use horizon_core::{
     position::ChunkPos,
     random::{LegacyRandom, RandomSource},
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[derive(Clone, Debug)]
 pub enum WorldCarver {
@@ -52,6 +55,9 @@ impl WorldCarver {
 /// supported; tagged sets and live registry reloads remain separate work.
 pub struct CarverCatalog {
     definitions: BTreeMap<String, Arc<WorldCarver>>,
+    /// Mods' carvers of a type written in Java (fork `afterwinter`): left out
+    /// of every biome's carvers, as a feature the game cannot run is.
+    unsupported: BTreeSet<String>,
 }
 impl CarverCatalog {
     pub fn from_json(definitions: &BTreeMap<String, String>) -> Result<Self, DecodeError> {
@@ -59,18 +65,28 @@ impl CarverCatalog {
             return Err(DecodeError::Field("carver registry size"));
         }
         let mut result = BTreeMap::new();
+        let mut unsupported = BTreeSet::new();
         for (name, json) in definitions {
             let name = identifier(name)?;
-            if result
-                .insert(name, Arc::new(WorldCarver::from_json(json)?))
-                .is_some()
-            {
+            let carver = match WorldCarver::from_json(json) {
+                Err(DecodeError::Field("world carver type")) if !name.starts_with("minecraft:") => {
+                    unsupported.insert(name);
+                    continue;
+                }
+                carver => carver?,
+            };
+            if result.insert(name, Arc::new(carver)).is_some() {
                 return Err(DecodeError::Field("duplicate carver name"));
             }
         }
         Ok(Self {
             definitions: result,
+            unsupported,
         })
+    }
+    /// The mods' carvers left out: their type is not one the game runs.
+    pub fn unsupported(&self) -> &BTreeSet<String> {
+        &self.unsupported
     }
     pub fn decode_set(&self, json: &str) -> Result<Vec<Arc<WorldCarver>>, DecodeError> {
         use serde_json::value::RawValue;
@@ -85,15 +101,23 @@ impl CarverCatalog {
         }
         entries
             .iter()
-            .map(|raw| {
+            .filter_map(|raw| {
                 if let Ok(name) = serde_json::from_str::<String>(raw.get()) {
-                    let name = identifier(&name)?;
-                    self.definitions
-                        .get(&name)
-                        .cloned()
-                        .ok_or_else(|| DecodeError::Registry(format!("unknown carver {name}")))
+                    let name = match identifier(&name) {
+                        Ok(name) => name,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    if self.unsupported.contains(&name) {
+                        return None;
+                    }
+                    Some(
+                        self.definitions
+                            .get(&name)
+                            .cloned()
+                            .ok_or_else(|| DecodeError::Registry(format!("unknown carver {name}"))),
+                    )
                 } else {
-                    Ok(Arc::new(WorldCarver::from_json(raw.get())?))
+                    Some(WorldCarver::from_json(raw.get()).map(Arc::new))
                 }
             })
             .collect()

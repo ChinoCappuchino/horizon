@@ -688,9 +688,13 @@ const BIOME_TAGS: &str = "worldgen/biome_tags.json";
 /// Worldgen registries a content mod may add to, and the bundle the
 /// worldgen loader reads each from (id → the file's text): what structure
 /// mods hold, and the world presets of world-generation mods (fork
-/// `afterwinter`: a preset whose terrain a mod provides). Biomes, noise and
-/// density functions change the terrain and are not read from mods.
-const WORLDGEN_BUNDLES: [(&str, &str); 7] = [
+/// `afterwinter`: a preset whose terrain a mod provides; mods' biomes and
+/// their carvers, which climate regions place, docs/research/climate-regions.md).
+/// Noise and density functions change the terrain and are not read from mods.
+const WORLDGEN_BUNDLES: [(&str, &str); 10] = [
+    ("biome", "worldgen/biomes.json"),
+    ("horizon_climate_region", CLIMATE_REGIONS),
+    ("configured_carver", "worldgen/carvers.json"),
     ("structure", "worldgen/structures.json"),
     ("structure_set", "worldgen/structure_sets.json"),
     ("template_pool", "worldgen/template_pools.json"),
@@ -705,6 +709,9 @@ pub const PRESET_SETTINGS: &str = "worldgen/preset_settings.json";
 /// Mods' dimension types (`data/<ns>/dimension_type/`, outside `worldgen/`),
 /// for their presets' heights: a bundle the prepared resources don't have.
 const DIMENSION_TYPES: &str = "worldgen/dimension_types.json";
+/// Mods' climate regions (`data/<ns>/worldgen/horizon_climate_region/`, fork
+/// `afterwinter`, docs/research/climate-regions.md): a bundle vanilla lacks.
+const CLIMATE_REGIONS: &str = "worldgen/climate_regions.json";
 
 /// A mod file that adds to a worldgen bundle: (bundle, id).
 fn worldgen_entry(file: &str) -> Option<(&'static str, String)> {
@@ -900,7 +907,12 @@ struct Known {
     tag_files: std::collections::BTreeSet<String>,
 }
 impl Known {
-    fn new(base: &Path, plan: &Plan, tags: &BTreeMap<String, TagMerge>) -> Result<Self> {
+    fn new(
+        base: &Path,
+        plan: &Plan,
+        tags: &BTreeMap<String, TagMerge>,
+        mod_biomes: impl IntoIterator<Item = String>,
+    ) -> Result<Self> {
         let mut blocks: std::collections::BTreeSet<String> =
             plan.defaults.keys().cloned().collect();
         blocks.extend(plan.blocks.iter().map(|b| b.decl.id.clone()));
@@ -918,10 +930,12 @@ impl Known {
                 false => Default::default(),
             })
         };
+        let mut biomes = keys("worldgen/biomes.json")?;
+        biomes.extend(mod_biomes);
         Ok(Known {
             blocks,
             items,
-            biomes: keys("worldgen/biomes.json")?,
+            biomes,
             biome_tags: keys(BIOME_TAGS)?,
             tag_files: tags.keys().cloned().collect(),
         })
@@ -1147,7 +1161,12 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     // A tag naming an id nobody registers fails as a whole in vanilla, and
     // carried-over mods name blocks left out or other mods' ids: such
     // entries are dropped instead, so the rest of the tag holds.
-    let known = Known::new(base, &plan, &tags)?;
+    let mod_biomes = worldgen
+        .get("worldgen/biomes.json")
+        .into_iter()
+        .flatten()
+        .map(|(id, _)| id.clone());
+    let known = Known::new(base, &plan, &tags, mod_biomes)?;
     for (file, merge) in &mut tags {
         merge.values.retain(|v| known.keeps(file, v));
     }
@@ -1244,8 +1263,8 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     for (bundle, entries) in &worldgen {
         let mut doc = match base.join(bundle).exists() {
             true => read_json(&base.join(bundle))?,
-            // Only the dimension types start empty: the others need the base.
-            false if *bundle == DIMENSION_TYPES => J::Obj(Vec::new()),
+            // Only the bundles vanilla lacks start empty: the others need the base.
+            false if [DIMENSION_TYPES, CLIMATE_REGIONS].contains(bundle) => J::Obj(Vec::new()),
             false => continue,
         };
         for (id, text) in entries {

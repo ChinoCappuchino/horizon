@@ -131,7 +131,7 @@ public final class WorldgenProbe {
     /**
      * The overworld's climate and biomes over a wide square, and the climate regions other mods
      * registered with TerraBlender, read through its public API (by reflection: the probe neither
-     * depends on it nor reads its code). Samples every 16 blocks at y 64 (quart y 16): the six
+     * depends on it nor reads its code). Samples every {@code climate_step} blocks (16 unless set) at y 64 (quart y 16): the six
      * climate values of the noise sampler and the biome the biome source picks there.
      */
     private static void writeClimate(ServerLevel level, JsonWriter json, int radius, int cx0, int cz0)
@@ -185,9 +185,11 @@ public final class WorldgenProbe {
         json.endArray();
         net.minecraft.world.level.biome.Climate.Sampler sampler = level.getChunkSource().randomState().sampler();
         net.minecraft.world.level.biome.BiomeSource source = level.getChunkSource().getGenerator().getBiomeSource();
+        int step = Math.max(4, Integer.getInteger("horizon.probe.climate_step", 16));
+        json.name("step").value(step);
         json.name("samples").beginArray();
-        for (int z = (cz0 - radius) * 16; z <= (cz0 + radius) * 16; z += 16) {
-            for (int x = (cx0 - radius) * 16; x <= (cx0 + radius) * 16; x += 16) {
+        for (int z = (cz0 - radius) * 16; z <= (cz0 + radius) * 16; z += step) {
+            for (int x = (cx0 - radius) * 16; x <= (cx0 + radius) * 16; x += step) {
                 int qx = x >> 2, qy = 16, qz = z >> 2;
                 net.minecraft.world.level.biome.Climate.TargetPoint t = sampler.sample(qx, qy, qz);
                 json.beginArray().value(x).value(z)

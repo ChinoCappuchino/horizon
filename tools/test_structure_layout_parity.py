@@ -148,15 +148,19 @@ def carry(profile, mods, carried, packs=None):
     return data
 
 
-def overlay(profile, data_dirs):
-    """The 26.3 resources plus the carried structure data, in a folder the probe reads as its resources."""
+def overlay(profile, data_dirs, bundles=None):
+    """The 26.3 resources plus the carried structure data, in a folder the probe reads as its resources.
+    `bundles` (worldgen folder -> bundle) widens what is merged: the fork's worldgen probe also merges
+    biomes, carvers, features and climate regions; a bundle vanilla lacks starts empty."""
+    bundles = bundles or BUNDLES
     root = lab.LOCAL / 'structure-layout' / profile / 'resources'
     shutil.rmtree(root, ignore_errors=True)
     worldgen = root / 'worldgen'
     (worldgen / 'structure').mkdir(parents=True)
     (root / 'facts.json').symlink_to(lab.RESOURCES / 'facts.json')
     source = lab.RESOURCES / 'worldgen'
-    merged = {name: json.loads((source / f'{name}.json').read_text()) for name in [*BUNDLES.values(), 'biome_tags']}
+    merged = {name: json.loads((source / f'{name}.json').read_text()) if (source / f'{name}.json').exists() else {}
+              for name in [*bundles.values(), 'biome_tags']}
     additions = []
     for entry in source.iterdir():
         if entry.name != 'structure' and entry.stem not in merged:
@@ -173,12 +177,12 @@ def overlay(profile, data_dirs):
                 target = worldgen / 'structure' / namespace / Path(*parts[2:])
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.symlink_to(path)
-            elif path.suffix == '.json' and kind == 'worldgen' and parts[2] in BUNDLES:
+            elif path.suffix == '.json' and kind == 'worldgen' and parts[2] in bundles:
                 text = path.read_text()
                 if 'horizon:add_to' in text:
-                    additions.append((BUNDLES[parts[2]], json.loads(text)))
+                    additions.append((bundles[parts[2]], json.loads(text)))
                 else:
-                    merged[BUNDLES[parts[2]]][f'{namespace}:' + '/'.join(parts[3:])[:-5]] = text
+                    merged[bundles[parts[2]]][f'{namespace}:' + '/'.join(parts[3:])[:-5]] = text
             elif path.suffix == '.json' and parts[1:4] == ('tags', 'worldgen', 'biome'):
                 tag = f'{namespace}:' + '/'.join(parts[4:])[:-5]
                 value = json.loads(path.read_text())

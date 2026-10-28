@@ -943,3 +943,92 @@ fn a_worldgen_mods_preset_and_dimension_type_reach_the_generator() {
     assert!(data.world_preset_ids().any(|p| p == "minecraft:amplified"));
     fs::remove_dir_all(&scratch).unwrap();
 }
+
+/// A mod's biomes (fork `afterwinter`, docs/research/climate-regions.md): a
+/// biome, a carver of a type written in Java (left out of the biome's
+/// carvers), a biome tag naming the biome (the generator refuses a tag naming
+/// a biome it lacks) and a climate region placing it reach the generator, which then places the mod's biome in some regions and
+/// vanilla's in others.
+#[test]
+#[ignore = "full content root: CI and pr_ready run it"]
+fn a_mods_biomes_and_climate_regions_reach_the_generator() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch =
+        std::env::temp_dir().join(format!("horizon-biome-content-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let dir = scratch.join("glades");
+    let everywhere = r#"{"coordinates": [[-10000, 10000], [-10000, 10000], [-10000, 10000],
+        [-10000, 10000], [-10000, 10000], [-10000, 10000]], "offset": 0, "biome": "glades:glade"}"#;
+    let region =
+        format!(r#"{{"preset": "minecraft:overworld", "weight": 10, "biomes": [{everywhere}]}}"#);
+    let files: [(&str, &str); 5] = [
+        (
+            "horizon-mod.toml",
+            "id = \"glades\"\nname = \"Glades\"\nversion = \"1\"\napi = \"0.3\"\nside = \"server\"\n\
+             capabilities = [\"worldgen\"]\nexperimental = [\"worldgen\"]\n\
+             [worldgen]\nstages = [\"climate\"]\n",
+        ),
+        (
+            "data/glades/worldgen/biome/glade.json",
+            r##"{"temperature": 0.6, "downfall": 0.8, "has_precipitation": true,
+                "carvers": ["minecraft:cave", "glades:hollow"],
+                "effects": {"water_color": "#3f76e4"},
+                "attributes": {"minecraft:visual/sky_color": "#7ca4ff"},
+                "features": [[], ["minecraft:lake_lava_underground"]]}"##,
+        ),
+        (
+            "data/glades/worldgen/configured_carver/hollow.json",
+            r#"{"type": "glades:hollow", "config": {"probability": 0.1}}"#,
+        ),
+        (
+            "data/glades/tags/worldgen/biome/is_glade.json",
+            r#"{"values": ["glades:glade"]}"#,
+        ),
+        (
+            "data/glades/worldgen/horizon_climate_region/glades.json",
+            &region,
+        ),
+    ];
+    for (name, text) in files {
+        let path = dir.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let manifest =
+        horizon_mods::Manifest::parse(&fs::read_to_string(dir.join("horizon-mod.toml")).unwrap())
+            .unwrap();
+    let m = ContentMod {
+        id: "glades".into(),
+        content: Content::read(&dir, &manifest).unwrap(),
+    };
+    let root = resource_root(&base, std::slice::from_ref(&m), &scratch.join("cache")).unwrap();
+    let registry = Box::leak(Box::new(
+        horizon_world::level::data::load_registry(&root).unwrap(),
+    ));
+    let data =
+        horizon_world::worldgen::generator::GeneratorData::load(&root.join("worldgen"), registry)
+            .unwrap();
+    assert!(data.biome_id("glades:glade").is_some());
+    let generator = horizon_world::worldgen::generator::OverworldGenerator::for_dimension(
+        data,
+        42,
+        "minecraft:normal",
+        "minecraft:overworld",
+    )
+    .unwrap();
+    let mut worker = generator.worker();
+    // One sample per 576-block cell along a line: both kinds of region appear.
+    let quarts: Vec<[i32; 3]> = (0..64).map(|i| [i * 144, 16, i * 37]).collect();
+    let biomes = worker.noise_biomes(&quarts);
+    let glades = biomes
+        .iter()
+        .filter(|b| b.as_deref() == Some("glades:glade"))
+        .count();
+    assert!(
+        (10..54).contains(&glades),
+        "{glades} of 64 in the mod's region"
+    );
+    fs::remove_dir_all(&scratch).unwrap();
+}

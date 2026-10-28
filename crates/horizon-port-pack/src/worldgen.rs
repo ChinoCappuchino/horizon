@@ -424,6 +424,8 @@ fn upgrade_types(
             }
             changed
         }
+        // Fork `afterwinter`: mods' biomes in 26.3's shape.
+        "biome" => crate::biome::upgrade(v),
         _ => false,
     };
     report.mapped += usize::from(changed);

@@ -1,7 +1,7 @@
 //! World-bound biome sources and per-worker resolver state.
 use super::{
     BiomeSourceDefinition, CheckerboardBiomeSource, CheckerboardError, EndBiomeSource,
-    FixedBiomeSource,
+    FixedBiomeSource, regions::ClimateRegions,
 };
 use crate::worldgen::{
     DecodeError,
@@ -52,6 +52,8 @@ pub enum ResolvedBiomeSource {
     Checkerboard(CheckerboardBiomeSource<String>),
     End(EndBiomeSource<String>),
     MultiNoise(MultiNoiseBiomeSource),
+    /// Fork `afterwinter`: multi-noise lists split by climate regions.
+    Regions(ClimateRegions),
 }
 impl BiomeSourceDefinition {
     /// Resolve a decoded definition using immutable, authenticated quantized
@@ -104,6 +106,12 @@ impl ResolvedBiomeSource {
                 .iter()
                 .map(|(_, name)| name.as_str())
                 .collect(),
+            Self::Regions(source) => source
+                .regions()
+                .iter()
+                .flat_map(|(_, _, list)| list.parameters().entries())
+                .map(|(_, name)| name.as_str())
+                .collect(),
         }
     }
     /// Keep one resolver per worker to retain native previous-leaf tie behavior.
@@ -118,6 +126,14 @@ impl ResolvedBiomeSource {
             Self::Checkerboard(source) => BiomeSourceResolver::Checkerboard(source),
             Self::End(source) => BiomeSourceResolver::End(source, erosion),
             Self::MultiNoise(source) => BiomeSourceResolver::MultiNoise(source.resolver(climate)),
+            Self::Regions(source) => BiomeSourceResolver::Regions(
+                source,
+                source
+                    .regions()
+                    .iter()
+                    .map(|(_, _, list)| list.resolver(climate))
+                    .collect(),
+            ),
         }
     }
 }
@@ -127,6 +143,8 @@ pub enum BiomeSourceResolver<'a> {
     Checkerboard(&'a CheckerboardBiomeSource<String>),
     End(&'a EndBiomeSource<String>, &'a dyn DensitySampler),
     MultiNoise(BiomeResolver<'a>),
+    /// The regions, and one resolver per region's list.
+    Regions(&'a ClimateRegions, Vec<BiomeResolver<'a>>),
 }
 impl<'a> BiomeSourceResolver<'a> {
     pub fn sample(
@@ -139,6 +157,9 @@ impl<'a> BiomeSourceResolver<'a> {
             Self::Checkerboard(source) => source.noise_biome(quart)?.as_str(),
             Self::End(source, erosion) => source.noise_biome(quart, *erosion, context)?.as_str(),
             Self::MultiNoise(source) => source.sample(context, quart)?,
+            Self::Regions(regions, lists) => {
+                lists[regions.region_at(quart[0], quart[2])].sample(context, quart)?
+            }
         })
     }
     /// Native fixed/checkerboard/End sources do not pre-sample a climate volume.
@@ -151,6 +172,10 @@ impl<'a> BiomeSourceResolver<'a> {
     ) -> Result<Option<ClimateVolume>, BiomeSourceError> {
         match self {
             Self::MultiNoise(source) => Ok(Some(source.prepare_volume(context, minimum, extents)?)),
+            // Every region's list reads the same climate.
+            Self::Regions(_, lists) => {
+                Ok(Some(lists[0].prepare_volume(context, minimum, extents)?))
+            }
             _ => Ok(None),
         }
     }
@@ -164,6 +189,10 @@ impl<'a> BiomeSourceResolver<'a> {
             if let Some(volume) = volume {
                 return Ok(source.sample_prepared(volume, quart)?);
             }
+        }
+        if let (Self::Regions(regions, lists), Some(volume)) = (&mut *self, volume) {
+            let region = regions.region_at(quart[0], quart[2]);
+            return Ok(lists[region].sample_prepared(volume, quart)?);
         }
         self.sample(context, quart)
     }
