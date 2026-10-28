@@ -2,7 +2,7 @@
 //! aquifers, surface rules, carvers and placed features) to chunk streaming.
 use crate::{
     biome::Biomes,
-    chunk::{BIOME_STRATEGY, Chunk, HEIGHT, MIN_Y, SECTIONS, Section},
+    chunk::{BIOME_STRATEGY, Chunk, MIN_Y, Section},
     save::SavedProto,
     streaming::{ChunkGenerator, LodSampler, Proto},
 };
@@ -56,6 +56,16 @@ pub struct VanillaTerrain {
     last_proto: std::sync::atomic::AtomicU64,
     created: std::time::Instant,
 }
+/// A world's Overworld height from `MIN_Y` for its `preset`: the preset's
+/// dimension type's (a world-generation mod's may be up to 2048), else 384.
+pub fn overworld_height(dir: &Path, registry: &'static BlockRegistry, preset: &str) -> i32 {
+    shared_data(dir, registry)
+        .ok()
+        .and_then(|data| data.preset_level(preset, "minecraft:overworld"))
+        .filter(|l| l.min_y == crate::chunk::MIN_Y)
+        .map_or(384, |l| l.height)
+}
+
 /// What a world-generation mod's terrain provider is made for.
 pub struct ProviderRequest<'a> {
     pub data: &'a Arc<GeneratorData>,
@@ -304,7 +314,7 @@ impl VanillaTerrain {
         // Only the generated range (the Nether is 0..256) is copied.
         let (lo, hi) = (
             chunk.terrain.min_y().max(MIN_Y),
-            (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + HEIGHT),
+            (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + crate::chunk::height()),
         );
         out.structure_refs = chunk
             .structures()
@@ -313,7 +323,7 @@ impl VanillaTerrain {
             .collect();
         out.structure_starts = chunk.own_starts();
         let mut values = Box::new([0u32; 4096]);
-        for si in 0..SECTIONS as i32 {
+        for si in 0..crate::chunk::sections() as i32 {
             let base = MIN_Y + si * 16;
             if base + 16 <= lo || base >= hi {
                 continue;
@@ -370,7 +380,7 @@ impl VanillaTerrain {
                 }
             }
         }
-        for si in 0..SECTIONS as i32 {
+        for si in 0..crate::chunk::sections() as i32 {
             let mut cells = [0u32; 64];
             for (j, cell) in cells.iter_mut().enumerate() {
                 let (qx, qz, qy) = (j as i32 & 3, (j as i32 >> 2) & 3, si * 4 + (j as i32 >> 4));
@@ -637,7 +647,7 @@ impl ChunkGenerator for VanillaTerrain {
         let (bx, bz) = (column.x * 16, column.z * 16);
         let (lo, hi) = (
             chunk.terrain.min_y().max(MIN_Y),
-            (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + HEIGHT),
+            (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + crate::chunk::height()),
         );
         for y in lo..hi {
             for z in 0..16 {

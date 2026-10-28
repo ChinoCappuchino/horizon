@@ -544,6 +544,10 @@ impl Occlusion {
             }
         }
     }
+    /// The sections of a column it holds.
+    pub fn sections(&self) -> i32 {
+        self.columns.sections
+    }
     pub fn clear(&mut self) {
         self.columns.map.clear();
         self.edits.clear();

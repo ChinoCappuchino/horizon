@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 struct Cached {
     chunk: Weak<Chunk>,
     /// A bit per section, set when that section's palette may hold a portal.
-    sections: u32,
+    sections: u128,
 }
 
 /// Resident chunks are immutable behind `Arc`; edits use `Arc::make_mut`.
@@ -36,9 +36,9 @@ impl PortalSections {
         key: (i32, i32),
         chunk: &Arc<Chunk>,
         mut portal: impl FnMut(u32) -> bool,
-    ) -> u32 {
+    ) -> u128 {
         const {
-            assert!(crate::chunk::SECTIONS <= u32::BITS as usize);
+            assert!(crate::chunk::MAX_SECTIONS <= u128::BITS as usize);
         }
         let cached = self.chunks.entry(key).or_insert_with(|| Cached {
             chunk: Weak::new(),
@@ -49,7 +49,7 @@ impl PortalSections {
             for (i, section) in chunk.sections.iter().enumerate() {
                 // Preserve maybe_has, including unused entries and global palettes.
                 if section.blocks.maybe_has(&mut portal) {
-                    mask |= 1 << i;
+                    mask |= 1u128 << i;
                 }
             }
             cached.sections = mask;
@@ -62,7 +62,7 @@ impl PortalSections {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{MIN_Y, SECTIONS, Section};
+    use crate::chunk::{MIN_Y, Section};
 
     #[test]
     fn edits_replacements_compaction_and_reload() {
@@ -79,11 +79,12 @@ mod tests {
         assert_eq!(cache.get((0, 0), &chunk, |id| id == 7), 1);
         Arc::make_mut(&mut Arc::make_mut(&mut chunk).sections[0]).compact();
         assert_eq!(cache.get((0, 0), &chunk, |id| id == 7), 0);
-        Arc::make_mut(&mut chunk).sections[SECTIONS - 1] = Arc::new(Section::default());
+        Arc::make_mut(&mut chunk).sections[crate::chunk::sections() - 1] =
+            Arc::new(Section::default());
         cache.clear(); // resource reload, with changed facts for the same state IDs
         assert_eq!(
             cache.get((0, 0), &chunk, |id| id == 0),
-            (1 << SECTIONS) - 1,
+            (1 << crate::chunk::sections()) - 1,
             "a fresh palette is rescanned for every section"
         );
         cache.remove(&(0, 0));
@@ -108,7 +109,7 @@ mod tests {
     #[test]
     fn global_palette_covers_the_whole_id_range() {
         let mut chunk = Chunk::empty(0, 0);
-        for i in [0, 9, SECTIONS - 1] {
+        for i in [0, 9, crate::chunk::sections() - 1] {
             Arc::make_mut(&mut chunk.sections[i]).blocks =
                 Section::from_blocks(&std::array::from_fn(|j| (j % 300) as u32));
         }
@@ -117,7 +118,7 @@ mod tests {
         // Global maybe_has considers the entire ID range, including absent states.
         assert_eq!(
             cache.get((0, 0), &chunk, |id| id == 40000),
-            (1 << 0) | (1 << 9) | (1 << (SECTIONS - 1))
+            (1 << 0) | (1 << 9) | (1 << (crate::chunk::sections() - 1))
         );
     }
 }

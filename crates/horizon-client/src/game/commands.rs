@@ -302,7 +302,7 @@ impl Game<'_> {
             return Err(err("argument.pos.unloaded", &[]));
         }
         if p[1] < horizon_client::chunk::MIN_Y
-            || p[1] >= horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT
+            || p[1] >= horizon_client::chunk::MIN_Y + horizon_client::chunk::height()
         {
             return Err(err("argument.pos.outofworld", &[]));
         }
@@ -2990,7 +2990,7 @@ impl Game<'_> {
                 horizontal: 32,
                 vertical: 64,
                 min_y: horizon_client::chunk::MIN_Y,
-                max_y: horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT - 1,
+                max_y: horizon_client::chunk::MIN_Y + horizon_client::chunk::height() - 1,
             };
             let found = self
                 .end

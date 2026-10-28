@@ -765,7 +765,7 @@ impl Game<'_> {
     }
     /// The highest block of a heightmap type at a column (`Level.getHeight`).
     fn heightmap_at(&self, kind: &str, x: i32, z: i32) -> i32 {
-        let top = horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT;
+        let top = horizon_client::chunk::MIN_Y + horizon_client::chunk::height();
         for y in (horizon_client::chunk::MIN_Y..top).rev() {
             let state = self.world.block(x, y, z);
             if state == self.world.air {

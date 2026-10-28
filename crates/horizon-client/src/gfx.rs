@@ -100,7 +100,15 @@ mod wgsl_prefix;
 mod world_post;
 
 /// A column whose every section has its mesh (`Renderer::lod_detail_columns`).
-const COMPLETE_COLUMN: u32 = (1 << (crate::chunk::HEIGHT / 16)) - 1;
+/// Every section of a column loaded: the open world's sections' bits.
+fn complete_column() -> u128 {
+    (1u128 << crate::chunk::sections()).wrapping_sub(1)
+        | if crate::chunk::sections() >= 128 {
+            u128::MAX
+        } else {
+            0
+        }
+}
 /// A section's instance: its camera-relative origin and, in `w`, the step of
 /// its fixed-point UVs (`terrain.wgsl`'s `terrain_uv`).
 /// The world pass again after occlusion culling's test: it loads both
@@ -492,7 +500,7 @@ pub struct Renderer {
     lod_retiring: crate::fast_hash::FxHashSet<SectionKey>,
     /// Finished tile meshes `upload_lods` has yet to upload.
     lod_pending: Option<lod::Pending>,
-    detail_columns: crate::fast_hash::FxHashMap<(i32, i32), u32>,
+    detail_columns: crate::fast_hash::FxHashMap<(i32, i32), u128>,
     /// Bumped whenever a column becomes or stops being complete.
     detail_revision: u64,
     arena: arena::Arena,
@@ -2638,7 +2646,7 @@ impl Renderer {
             shadow_runs: page_runs::PageRuns::default(),
             block_entities: Default::default(),
             block_entity_revision: next_block_entity_revision(),
-            occlusion: occlusion::Occlusion::new(crate::chunk::MIN_Y, crate::chunk::HEIGHT / 16),
+            occlusion: occlusion::Occlusion::new(crate::chunk::MIN_Y, crate::chunk::height() / 16),
             world_post,
             hdr: None,
             hdr_output,
@@ -3091,7 +3099,7 @@ impl Renderer {
     pub fn lod_detail_columns(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
         self.detail_columns
             .iter()
-            .filter_map(move |(&column, &mask)| (mask == COMPLETE_COLUMN).then_some(column))
+            .filter_map(move |(&column, &mask)| (mask == complete_column()).then_some(column))
     }
     /// Changes whenever `lod_detail_columns` does.
     pub fn lod_detail_revision(&self) -> u64 {
@@ -3106,7 +3114,7 @@ impl Renderer {
         } else {
             mask & !(1 << key.1)
         };
-        if (mask == COMPLETE_COLUMN) != (next == COMPLETE_COLUMN) {
+        if (mask == complete_column()) != (next == complete_column()) {
             self.detail_revision += 1;
         }
         if next == 0 {
@@ -3122,12 +3130,12 @@ impl Renderer {
         let mut released = Vec::new();
         let mut block_entities = false;
         for (x, z) in columns {
-            if self.detail_columns.remove(&(x, z)) == Some(COMPLETE_COLUMN) {
+            if self.detail_columns.remove(&(x, z)) == Some(complete_column()) {
                 self.detail_revision += 1;
             }
             self.occlusion.remove_column(x, z);
             let retiring = !self.lod_cutout.is_empty() && self.lod_cutout.contains(&(x, z));
-            for sy in 0..crate::chunk::SECTIONS as i32 {
+            for sy in 0..crate::chunk::sections() as i32 {
                 let key = (x, sy, z);
                 block_entities |= self.block_entities.remove(&key).is_some();
                 if retiring {
@@ -3524,6 +3532,12 @@ impl Renderer {
         rendered
     }
     fn draw_frame(&mut self, frame: &Frame) -> Result<bool> {
+        // A world whose column is taller or shorter than the last one's
+        // (fork `afterwinter`: a world-generation mod's dimension type).
+        let sections = crate::chunk::sections() as i32;
+        if self.occlusion.sections() != sections {
+            self.occlusion = occlusion::Occlusion::new(crate::chunk::MIN_Y, sections);
+        }
         self.arena.trim();
         self.sorted_indices.trim();
         if let Some(flat) = &mut self.flat {

@@ -175,7 +175,16 @@ mod tests {
             for ticks in [-1, 0, 511, 512, 131_071, 131_072, i64::MAX] {
                 let partial = [0.0, 0.5, 0.999, f32::from_bits(0x3f7fffff)][i as usize % 4];
                 for snow in [false, true] {
-                    let column = p.column(snow, ticks, x, -64, 320, z, 0, partial);
+                    let column = p.column(
+                        snow,
+                        ticks,
+                        x,
+                        crate::chunk::MIN_Y,
+                        crate::chunk::MIN_Y + crate::chunk::height(),
+                        z,
+                        0,
+                        partial,
+                    );
                     let uv = [1.0, if i & 1 == 0 { -16.0 } else { 80.0 }];
                     cases.push(Case {
                         animation: [

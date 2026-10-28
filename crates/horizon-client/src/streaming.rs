@@ -4,7 +4,7 @@
 //! so stale work is dropped.
 use crate::fast_hash::{FxHashMap, FxHashSet};
 use crate::{
-    chunk::{Chunk, SECTIONS},
+    chunk::Chunk,
     light::{LightChanges, LightTables, apply_lighting, apply_relighting, light_chunk},
     mesher::{MeshTables, Mesher, Region, SectionMesh, borrow},
     world::World,
@@ -613,7 +613,7 @@ impl Streaming {
         self.meshing.clear();
         for &(x, z) in world.chunks.keys() {
             if self.lit.contains(&(x, z)) {
-                for sy in 0..SECTIONS as i32 {
+                for sy in 0..crate::chunk::sections() as i32 {
                     world.dirty_sections.insert((x, sy, z));
                 }
             }
@@ -631,7 +631,7 @@ impl Streaming {
         self.generated_total += 1;
         for dz in -1..=1 {
             for dx in -1..=1 {
-                for sy in 0..SECTIONS as i32 {
+                for sy in 0..crate::chunk::sections() as i32 {
                     world.dirty_sections.insert((key.0 + dx, sy, key.1 + dz));
                 }
             }
@@ -646,7 +646,7 @@ impl Streaming {
                 for dy in -1..=1 {
                     for dx in -1..=1 {
                         let s = sy as i32 + dy;
-                        if (0..SECTIONS as i32).contains(&s) {
+                        if (0..crate::chunk::sections() as i32).contains(&s) {
                             world.dirty_sections.insert((x + dx, s, z + dz));
                         }
                     }
@@ -661,7 +661,7 @@ impl Streaming {
         self.lighting.remove(&(x, z));
         // By key, not by a pass over every pending section: a moved or
         // shrunk storage forgets thousands of columns in one frame.
-        for sy in 0..SECTIONS as i32 {
+        for sy in 0..crate::chunk::sections() as i32 {
             self.meshing.remove(&(x, sy, z));
             self.waiting.remove(&(x, sy, z));
         }
@@ -773,7 +773,7 @@ impl Streaming {
         world.chunks.insert(key, Arc::new(chunk));
         if loaded {
             self.lit.insert(key);
-            for sy in 0..SECTIONS as i32 {
+            for sy in 0..crate::chunk::sections() as i32 {
                 world.dirty_sections.insert((key.0, sy, key.1));
             }
         }
@@ -940,7 +940,7 @@ impl Streaming {
                         if first {
                             for dz in -1..=1 {
                                 for dx in -1..=1 {
-                                    for sy in 0..SECTIONS as i32 {
+                                    for sy in 0..crate::chunk::sections() as i32 {
                                         world.dirty_sections.insert((x + dx, sy, z + dz));
                                     }
                                 }
@@ -1366,7 +1366,7 @@ impl Streaming {
     fn mark_light_changes(world: &mut World, changed: &LightChanges) {
         if let Some(log) = &mut world.light_log {
             for (x, sy, z) in changed.sections() {
-                *log.entry((x, z)).or_default() |= 1 << sy;
+                *log.entry((x, z)).or_default() |= 1u128 << sy;
             }
         }
         changed.dirty_sections(|section| {
@@ -1809,7 +1809,7 @@ impl Drop for Streaming {
     }
 }
 /// The section indexes set in a column's bits, lowest first.
-fn section_indexes(mut bits: u32) -> impl Iterator<Item = i32> {
+fn section_indexes(mut bits: u128) -> impl Iterator<Item = i32> {
     std::iter::from_fn(move || {
         (bits != 0).then(|| {
             let sy = bits.trailing_zeros() as i32;

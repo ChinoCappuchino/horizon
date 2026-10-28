@@ -2,7 +2,7 @@
 //! (`LevelChunkSection.isRandomlyTicking`), memoized per section.
 use crate::{
     blocks::BlockFacts,
-    chunk::{Chunk, MIN_Y, SECTIONS, Section},
+    chunk::{Chunk, MAX_SECTIONS, MIN_Y, Section},
     fast_hash::FxHashMap,
 };
 use horizon_world::registry::BlockStateId;
@@ -10,12 +10,12 @@ use std::sync::{Arc, Weak};
 
 /// A value snapshot, in ascending section order, with no per-chunk allocation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Sections(u32);
+pub struct Sections(u128);
 impl Sections {
     /// The minimum Y of the lowest section in the set from block `min_y` up.
     pub fn from(self, min_y: i32) -> Option<i32> {
         let index = ((min_y - MIN_Y) >> 4).max(0) as u32;
-        Sections(self.0 & u32::MAX.checked_shl(index).unwrap_or(0)).next()
+        Sections(self.0 & u128::MAX.checked_shl(index).unwrap_or(0)).next()
     }
 }
 impl Iterator for Sections {
@@ -38,7 +38,7 @@ impl ExactSizeIterator for Sections {}
 struct Cached {
     chunk: Weak<Chunk>,
     /// The section each bit of `sections` was read from.
-    read: [Weak<Section>; SECTIONS],
+    read: [Weak<Section>; MAX_SECTIONS],
     sections: Sections,
 }
 /// Vanilla keeps a count of randomly ticking blocks and fluids per section,
@@ -73,7 +73,7 @@ impl RandomTickSections {
         mut random: impl FnMut(u32) -> bool,
     ) -> Sections {
         const {
-            assert!(SECTIONS <= u32::BITS as usize);
+            assert!(crate::chunk::MAX_SECTIONS <= u128::BITS as usize);
         }
         let cached = self.chunks.entry(key).or_insert_with(|| Cached {
             chunk: Weak::new(),
@@ -88,9 +88,9 @@ impl RandomTickSections {
                 // `isRandomlyTicking`: the blocks themselves, not the palette,
                 // which keeps the states no block uses any more.
                 if section.blocks.has(&mut random) {
-                    cached.sections.0 |= 1 << i;
+                    cached.sections.0 |= 1u128 << i;
                 } else {
-                    cached.sections.0 &= !(1 << i);
+                    cached.sections.0 &= !(1u128 << i);
                 }
                 *read = Arc::downgrade(section);
             }
@@ -139,9 +139,13 @@ mod tests {
         Arc::make_mut(&mut chunk).set(0, MIN_Y + 16, 0, 0);
         Arc::make_mut(&mut Arc::make_mut(&mut chunk).sections[1]).compact();
         assert_eq!(cache.get_with((0, 0), &chunk, |id| id == 1).len(), 0);
-        Arc::make_mut(&mut chunk).sections[SECTIONS - 1] = Arc::new(Section::default());
+        Arc::make_mut(&mut chunk).sections[crate::chunk::sections() - 1] =
+            Arc::new(Section::default());
         cache.clear(); // resource reload, with changed facts for the same state IDs
-        assert_eq!(cache.get_with((0, 0), &chunk, |id| id == 0).len(), SECTIONS);
+        assert_eq!(
+            cache.get_with((0, 0), &chunk, |id| id == 0).len(),
+            crate::chunk::sections()
+        );
         cache.remove(&(0, 0));
         assert!(cache.chunks.is_empty());
     }
@@ -169,7 +173,7 @@ mod tests {
     #[test]
     fn global_palette_and_ascending_order() {
         let mut chunk = Chunk::empty(0, 0);
-        for i in [0, 9, SECTIONS - 1] {
+        for i in [0, 9, crate::chunk::sections() - 1] {
             Arc::make_mut(&mut chunk.sections[i]).blocks =
                 Section::from_blocks(&std::array::from_fn(|j| (j % 300) as u32));
         }
@@ -182,10 +186,14 @@ mod tests {
             cache
                 .get_with((0, 0), &chunk, |id| id == 299)
                 .collect::<Vec<_>>(),
-            [MIN_Y, MIN_Y + 9 * 16, MIN_Y + (SECTIONS as i32 - 1) * 16]
+            [
+                MIN_Y,
+                MIN_Y + 9 * 16,
+                MIN_Y + (crate::chunk::sections() as i32 - 1) * 16
+            ]
         );
         let sections = cache.get_with((0, 0), &chunk, |id| id == 299);
-        let top = MIN_Y + (SECTIONS as i32 - 1) * 16;
+        let top = MIN_Y + (crate::chunk::sections() as i32 - 1) * 16;
         let from = |y| sections.from(y);
         assert_eq!(
             [
@@ -382,7 +390,7 @@ mod tick_parity {
                 // 4,096 blocks ticks randomly.
                 let reference = |level: &mut Level, from: i32| {
                     let chunk = &level.chunks[&(x, z)];
-                    (from..MIN_Y + SECTIONS as i32 * 16)
+                    (from..MIN_Y + crate::chunk::sections() as i32 * 16)
                         .step_by(16)
                         .find(|&min_y| {
                             (0..16).any(|y| {

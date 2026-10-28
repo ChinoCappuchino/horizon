@@ -1,6 +1,6 @@
 //! Resident client world: streamed chunk columns plus the bookkeeping the game
 //! loop needs to relight and remesh after edits.
-use crate::chunk::{Chunk, MIN_Y, SECTIONS};
+use crate::chunk::{Chunk, MIN_Y};
 use horizon_core::random::LegacyRandom;
 use horizon_world::registry::BlockStateId;
 use std::{
@@ -13,20 +13,23 @@ use std::{
 /// rather than at every section of it.
 #[derive(Clone, Debug, Default)]
 pub struct DirtySections {
-    columns: crate::fast_hash::FxHashMap<(i32, i32), u32>,
+    columns: crate::fast_hash::FxHashMap<(i32, i32), u128>,
 }
-const _: () = assert!(SECTIONS <= 32);
+const _: () = assert!(crate::chunk::MAX_SECTIONS <= 128);
 impl DirtySections {
     pub fn insert(&mut self, (x, sy, z): (i32, i32, i32)) {
-        debug_assert!((0..SECTIONS as i32).contains(&sy));
-        *self.columns.entry((x, z)).or_default() |= 1 << sy;
+        debug_assert!((0..crate::chunk::sections() as i32).contains(&sy));
+        *self.columns.entry((x, z)).or_default() |= 1u128 << sy;
     }
     pub fn contains(&self, &(x, sy, z): &(i32, i32, i32)) -> bool {
-        (0..SECTIONS as i32).contains(&sy)
-            && self.columns.get(&(x, z)).is_some_and(|m| m & 1 << sy != 0)
+        (0..crate::chunk::sections() as i32).contains(&sy)
+            && self
+                .columns
+                .get(&(x, z))
+                .is_some_and(|m| m & 1u128 << sy != 0)
     }
     /// The dirty section indexes of column (x, z), as bits, removed.
-    pub fn take_column(&mut self, x: i32, z: i32) -> u32 {
+    pub fn take_column(&mut self, x: i32, z: i32) -> u128 {
         self.columns.remove(&(x, z)).unwrap_or(0)
     }
     /// Keep the columns `keep` accepts.
@@ -34,7 +37,7 @@ impl DirtySections {
         self.columns.retain(|&(x, z), _| keep(x, z));
     }
     /// The columns holding dirty sections, with their section bits.
-    pub fn columns(&self) -> impl Iterator<Item = ((i32, i32), u32)> + '_ {
+    pub fn columns(&self) -> impl Iterator<Item = ((i32, i32), u128)> + '_ {
         self.columns.iter().map(|(&c, &m)| (c, m))
     }
     pub fn clear(&mut self) {
@@ -90,7 +93,7 @@ pub struct World {
     /// The sections whose light changed since the log was last drained, as
     /// a bit per section of each column, kept while `block_log` is
     /// (`ChunkHolder.sectionLightChanged`).
-    pub light_log: Option<crate::fast_hash::FxHashMap<(i32, i32), u32>>,
+    pub light_log: Option<crate::fast_hash::FxHashMap<(i32, i32), u128>>,
     /// The villager POIs of each section (`PoiManager`'s sections).
     pub pois: crate::poi_sections::PoiSections<crate::poi_sections::Poi>,
     /// Moving-piston states removed during the last tick; retained until the
@@ -258,7 +261,7 @@ impl World {
         let Some(chunk) = self.chunks.get_mut(&(x >> 4, z >> 4)) else {
             return Err("write outside resident chunks".into());
         };
-        if y < MIN_Y || y >= MIN_Y + (SECTIONS as i32) * 16 {
+        if y < MIN_Y || y >= MIN_Y + (crate::chunk::sections() as i32) * 16 {
             return Err("write outside world height".into());
         }
         let previous = Arc::make_mut(chunk).set(x & 15, y, z & 15, state.0);
@@ -280,7 +283,7 @@ impl World {
                     for dx in -1..=1 {
                         let (bx, by, bz) = (x + dx, y + dy, z + dz);
                         let s = (by - MIN_Y) >> 4;
-                        if !(0..SECTIONS as i32).contains(&s) {
+                        if !(0..crate::chunk::sections() as i32).contains(&s) {
                             continue;
                         }
                         self.dirty_sections.insert((bx >> 4, s, bz >> 4));
@@ -330,7 +333,7 @@ impl World {
         hi: [i32; 3],
         mut matches: impl FnMut(BlockStateId) -> bool,
     ) -> bool {
-        let top = MIN_Y + SECTIONS as i32 * 16 - 1;
+        let top = MIN_Y + crate::chunk::sections() as i32 * 16 - 1;
         // Heights outside the sections read as state 0.
         if (lo[1] < MIN_Y || hi[1] > top) && matches(BlockStateId(0)) {
             return true;

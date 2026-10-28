@@ -38,7 +38,7 @@ impl MobWorld<'_> {
     }
     /// `Heightmap.Types.MOTION_BLOCKING`: above the highest blocking block.
     pub fn motion_blocking_height(&self, x: i32, z: i32) -> i32 {
-        let top = crate::chunk::MIN_Y + crate::chunk::HEIGHT;
+        let top = crate::chunk::MIN_Y + crate::chunk::height();
         (crate::chunk::MIN_Y..top)
             .rev()
             .find(|&y| {

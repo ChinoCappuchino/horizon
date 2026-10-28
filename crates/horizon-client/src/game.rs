@@ -215,7 +215,7 @@ use horizon_client::{
     audio::Audio,
     biome::Biomes,
     blocks::{BlockFacts, Fluid},
-    chunk::{HEIGHT, MIN_Y},
+    chunk::MIN_Y,
     clock::FixedStep,
     collisions,
     containers::{BlockEntity, Providers},
@@ -919,7 +919,10 @@ impl LevelAccess for GameLevel<'_> {
         self.world.block(pos.x, pos.y, pos.z)
     }
     fn set_raw(&mut self, pos: BlockPos, state: BlockStateId) -> Option<BlockStateId> {
-        if !self.world.loaded(pos.x, pos.z) || pos.y < MIN_Y || pos.y >= MIN_Y + HEIGHT {
+        if !self.world.loaded(pos.x, pos.z)
+            || pos.y < MIN_Y
+            || pos.y >= MIN_Y + horizon_client::chunk::height()
+        {
             return None;
         }
         let previous = self.world.block(pos.x, pos.y, pos.z);
@@ -941,7 +944,7 @@ impl LevelAccess for GameLevel<'_> {
         if self.dimension != LevelDimension::Overworld {
             256
         } else {
-            MIN_Y + HEIGHT
+            MIN_Y + horizon_client::chunk::height()
         }
     }
     fn random(&mut self) -> &mut horizon_core::random::LegacyRandom {
@@ -1968,7 +1971,7 @@ impl Dim {
     /// `DimensionType.logicalHeight`.
     fn logical_height(self) -> i32 {
         match self {
-            Self::Overworld => HEIGHT,
+            Self::Overworld => horizon_client::chunk::height(),
             Self::Nether => 128,
             Self::End => 256,
         }
@@ -1976,7 +1979,7 @@ impl Dim {
     /// `Level.getMaxY`: the dimension type's minimum y plus height, less one.
     fn max_y(self) -> i32 {
         match self {
-            Self::Overworld => MIN_Y + HEIGHT - 1,
+            Self::Overworld => MIN_Y + horizon_client::chunk::height() - 1,
             Self::Nether | Self::End => 255,
         }
     }
@@ -3804,7 +3807,8 @@ impl Game<'_> {
         // FallingBlockEntity.tick: off the ground, it gives up after 600
         // ticks (100 outside the world) and drops itself as an item.
         let y = next.y.floor() as i32;
-        let outside = y <= horizon_client::chunk::MIN_Y || y >= horizon_client::chunk::MIN_Y + 384;
+        let outside = y <= horizon_client::chunk::MIN_Y
+            || y >= horizon_client::chunk::MIN_Y + horizon_client::chunk::height();
         if !on_ground && (f.age > 100 && outside || f.age > 600) {
             return Ok(if f.drop_item && entity_drops {
                 FallStep::Dropped(next)
@@ -4845,7 +4849,7 @@ impl Game<'_> {
             }
             return None;
         }
-        let mut y = MIN_Y + HEIGHT - 1;
+        let mut y = MIN_Y + horizon_client::chunk::height() - 1;
         while y > MIN_Y {
             let s = self.world.block(x, y, z);
             if !self.res.facts().is_air(s) {
@@ -10669,7 +10673,7 @@ impl Game<'_> {
     /// `LevelExtractor.allChanged`: every loaded section is rebuilt.
     fn all_sections_changed(&mut self) {
         for &(x, z) in self.world.chunks.keys() {
-            for sy in 0..horizon_client::chunk::HEIGHT / 16 {
+            for sy in 0..horizon_client::chunk::height() / 16 {
                 self.world.dirty_sections.insert((x, sy, z));
             }
         }

@@ -938,7 +938,7 @@ fn pois_in_range(
     let (cx, cz) = (c[0] >> 4, c[2] >> 4);
     let chunks = radius.div_euclid(16) + 1;
     let y0 = (c[1] - radius).max(crate::chunk::MIN_Y);
-    let y1 = (c[1] + radius).min(crate::chunk::MIN_Y + crate::chunk::HEIGHT - 1);
+    let y1 = (c[1] + radius).min(crate::chunk::MIN_Y + crate::chunk::height() - 1);
     for qz in cz - chunks..=cz + chunks {
         for qx in cx - chunks..=cx + chunks {
             chunk_pois(w, (qx, qz), y0, y1, |poi, p| {
@@ -3382,7 +3382,7 @@ fn homes_in_range(m: &Mob, w: &MobWorld, radius: i32) -> Vec<[i32; 3]> {
     let r2 = i64::from(radius) * i64::from(radius);
     let mut out = Vec::new();
     let y0 = (c[1] - radius).max(crate::chunk::MIN_Y);
-    let y1 = (c[1] + radius).min(crate::chunk::MIN_Y + crate::chunk::HEIGHT - 1);
+    let y1 = (c[1] + radius).min(crate::chunk::MIN_Y + crate::chunk::height() - 1);
     for qz in (c[2] - radius) >> 4..=(c[2] + radius) >> 4 {
         for qx in (c[0] - radius) >> 4..=(c[0] + radius) >> 4 {
             chunk_pois(w, (qx, qz), y0, y1, |poi, p| {

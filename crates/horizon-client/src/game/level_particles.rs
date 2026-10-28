@@ -239,7 +239,7 @@ impl Game<'_> {
         for step in 1..11 {
             let y = pos.y + step;
             if !(horizon_client::chunk::MIN_Y
-                ..horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT)
+                ..horizon_client::chunk::MIN_Y + horizon_client::chunk::height())
                 .contains(&y)
             {
                 break;

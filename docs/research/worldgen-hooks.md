@@ -318,6 +318,22 @@ mod's preset, `generator-settings` as its settings JSON. Proof: a dedicated serv
 all at the mod's own heights for seed 42; the world keeps `horizon:preset` and its settings, and
 a second start loads the cells the first saved. FarView needs M3d: its land is above y 320.
 
+**M3d, done (2026-10-28).** The client's chunk column is per world: `chunk::{height, sections,
+set_height}` (from `MIN_Y`, up to `MAX_HEIGHT` 2048; static per-section tables sized
+`MAX_SECTIONS`), set from the world's preset's dimension type before anything of the world is made
+(its save keeps the shape). Section masks are u128 (dirty sections, light log, random ticks,
+portals, the LAN encoder's light masks, gfx's detail columns); the occlusion graph is rebuilt
+when the column changes; mobs' pathing, weather columns and the other 320/384 literals follow
+the world's height. Single player's window is a client of its server thread, so the network
+part came with it: the hub encodes with the world's real Overworld type
+(`lan::data::dimension_type`), registry sync sends a taller Overworld's `dimension_type` as data
+even to a client with the known pack, and a Horizon client sets its column from the dimension
+type it gets. Proof: a dedicated server and a single-player client on `test_worldgen:tall`
+(land at y 1563 to 1570 in a 2048-high world): saved chunks hold the land at the mod's heights
+(all 764 surface columns), and the client renders it (a screenshot at y 1573). Not measured
+yet: vanilla's frame and light times after the column became a runtime value (they read it
+once per call), and the parity harnesses.
+
 2048 sections per column is about five times the memory and light work of vanilla's 384; M3d is
 measured against vanilla worlds so they don't get slower.
 

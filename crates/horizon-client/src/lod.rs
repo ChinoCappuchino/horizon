@@ -1044,9 +1044,10 @@ impl Lod {
         distance: u32,
         covered: Option<FxHashSet<(i32, i32)>>,
     ) -> Vec<(TileKey, SectionMesh)> {
-        let elevation =
-            (((camera[1] - f64::from(MIN_Y + crate::chunk::HEIGHT)).clamp(0., 16384.)) as i32 / 32)
-                * 32;
+        let elevation = (((camera[1] - f64::from(MIN_Y + crate::chunk::height())).clamp(0., 16384.))
+            as i32
+            / 32)
+            * 32;
         let camera = [camera[0].floor() as i32, camera[2].floor() as i32];
         // Fill the view ahead first; a nearest-only ring spends most work out
         // of sight while visible forests remain undecorated noise terrain.

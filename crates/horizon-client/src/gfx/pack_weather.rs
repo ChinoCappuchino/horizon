@@ -232,7 +232,16 @@ mod tests {
             for ticks in [0, 511, 512, 131_071, 131_072, 1_000_003] {
                 let partial = [0.0, 0.5, 0.999][i as usize % 3];
                 for snow in [false, true] {
-                    let column = p.column(snow, ticks, x, -64, 320, z, 0, partial);
+                    let column = p.column(
+                        snow,
+                        ticks,
+                        x,
+                        crate::chunk::MIN_Y,
+                        crate::chunk::MIN_Y + crate::chunk::height(),
+                        z,
+                        0,
+                        partial,
+                    );
                     let v = WeatherVertex {
                         pos: [0.0; 3],
                         uv: [0.0; 2],

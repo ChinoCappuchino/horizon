@@ -8,7 +8,7 @@
 //! changed.
 use crate::{
     blocks::{BlockFacts, Fluid, MAP_COLORS},
-    chunk::{Chunk, MIN_Y, SECTIONS},
+    chunk::{Chunk, MIN_Y},
     fast_hash::FxHashMap,
     world::World,
 };
@@ -138,7 +138,7 @@ fn scan_column(
 }
 /// The highest block of a chunk worth scanning from.
 fn top_of(chunk: &Chunk, air: u32, layer: Layer) -> i32 {
-    let surface = (0..SECTIONS)
+    let surface = (0..crate::chunk::sections())
         .rev()
         .find(|&s| {
             chunk

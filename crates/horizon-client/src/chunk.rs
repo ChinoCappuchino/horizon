@@ -9,8 +9,35 @@ use std::sync::{Arc, OnceLock};
 pub mod block_entity;
 
 pub const MIN_Y: i32 = -64;
-pub const HEIGHT: i32 = 384;
-pub const SECTIONS: usize = (HEIGHT / 16) as usize;
+/// The tallest overworld a world may have (fork `afterwinter`: a
+/// world-generation mod's dimension type, up to 2048 high from `MIN_Y`), and
+/// its sections: what static per-section tables and masks hold.
+pub const MAX_HEIGHT: i32 = 2048;
+pub const MAX_SECTIONS: usize = (MAX_HEIGHT / 16) as usize;
+/// The open world's overworld sections: 24 (384 high) unless its dimension
+/// type is taller. Set before the first chunk, as the block states' bits are.
+static SECTIONS_NOW: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(24);
+
+/// The overworld's sections in this world (the column every chunk holds;
+/// the Nether and End sit inside it).
+#[inline]
+pub fn sections() -> usize {
+    SECTIONS_NOW.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// The overworld's height in this world, in blocks from `MIN_Y`.
+#[inline]
+pub fn height() -> i32 {
+    crate::chunk::sections() as i32 * 16
+}
+/// Sizes the chunk column for a world whose overworld is `height` blocks
+/// high from `MIN_Y` (384 for vanilla's): before the first chunk of the
+/// world. Heights are rounded up to whole sections and kept within
+/// `MAX_HEIGHT`; returns the height used.
+pub fn set_height(height: i32) -> i32 {
+    let sections = (height.clamp(384, MAX_HEIGHT) + 15) / 16;
+    SECTIONS_NOW.store(sections as usize, std::sync::atomic::Ordering::Relaxed);
+    sections * 16
+}
 
 /// Biomes are 4x4x4 containers over the biome table (67 entries: a 7-bit
 /// global palette).
@@ -173,7 +200,7 @@ impl Chunk {
         Self {
             x,
             z,
-            sections: (0..SECTIONS)
+            sections: (0..crate::chunk::sections())
                 .map(|_| Arc::new(Section::default()))
                 .collect(),
             surface: OnceLock::new(),
@@ -193,7 +220,7 @@ impl Chunk {
     #[inline]
     pub fn get(&self, x: i32, y: i32, z: i32) -> u32 {
         let s = (y - MIN_Y) >> 4;
-        if !(0..SECTIONS as i32).contains(&s) {
+        if !(0..crate::chunk::sections() as i32).contains(&s) {
             return 0;
         }
         self.sections[s as usize].get(index(x, y, z))
@@ -217,7 +244,7 @@ impl Chunk {
     }
     pub fn set(&mut self, x: i32, y: i32, z: i32, v: u32) -> u32 {
         let s = (y - MIN_Y) >> 4;
-        if !(0..SECTIONS as i32).contains(&s) {
+        if !(0..crate::chunk::sections() as i32).contains(&s) {
             return v;
         }
         let previous = Arc::make_mut(&mut self.sections[s as usize]).set(index(x, y, z), v);
@@ -284,7 +311,7 @@ impl Chunk {
         if s < 0 {
             return 0;
         }
-        if s >= SECTIONS as i32 {
+        if s >= crate::chunk::sections() as i32 {
             return 0xF0;
         }
         self.sections[s as usize].light(index(x, y, z))
@@ -297,7 +324,7 @@ impl Chunk {
     /// the quart y clamped to the column).
     #[inline]
     pub fn biome(&self, x: i32, y: i32, z: i32) -> u16 {
-        let qy = ((y - MIN_Y) >> 2).clamp(0, HEIGHT / 4 - 1);
+        let qy = ((y - MIN_Y) >> 2).clamp(0, crate::chunk::height() / 4 - 1);
         self.sections[(qy >> 2) as usize]
             .biomes
             .get(((qy & 3) << 4 | ((z & 15) >> 2) << 2 | (x & 15) >> 2) as usize) as u16
@@ -399,7 +426,7 @@ mod tests {
         }
         chunk.set(3, 150, 4, stone);
         let full = |c: &Chunk, matches: &dyn Fn(u32) -> bool| {
-            (MIN_Y..MIN_Y + HEIGHT)
+            (MIN_Y..MIN_Y + crate::chunk::height())
                 .rev()
                 .find(|&y| matches(c.get(3, y, 4)))
         };
@@ -424,7 +451,7 @@ mod tests {
         let (air, cave_air, stone) = (0, 7, 1);
         let is_air = |v: u32| v == air || v == cave_air;
         let scan = |c: &Chunk, x: i32, z: i32| {
-            (MIN_Y..MIN_Y + HEIGHT)
+            (MIN_Y..MIN_Y + crate::chunk::height())
                 .rev()
                 .find(|&y| !is_air(c.get(x, y, z)))
                 .map_or(MIN_Y, |y| y + 1)
@@ -458,7 +485,7 @@ mod tests {
         }
         // Out-of-range writes and unchanged states keep the map.
         let before = chunk.world_surface(3, 3, is_air);
-        chunk.set(3, MIN_Y + HEIGHT, 3, stone);
+        chunk.set(3, MIN_Y + crate::chunk::height(), 3, stone);
         chunk.set(3, before - 1, 3, chunk.get(3, before - 1, 3));
         assert!(chunk.surface.get().is_some());
         assert_eq!(chunk.world_surface(3, 3, |_| unreachable!()), before);
@@ -470,7 +497,7 @@ mod tests {
         let (air, grass, water, stone) = (0, 3, 5, 1);
         let blocks = |v: u32| v == water || v == stone;
         let scan = |c: &Chunk, x: i32, z: i32| {
-            (MIN_Y..MIN_Y + HEIGHT)
+            (MIN_Y..MIN_Y + crate::chunk::height())
                 .rev()
                 .find(|&y| blocks(c.get(x, y, z)))
                 .map_or(MIN_Y, |y| y + 1)

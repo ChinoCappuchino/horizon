@@ -16,7 +16,7 @@
 use crate::{
     Result,
     biome::Biomes,
-    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, SECTIONS, Section, block_strategy},
+    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, Section, block_strategy},
     streaming::ChunkGenerator,
 };
 use horizon_core::{
@@ -876,11 +876,15 @@ pub struct LevelShape {
     pub height: i32,
 }
 impl LevelShape {
-    pub const OVERWORLD: Self = Self {
-        sky_light: true,
-        min_y: MIN_Y,
-        height: SECTIONS as i32 * 16,
-    };
+    /// The Overworld of the open world: vanilla's 384, or its dimension
+    /// type's height (fork `afterwinter`).
+    pub fn overworld() -> Self {
+        Self {
+            sky_light: true,
+            min_y: MIN_Y,
+            height: crate::chunk::height(),
+        }
+    }
     pub const NETHER: Self = Self {
         sky_light: false,
         min_y: 0,
@@ -899,7 +903,7 @@ impl LevelShape {
         } else if root.ends_with("the_end") || root.ends_with("DIM1") {
             Self::END
         } else {
-            Self::OVERWORLD
+            Self::overworld()
         }
     }
     fn min_section(self) -> i32 {
@@ -1022,7 +1026,7 @@ fn nibbles(light: &Light, sky: bool) -> Vec<u8> {
 }
 
 pub fn encode(chunk: &Chunk, registry: &BlockRegistry, biomes: &Biomes) -> NamedTag {
-    encode_with(chunk, registry, biomes, None, LevelShape::OVERWORLD)
+    encode_with(chunk, registry, biomes, None, LevelShape::overworld())
 }
 /// The chunk NBT vanilla's `SerializableChunkData.write` produces for a full
 /// chunk in a level of `shape`.
@@ -1325,7 +1329,7 @@ fn decode_column(
             continue;
         };
         let si = y as i32 - (MIN_Y >> 4);
-        if !(0..SECTIONS as i32).contains(&si) {
+        if !(0..crate::chunk::sections() as i32).contains(&si) {
             continue;
         }
         if let Some(states) = section.get("block_states")
@@ -1534,13 +1538,14 @@ pub fn load_light(tag: &Tag, chunk: &mut Chunk, sky_light: bool) {
     let Some(Tag::List(sections)) = tag.get("sections") else {
         return;
     };
-    let mut layers: Vec<(Option<&[u8]>, Option<&[u8]>)> = vec![(None, None); SECTIONS];
+    let mut layers: Vec<(Option<&[u8]>, Option<&[u8]>)> =
+        vec![(None, None); crate::chunk::sections()];
     for section in sections {
         let Some(y) = number(section.get("Y")) else {
             continue;
         };
         let si = y as i32 - (MIN_Y >> 4);
-        if !(0..SECTIONS as i32).contains(&si) {
+        if !(0..crate::chunk::sections() as i32).contains(&si) {
             continue;
         }
         let layer = |name: &str| match section.get(name) {
@@ -3527,7 +3532,7 @@ fn lod_palette_index(
     (value < palette.len()).then_some(value)
 }
 fn lod_light_layers(sections: &[(i32, &Tag)], sky_light: bool) -> Box<[u8]> {
-    let mut layers = [(None, None); SECTIONS];
+    let mut layers = vec![(None, None); crate::chunk::sections()];
     for &(y, section) in sections {
         let layer = |name: &str| match section.get(name) {
             Some(Tag::ByteArray(data)) if data.len() == 2048 => Some(&data[..]),
@@ -3538,10 +3543,10 @@ fn lod_light_layers(sections: &[(i32, &Tag)], sky_light: bool) -> Box<[u8]> {
             layer("BlockLight"),
         );
     }
-    let mut light = vec![0u8; SECTIONS * 4096].into_boxed_slice();
+    let mut light = vec![0u8; crate::chunk::sections() * 4096].into_boxed_slice();
     let mut above = [if sky_light { 15u8 } else { 0 }; 256];
     let nibble = |data: &[u8], index: usize| (data[index / 2] >> ((index & 1) * 4)) & 15;
-    for si in (0..SECTIONS).rev() {
+    for si in (0..crate::chunk::sections()).rev() {
         let (sky, block) = layers[si];
         let section = &mut light[si * 4096..(si + 1) * 4096];
         for (index, value) in section.iter_mut().enumerate() {
@@ -3565,7 +3570,7 @@ fn lod_face_light(light: &[u8], x: usize, y: usize, z: usize) -> u16 {
         (z > 0, index.wrapping_sub(16)),
         (z < 15, index + 16),
         (y > 0, index.wrapping_sub(256)),
-        (y + 1 < SECTIONS * 16, index + 256),
+        (y + 1 < crate::chunk::sections() * 16, index + 256),
     ] {
         if valid {
             sky = sky.max(light[index] >> 4);
@@ -3587,7 +3592,7 @@ fn decode_lod_surfaces(
         .iter()
         .filter_map(|section| {
             let y = number(section.get("Y"))? as i32;
-            (MIN_Y >> 4..(MIN_Y >> 4) + SECTIONS as i32)
+            (MIN_Y >> 4..(MIN_Y >> 4) + crate::chunk::sections() as i32)
                 .contains(&y)
                 .then_some((y, section))
         })
@@ -4035,7 +4040,7 @@ mod tests {
                 assets.registry,
                 &biomes,
                 Some(&tables),
-                LevelShape::OVERWORLD,
+                LevelShape::overworld(),
             );
             let Some(Tag::List(list)) = saved.tag.get("block_entities") else {
                 panic!("no block entities");
@@ -4131,7 +4136,7 @@ mod tests {
             assets.registry,
             &biomes,
             Some(&tables),
-            LevelShape::OVERWORLD,
+            LevelShape::overworld(),
         );
         assert_eq!(number(overworld.tag.get("yPos")), Some(-4));
         assert_eq!(
@@ -4856,7 +4861,7 @@ mod tests {
         assert_eq!(at(&chunk, 0, 1), 0x52, "stored sky 5, block 2");
         // Section -3 has no layers; above it (-2..) sky defaults to 15.
         assert_eq!(at(&chunk, 1, 0), 0xF0);
-        assert_eq!(at(&chunk, SECTIONS - 1, 5), 0xF0);
+        assert_eq!(at(&chunk, crate::chunk::sections() - 1, 5), 0xF0);
         let mut dark = Chunk::empty(0, 0);
         load_light(&tag, &mut dark, false);
         assert_eq!(at(&dark, 1, 0), 0x00, "no skylight dimension");
@@ -4877,13 +4882,14 @@ mod tests {
             let Some(Tag::List(sections)) = tag.get("sections") else {
                 return;
             };
-            let mut layers: Vec<(Option<&[u8]>, Option<&[u8]>)> = vec![(None, None); SECTIONS];
+            let mut layers: Vec<(Option<&[u8]>, Option<&[u8]>)> =
+                vec![(None, None); crate::chunk::sections()];
             for section in sections {
                 let Some(y) = number(section.get("Y")) else {
                     continue;
                 };
                 let si = y as i32 - (MIN_Y >> 4);
-                if !(0..SECTIONS as i32).contains(&si) {
+                if !(0..crate::chunk::sections() as i32).contains(&si) {
                     continue;
                 }
                 let layer = |name: &str| match section.get(name) {

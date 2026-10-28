@@ -427,14 +427,39 @@ mod tests {
                     for snow in [false, true] {
                         let mut random = column_random(x, z);
                         let reference = if snow {
-                            snow_column(&mut random, ticks, x, -64, 320, z, 0xf000f0, partial)
+                            snow_column(
+                                &mut random,
+                                ticks,
+                                x,
+                                crate::chunk::MIN_Y,
+                                crate::chunk::MIN_Y + crate::chunk::height(),
+                                z,
+                                0xf000f0,
+                                partial,
+                            )
                         } else {
-                            rain_column(&mut random, ticks, x, -64, 320, z, 0xf000f0, partial)
+                            rain_column(
+                                &mut random,
+                                ticks,
+                                x,
+                                crate::chunk::MIN_Y,
+                                crate::chunk::MIN_Y + crate::chunk::height(),
+                                z,
+                                0xf000f0,
+                                partial,
+                            )
                         };
                         assert_eq!(
-                            cache
-                                .get(x, z)
-                                .column(snow, ticks, x, -64, 320, z, 0xf000f0, partial),
+                            cache.get(x, z).column(
+                                snow,
+                                ticks,
+                                x,
+                                crate::chunk::MIN_Y,
+                                crate::chunk::MIN_Y + crate::chunk::height(),
+                                z,
+                                0xf000f0,
+                                partial
+                            ),
                             reference
                         );
                     }

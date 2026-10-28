@@ -795,13 +795,13 @@ impl Game<'_> {
         reach: horizon_core::geometry::Aabb,
         sections: &mut horizon_client::portal_sections::PortalSections,
     ) -> bool {
-        use horizon_client::chunk::{MIN_Y, SECTIONS};
+        use horizon_client::chunk::MIN_Y;
         let (min, max) = (reach.min_position(), reach.max_position());
         if !min.is_finite() || !max.is_finite() {
             return true;
         }
         let (min, max) = (BlockPos::containing(min), BlockPos::containing(max));
-        let top = SECTIONS as i32 - 1;
+        let top = horizon_client::chunk::sections() as i32 - 1;
         let (x0, x1) = (min.x >> 4, max.x >> 4);
         let (z0, z1) = (min.z >> 4, max.z >> 4);
         let (y0, y1) = (
@@ -814,9 +814,9 @@ impl Game<'_> {
         if count > 64 {
             return true;
         }
-        let mut y_mask = 0u32;
+        let mut y_mask = 0u128;
         for sy in y0..=y1 {
-            y_mask |= 1 << sy;
+            y_mask |= 1u128 << sy;
         }
         let behaviours = self.res.behaviours();
         let chunks = &self.world.chunks;

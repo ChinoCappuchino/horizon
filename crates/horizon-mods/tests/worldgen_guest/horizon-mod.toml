@@ -7,7 +7,7 @@ capabilities = ["worldgen"]
 experimental = ["worldgen"]
 
 [worldgen]
-presets = ["test_worldgen:hills"]
+presets = ["test_worldgen:hills", "test_worldgen:tall"]
 stages = ["climate", "terrain", "structures", "features"]
 regions = ["camps"]
 saved_layers = [1]

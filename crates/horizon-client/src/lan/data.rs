@@ -122,6 +122,17 @@ pub fn component_nbt(v: &Value) -> Tag {
     }
 }
 
+/// A dimension type as this world has it: vanilla's, with the Overworld as
+/// high as the world's chunk column (a world-generation mod's dimension type
+/// may make it taller; fork `afterwinter`).
+pub fn dimension_type(name: &str) -> horizon_protocol::registry::DimensionType {
+    let mut d = horizon_protocol::registry::DimensionType::vanilla(name);
+    if name == "minecraft:overworld" {
+        d.height = crate::chunk::height();
+    }
+    d
+}
+
 impl SyncData {
     pub fn load(resources: &Path) -> Result<Self, String> {
         let builtin = Builtin::find(resources)
@@ -183,13 +194,25 @@ impl SyncData {
                     .names
                     .iter()
                     .zip(&e.json)
-                    .map(|(name, json)| RegistryEntry {
-                        id: name.clone(),
-                        data: if known_pack {
-                            None
-                        } else {
-                            Some(json_to_nbt(json))
-                        },
+                    .map(|(name, json)| {
+                        // An Overworld taller than vanilla's goes as data even
+                        // to a client with the known pack: its height is ours.
+                        let tall = key == "minecraft:dimension_type"
+                            && name == "minecraft:overworld"
+                            && crate::chunk::height() != 384;
+                        RegistryEntry {
+                            id: name.clone(),
+                            data: match (known_pack, tall) {
+                                (_, true) => {
+                                    let mut json = json.clone();
+                                    json["height"] = crate::chunk::height().into();
+                                    json["logical_height"] = crate::chunk::height().into();
+                                    Some(json_to_nbt(&json))
+                                }
+                                (true, false) => None,
+                                (false, false) => Some(json_to_nbt(json)),
+                            },
+                        }
                     })
                     .collect(),
             })

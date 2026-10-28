@@ -6,7 +6,7 @@ use horizon_client::{
     animate_tick::{AnimateContext, animate_tick, campfire_particles, marker_particle_target},
     biome::Biomes,
     blocks::{BlockFacts, Fluid},
-    chunk::{HEIGHT, MIN_Y},
+    chunk::MIN_Y,
     containers::BlockEntity,
     particles::{ParticleLevel, ParticleOptions, ParticleType},
     world::World,
@@ -31,7 +31,7 @@ fn motion_blocking_leaves(
     from: i32,
     leaves: bool,
 ) -> i32 {
-    let mut y = from.min(MIN_Y + HEIGHT - 1);
+    let mut y = from.min(MIN_Y + horizon_client::chunk::height() - 1);
     while y > MIN_Y {
         let f = facts.get(world.block(x, y, z));
         // #minecraft:leaves block motion, but MOTION_BLOCKING_NO_LEAVES skips them
@@ -407,8 +407,13 @@ impl Game<'_> {
                     self.rain_sound_time += 1;
                     if random.next_int_bound(3).unwrap_or(0) < waited {
                         self.rain_sound_time = 0;
-                        let roof =
-                            motion_blocking(world, facts, block[0], block[2], MIN_Y + HEIGHT);
+                        let roof = motion_blocking(
+                            world,
+                            facts,
+                            block[0],
+                            block[2],
+                            MIN_Y + horizon_client::chunk::height(),
+                        );
                         let (name, volume, pitch) = if at[1] > block[1] + 1 && roof > block[1] {
                             ("minecraft:weather.rain.above", 0.1, 0.5)
                         } else {

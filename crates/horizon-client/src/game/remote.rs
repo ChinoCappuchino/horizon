@@ -1028,6 +1028,13 @@ impl Game<'_> {
             return;
         };
         let dimension = r.registries.dimension(spawn.dimension_type);
+        // The server's Overworld may be taller than vanilla's (a world-generation
+        // mod's dimension type): the client's chunk column follows it.
+        if dimension.name == "minecraft:overworld"
+            && dimension.min_y == horizon_client::chunk::MIN_Y
+        {
+            horizon_client::chunk::set_height(dimension.height);
+        }
         let same = r.dimension.name == dimension.name && keep_world;
         r.chunk_format = Arc::new(r.chunk_format.with_dimension(&dimension));
         r.dimension = dimension;

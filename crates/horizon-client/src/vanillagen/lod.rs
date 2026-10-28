@@ -246,7 +246,7 @@ fn columns(chunk: &ProtoChunk, biome_map: &[u16], dimension: &str) -> Arc<[Colum
     let states = chunk.data().block_states();
     let registry = chunk.data().registry();
     let min = chunk.terrain.min_y().max(MIN_Y);
-    let max = (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + HEIGHT);
+    let max = (chunk.terrain.min_y() + chunk.terrain.height()).min(MIN_Y + crate::chunk::height());
     Arc::new(std::array::from_fn(|index| {
         let x = (index & 15) as i32;
         let z = (index >> 4) as i32;

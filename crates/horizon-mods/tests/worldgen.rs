@@ -28,7 +28,7 @@ capabilities = ["worldgen"]
 experimental = ["worldgen"]
 
 [worldgen]
-presets = ["test_worldgen:hills"]
+presets = ["test_worldgen:hills", "test_worldgen:tall"]
 stages = ["climate", "terrain", "structures", "features"]
 regions = ["camps"]
 saved_layers = [1]
@@ -319,7 +319,10 @@ fn open_is_held_to_the_manifest() {
     assert!(!normal.stages().contains(&Stage::Terrain));
     assert!(refused(normal.terrain(0, 0)).contains("opened no stage terrain"));
     // Terrain only for the presets the manifest lists.
-    let elsewhere = MANIFEST.replace("[\"test_worldgen:hills\"]", "[\"test_worldgen:flat\"]");
+    let elsewhere = MANIFEST.replace(
+        "[\"test_worldgen:hills\", \"test_worldgen:tall\"]",
+        "[\"test_worldgen:flat\"]",
+    );
     let why = refused(
         WorldgenMod::load(&package(&elsewhere))
             .unwrap()

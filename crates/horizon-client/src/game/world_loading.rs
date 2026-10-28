@@ -292,6 +292,23 @@ pub(super) fn make_streaming(
     dim: Dim,
     seed: i64,
 ) -> Result<(Streaming, Arc<SaveDir>, Option<Arc<VanillaTerrain>>)> {
+    if dim == Dim::Overworld {
+        // The chunk column the world's dimension type needs (a world-generation
+        // mod's may be taller than vanilla's 384), before anything of the world
+        // is made (its save keeps the shape); the Nether and End fit inside it.
+        let preset = horizon_client::save::WorldGen::read(world_root)
+            .unwrap_or_default()
+            .preset;
+        let height =
+            horizon_client::chunk::set_height(horizon_client::vanillagen::overworld_height(
+                &options.resources.join("worldgen"),
+                pack.assets.registry,
+                &preset,
+            ));
+        if height != 384 {
+            log::info!("Horizon: this world's Overworld is {height} blocks high");
+        }
+    }
     let save = Arc::new(SaveDir::new(horizon_client::save::dimension_dir(
         world_root,
         dim.id(),

@@ -218,7 +218,7 @@ impl Mob {
                 return [q[0], q[1] + 1, q[2]];
             }
             q[1] = p[1] + 1;
-            while q[1] <= 319 && air(q) {
+            while q[1] < crate::chunk::MIN_Y + crate::chunk::height() && air(q) {
                 q[1] += 1;
             }
             p = q;
@@ -227,7 +227,7 @@ impl Mob {
             return p;
         }
         let mut q = [p[0], p[1] + 1, p[2]];
-        while q[1] <= 319 && solid(q) {
+        while q[1] < crate::chunk::MIN_Y + crate::chunk::height() && solid(q) {
             q[1] += 1;
         }
         q

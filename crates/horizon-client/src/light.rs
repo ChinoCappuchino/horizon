@@ -17,7 +17,7 @@
 use crate::fast_hash::FxHashMap;
 use crate::{
     blocks::BlockFacts,
-    chunk::{Chunk, HEIGHT, Light, MIN_Y, SECTIONS, Section, index},
+    chunk::{Chunk, Light, MIN_Y, Section, index},
 };
 use horizon_core::geometry::{Direction, ShapeOp, VoxelShape};
 use horizon_world::registry::{BlockRegistry, BlockStateId};
@@ -286,7 +286,7 @@ pub fn light_chunk(
     }
     // One extra section above the highest occupied one: block light rises
     // up to 14 blocks into it (sky light there is always 15).
-    let h = ((top_section + 1) * 16).min(HEIGHT as usize);
+    let h = ((top_section + 1) * 16).min(crate::chunk::height() as usize);
     let at = |x: usize, y: usize, z: usize| (y * W + z) * W + x;
     // Packed cells (`type << 4 | dampening`), not state ids: the flood fill
     // then never touches the large `LightTables::cells` table.
@@ -429,7 +429,7 @@ pub fn light_chunk(
 fn pack_lighting(h: usize, sky: &[u8], block: &[u8], sky_light: bool) -> Vec<Light> {
     let at = |x: usize, y: usize, z: usize| (y * W + z) * W + x;
     let open = if sky_light { 0xF0 } else { 0x00 };
-    (0..SECTIONS)
+    (0..crate::chunk::sections())
         .map(|si| {
             if si * 16 >= h {
                 return Light::Uniform(open);
@@ -506,7 +506,12 @@ pub fn light_from_layers<L: AsRef<[u8]>>(
     mut above: [u8; 256],
     sky_light: bool,
 ) {
-    for (si, (sky, block)) in layers.iter().enumerate().take(SECTIONS).rev() {
+    for (si, (sky, block)) in layers
+        .iter()
+        .enumerate()
+        .take(crate::chunk::sections())
+        .rev()
+    {
         let sky = sky.as_ref().filter(|_| sky_light);
         let section = Arc::make_mut(&mut chunk.sections[si]);
         if sky.is_none() && block.is_none() && above.iter().all(|&v| v == above[0]) {
@@ -539,7 +544,7 @@ pub fn update_light_layers<L: AsRef<[u8]>>(
     sky_light: bool,
 ) -> Vec<usize> {
     let mut changed = Vec::new();
-    for (si, (sky, block)) in layers.iter().enumerate().take(SECTIONS) {
+    for (si, (sky, block)) in layers.iter().enumerate().take(crate::chunk::sections()) {
         let sky = sky.as_ref().filter(|_| sky_light);
         if sky.is_none() && block.is_none() {
             continue;
@@ -610,7 +615,7 @@ impl<'w> Region<'w> {
     }
     #[inline]
     fn slot(&mut self, x: i32, y: i32, z: i32) -> Option<usize> {
-        if !(MIN_Y..MIN_Y + HEIGHT).contains(&y) {
+        if !(MIN_Y..MIN_Y + crate::chunk::height()).contains(&y) {
             return None;
         }
         let key = (x >> 4, (y - MIN_Y) >> 4, z >> 4);
@@ -732,7 +737,7 @@ impl LightChanges {
         self.sections.keys().copied()
     }
     /// Every section (x, section index, z) whose cells lie within one block
-    /// of a changed cell, section indexes outside `0..SECTIONS` left out (a
+    /// of a changed cell, section indexes outside `0..crate::chunk::sections()` left out (a
     /// section next to several changed ones comes once for each).
     pub fn dirty_sections(&self, mut out: impl FnMut(Pos)) {
         // Per class, the bit set of neighbour offsets (dx, dy, dz in -1..=1,
@@ -770,7 +775,7 @@ impl LightChanges {
                 let o = offsets.trailing_zeros() as i32;
                 offsets &= offsets - 1;
                 let s = sy + o / 3 % 3 - 1;
-                if (0..SECTIONS as i32).contains(&s) {
+                if (0..crate::chunk::sections() as i32).contains(&s) {
                     out((x + o % 3 - 1, s, z + o / 9 - 1));
                 }
             }
@@ -794,7 +799,7 @@ fn set_level(world: &mut Region, sky: bool, p: Pos, value: u8) {
 /// `ChunkSkyLightSources`: the Y of the upper block of the highest occluded
 /// edge in the column (every block at or above it is a sky source).
 fn lowest_sky_source(world: &mut Region, tables: &LightTables, x: i32, z: i32) -> i32 {
-    let mut y = MIN_Y + HEIGHT - 1;
+    let mut y = MIN_Y + crate::chunk::height() - 1;
     let Some(mut top) = world.state(x, y, z) else {
         return MIN_Y;
     };
@@ -851,7 +856,7 @@ fn relight_region(
                 columns.insert((x, z), source);
                 // Cells whose source status changed: non-15 at or above the new
                 // lowest source, and old 15s (sources) below it.
-                for y in source..MIN_Y + HEIGHT {
+                for y in source..MIN_Y + crate::chunk::height() {
                     if level(world, true, (x, y, z)).is_some_and(|l| l != 15) {
                         seeds.push((x, y, z));
                     }
@@ -1112,8 +1117,8 @@ mod tests {
             1,
             15,
             16,
-            MIN_Y + HEIGHT - 2,
-            MIN_Y + HEIGHT - 1,
+            MIN_Y + crate::chunk::height() - 2,
+            MIN_Y + crate::chunk::height() - 1,
         ];
         for _ in 0..60 {
             let positions: Vec<Pos> = (0..1 + next(6))
@@ -1299,7 +1304,7 @@ mod tests {
                 70,
                 79,
                 80,
-                MIN_Y + HEIGHT - 1,
+                MIN_Y + crate::chunk::height() - 1,
             ] {
                 for z in [-33, -32, 5, 15] {
                     cells.push((x, y, z));
@@ -1321,7 +1326,7 @@ mod tests {
                         .flat_map(|a| (-1..=1).flat_map(move |b| (-1..=1).map(move |c| (a, b, c))))
                     {
                         let s = (y + dy - MIN_Y) >> 4;
-                        if (0..SECTIONS as i32).contains(&s) {
+                        if (0..crate::chunk::sections() as i32).contains(&s) {
                             expected.insert(((x + dx) >> 4, s, (z + dz) >> 4));
                         }
                     }
@@ -1343,7 +1348,8 @@ mod tests {
         // layers anywhere else; a block layer of 5 in section 2.
         let mut sky = vec![0x33u8; 2048];
         sky[..128].fill(0x77);
-        let mut layers: Vec<(Option<Vec<u8>>, Option<Vec<u8>>)> = vec![(None, None); SECTIONS];
+        let mut layers: Vec<(Option<Vec<u8>>, Option<Vec<u8>>)> =
+            vec![(None, None); crate::chunk::sections()];
         layers[10].0 = Some(sky);
         layers[2].1 = Some(vec![0x55; 2048]);
         let mut chunk = Chunk::empty(0, 0);
@@ -1361,7 +1367,8 @@ mod tests {
         assert!(matches!(chunk.sections[0].light, Light::Uniform(0x70)));
 
         // A light update replaces one kind of light in the sections it names.
-        let mut update: Vec<(Option<Vec<u8>>, Option<Vec<u8>>)> = vec![(None, None); SECTIONS];
+        let mut update: Vec<(Option<Vec<u8>>, Option<Vec<u8>>)> =
+            vec![(None, None); crate::chunk::sections()];
         update[2].1 = Some(vec![0; 2048]);
         update[3].0 = Some(vec![0x77; 2048]);
         let changed = update_light_layers(&mut chunk, &update, true);
@@ -1381,7 +1388,7 @@ mod tests {
         for sky in [false, true] {
             let region = [[None; 3], [None, Some(&chunk), None], [None; 3]];
             let lights = light_chunk(&region, &tables(), sky);
-            assert_eq!(lights.len(), SECTIONS);
+            assert_eq!(lights.len(), crate::chunk::sections());
             assert!(
                 lights
                     .iter()
@@ -1402,7 +1409,7 @@ mod tests {
         block: &[u8],
     ) -> Vec<Arc<crate::chunk::Section>> {
         let at = |x: usize, y: usize, z: usize| (y * W + z) * W + x;
-        let mut sections = Vec::with_capacity(SECTIONS);
+        let mut sections = Vec::with_capacity(crate::chunk::sections());
         for (si, section) in center.sections.iter().enumerate() {
             let mut out = (**section).clone();
             if si * 16 >= h {
@@ -1454,7 +1461,7 @@ mod tests {
             }
             section.light = Light::Full(Box::new([0x87; 4096]));
         }
-        let h = HEIGHT as usize;
+        let h = crate::chunk::height() as usize;
         let sky: Vec<_> = (0..W * W * h).map(|i| (i % 16) as u8).collect();
         let block: Vec<_> = (0..W * W * h).map(|i| ((i / 16) % 16) as u8).collect();
         let mut old = fixture.clone();

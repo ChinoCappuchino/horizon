@@ -16,6 +16,9 @@ use std::{cell::RefCell, collections::HashMap};
 
 struct Hills {
     seed: i64,
+    /// Preset `test_worldgen:tall`: the hills 1500 blocks up, in its
+    /// 2048-high dimension type.
+    raise: i32,
     sea: i32,
     height: u32,
     settings: String,
@@ -42,7 +45,7 @@ impl Hills {
     /// The y of the column's grass.
     fn top(&self, x: i32, z: i32) -> Result<i32, String> {
         let key = (self.seed as u64) ^ (u64::from(x as u32) << 32) ^ u64::from(z as u32);
-        Ok(self.sea + (mix(key) % 8) as i32 + self.lift(x >> 6, z >> 6)?)
+        Ok(self.sea + self.raise + (mix(key) % 8) as i32 + self.lift(x >> 6, z >> 6)?)
     }
     /// The region's lift, from its shared cell.
     fn lift(&self, rx: i32, rz: i32) -> Result<i32, String> {
@@ -72,6 +75,11 @@ impl WorldgenMod for Hills {
         let biome = |b: &str| biome_id(b).ok_or(format!("no biome {b}"));
         let hills = Hills {
             seed: info.seed,
+            raise: match info.preset.as_str() {
+                "test_worldgen:tall" if info.settings.contains("low") => 100,
+                "test_worldgen:tall" => 1500,
+                _ => 0,
+            },
             sea: info.sea_level,
             height: info.height,
             settings: info.settings.clone(),
@@ -85,7 +93,7 @@ impl WorldgenMod for Hills {
             lifts: RefCell::new(HashMap::new()),
         };
         let mut stages = vec![Stage::Climate, Stage::Structures, Stage::Features];
-        if info.preset == "test_worldgen:hills" {
+        if info.preset == "test_worldgen:hills" || info.preset == "test_worldgen:tall" {
             stages.push(Stage::Terrain);
         }
         if hills.asks("stage") {

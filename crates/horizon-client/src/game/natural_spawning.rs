@@ -207,7 +207,7 @@ impl NaturalLevel for GameLevel<'_, '_> {
         horizon_client::chunk::MIN_Y
     }
     fn max_y(&self) -> i32 {
-        horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT - 1
+        horizon_client::chunk::MIN_Y + horizon_client::chunk::height() - 1
     }
     fn ambient_light(&self) -> f32 {
         match self.game.dim {

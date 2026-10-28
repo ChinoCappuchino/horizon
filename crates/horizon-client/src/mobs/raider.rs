@@ -218,7 +218,7 @@ pub fn keeps_alive(m: &Mob, distance_squared: f64) -> bool {
 
 /// `Heightmap.Types.MOTION_BLOCKING_NO_LEAVES` position above (x, z).
 pub fn heightmap_pos(w: &MobWorld, x: i32, z: i32) -> [i32; 3] {
-    let top = crate::chunk::MIN_Y + crate::chunk::HEIGHT;
+    let top = crate::chunk::MIN_Y + crate::chunk::height();
     let y = (crate::chunk::MIN_Y..top)
         .rev()
         .find(|&y| {

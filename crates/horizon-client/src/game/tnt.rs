@@ -409,8 +409,8 @@ impl FluidInteractionWorld for TntFluidWorld<'_> {
         Ok(self.world.chunks.contains_key(&(x, z)).then_some((x, z)))
     }
     fn chunk_sections(&mut self, _: Self::Chunk) -> std::io::Result<FluidSections<'_>> {
-        static SECTIONS: [bool; horizon_client::chunk::SECTIONS] =
-            [true; horizon_client::chunk::SECTIONS];
+        static SECTIONS: [bool; horizon_client::chunk::MAX_SECTIONS] =
+            [true; horizon_client::chunk::MAX_SECTIONS];
         Ok(FluidSections {
             minimum_section_y: horizon_client::chunk::MIN_Y / 16,
             has_fluid: &SECTIONS,

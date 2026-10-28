@@ -2,7 +2,7 @@
 //! (sections with their paletted containers, block entities and the sky and
 //! block DataLayers) and the section block-change batches.
 use crate::{
-    chunk::{Chunk, Light, MIN_Y, SECTIONS, Section},
+    chunk::{Chunk, Light, MIN_Y, Section},
     containers::BlockEntity,
     fast_hash::FxHashMap,
 };
@@ -436,7 +436,7 @@ impl ChunkEncoder {
             tables: None,
             cache: Default::default(),
             heights: Default::default(),
-            sections: 0..SECTIONS,
+            sections: 0..crate::chunk::sections(),
             sky: true,
         }
     }
@@ -523,9 +523,9 @@ impl ChunkEncoder {
     pub fn set_dimension(&mut self, min_y: i32, height: i32, sky: bool) {
         let lo = usize::try_from((min_y - MIN_Y) >> 4)
             .unwrap_or(0)
-            .min(SECTIONS);
-        let n = usize::try_from(height >> 4).unwrap_or(SECTIONS);
-        self.sections = lo..(lo + n).min(SECTIONS);
+            .min(crate::chunk::sections());
+        let n = usize::try_from(height >> 4).unwrap_or(crate::chunk::sections());
+        self.sections = lo..(lo + n).min(crate::chunk::sections());
         self.sky = sky;
         // The heightmaps depend on the level's height.
         self.heights.get_mut().unwrap().clear();
@@ -545,21 +545,21 @@ impl ChunkEncoder {
 
     /// The chunk column with its light and block entities.
     /// The non-air sections of a column as bits (LevelChunkSection.hasOnlyAir).
-    fn occupied(&self, chunk: &Chunk) -> u64 {
-        let mut bits = 0u64;
+    fn occupied(&self, chunk: &Chunk) -> u128 {
+        let mut bits = 0u128;
         // One lock for the column: body_in asks for nine columns' sections.
         let mut cache = self.cache.lock().unwrap();
         for (i, s) in chunk.sections[self.sections.clone()].iter().enumerate() {
             if self.entry(&mut cache, s).non_air {
-                bits |= 1 << i;
+                bits |= 1u128 << i;
             }
         }
         bits
     }
 
     /// The non-air sections of the column and its neighbours, as bits.
-    fn around(&self, chunk: &Chunk, world: &crate::world::World) -> u64 {
-        let mut around = 0u64;
+    fn around(&self, chunk: &Chunk, world: &crate::world::World) -> u128 {
+        let mut around = 0u128;
         for dz in -1..=1 {
             for dx in -1..=1 {
                 if let Some(c) = world.chunks.get(&(chunk.x + dx, chunk.z + dz)) {
@@ -682,7 +682,7 @@ impl ChunkEncoder {
         &self,
         chunk: &Chunk,
         block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
-        around: u64,
+        around: u128,
     ) -> Vec<u8> {
         let (wires, entities) = self.blocks(chunk, block_entities);
         let heightmaps = self.heightmaps_of(chunk);
@@ -723,10 +723,10 @@ impl ChunkEncoder {
     /// client keeps the same light either way). A section changed as its
     /// last block went (light dimming around a removed block) is sent too:
     /// a client not tracking the block would otherwise keep its old light.
-    pub fn light_update(&self, chunk: &Chunk, changed: u32) -> Vec<u8> {
+    pub fn light_update(&self, chunk: &Chunk, changed: u128) -> Vec<u8> {
         let first = self.sections.start;
         let lights: Vec<(usize, SectionLight)> = self
-            .light_sections(chunk, u64::MAX)
+            .light_sections(chunk, u128::MAX)
             .into_iter()
             .filter(|&(b, _)| {
                 // Light section b holds the column's section first + b - 1.
@@ -749,7 +749,7 @@ impl ChunkEncoder {
         block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
     ) -> LevelChunkWithLight {
         let mut packet = self.encode_blocks(chunk, block_entities);
-        packet.light = self.light_data(chunk, u64::MAX);
+        packet.light = self.light_data(chunk, u128::MAX);
         packet
     }
 
@@ -860,11 +860,11 @@ impl ChunkEncoder {
     /// and its neighbours, as bits). A resident section's layers come from
     /// the cache while it is unchanged (uniform light is quicker to fill than
     /// to keep).
-    fn light_data(&self, chunk: &Chunk, around: u64) -> LightData {
+    fn light_data(&self, chunk: &Chunk, around: u128) -> LightData {
         light_data_of(&self.light_sections(chunk, around), self.sky)
     }
 
-    fn light_sections(&self, chunk: &Chunk, around: u64) -> Vec<(usize, SectionLight)> {
+    fn light_sections(&self, chunk: &Chunk, around: u128) -> Vec<(usize, SectionLight)> {
         light_sections(&chunk.sections[self.sections.clone()], around, |s| {
             if let Light::Uniform(v) = s.light {
                 return SectionLight::Uniform(v);
@@ -968,7 +968,7 @@ pub fn entity_tag(entity: &BlockEntity) -> Option<Tag> {
 /// section i; LayerLightSectionStorage.updateSectionStatus). An existing
 /// layer is sent, or marked empty when all dark; the others are left out.
 #[cfg(test)]
-fn light_data(sections: &[Arc<Section>], around: u64) -> LightData {
+fn light_data(sections: &[Arc<Section>], around: u128) -> LightData {
     let lights = light_sections(sections, around, |s| {
         SectionLight::Layers(Arc::new(Layers::of(&s.light)))
     });
@@ -1006,7 +1006,7 @@ impl SectionLight {
 /// layers (`section` giving a section of the world's).
 fn light_sections(
     sections: &[Arc<Section>],
-    around: u64,
+    around: u128,
     section: impl Fn(&Arc<Section>) -> SectionLight,
 ) -> Vec<(usize, SectionLight)> {
     let n = sections.len();
@@ -1221,7 +1221,7 @@ mod tests {
             *v = (i * 37 % 251) as u8;
         }
         Arc::make_mut(&mut chunk.sections[3]).light = Light::Full(light.clone());
-        let data = light_data(&chunk.sections, u64::MAX);
+        let data = light_data(&chunk.sections, u128::MAX);
         // Layer 4 holds section 3. Below the world (layer 0) there is no sky
         // light, so the sky layers listed start at layer 1; section 3 has the
         // only block light.
@@ -1243,13 +1243,13 @@ mod tests {
         let mut light = Box::new([0x5Au8; 4096]);
         Arc::make_mut(&mut chunk.sections[2]).light = Light::Full(light.clone());
         let first = encoder.encode(&chunk, &HashMap::new()).light;
-        assert_eq!(first, light_data(&chunk.sections, u64::MAX));
+        assert_eq!(first, light_data(&chunk.sections, u128::MAX));
         // Relighting moves the section, so the cached layers aren't reused.
         light[7] = 0xF3;
         Arc::make_mut(&mut chunk.sections[2]).light = Light::Full(light);
         let second = encoder.encode(&chunk, &HashMap::new()).light;
         assert_ne!(first, second);
-        assert_eq!(second, light_data(&chunk.sections, u64::MAX));
+        assert_eq!(second, light_data(&chunk.sections, u128::MAX));
     }
 
     #[test]
@@ -1257,9 +1257,9 @@ mod tests {
         let chunk = Chunk::empty(0, 0);
         // A column with nothing around it has no light layers at all.
         assert!(light_data(&chunk.sections, 0).sky.is_empty());
-        let data = light_data(&chunk.sections, u64::MAX);
+        let data = light_data(&chunk.sections, u128::MAX);
         // Default sections are full sky light and no block light.
-        assert_eq!(data.sky.len(), SECTIONS + 1);
+        assert_eq!(data.sky.len(), crate::chunk::sections() + 1);
         assert_eq!(data.block.len(), 0);
         assert_eq!(data.sky[0][0], 0xFF);
         assert!(horizon_protocol::buf::bit(&data.empty_block_mask, 5));
@@ -1307,7 +1307,7 @@ mod tests {
             (-7 * 16 + 8, 64, 12 * 16 + 1),
             BlockEntity::Sign(crate::signs::SignData::default()),
         );
-        let packet = |encoder: &ChunkEncoder, around: u64| {
+        let packet = |encoder: &ChunkEncoder, around: u128| {
             let mut packet = encoder.encode_blocks(&chunk, &entities);
             packet.light = encoder.light_data(&chunk, around);
             horizon_protocol::packets::play::Clientbound::LevelChunkWithLight(packet).encode()
@@ -1318,7 +1318,7 @@ mod tests {
             .block_entities;
         assert_eq!(sent.len(), 3);
         assert!(sent.iter().any(|e| e.tag != Tag::End));
-        for around in [0, 1, 0b1010_0000, 1 << 23, u64::MAX] {
+        for around in [0, 1, 0b1010_0000, 1 << 23, u128::MAX] {
             assert_eq!(
                 encoder.body(&chunk, &entities, around),
                 packet(&encoder, around),
@@ -1327,8 +1327,8 @@ mod tests {
         }
         encoder.set_dimension(0, 256, false);
         assert_eq!(
-            encoder.body(&chunk, &entities, u64::MAX),
-            packet(&encoder, u64::MAX)
+            encoder.body(&chunk, &entities, u128::MAX),
+            packet(&encoder, u128::MAX)
         );
     }
 
@@ -1395,7 +1395,7 @@ mod tests {
         let bodies = |encoder: &ChunkEncoder| -> Vec<Vec<u8>> {
             chunks.iter().map(|c| encoder.body_in(c, &world)).collect()
         };
-        assert!(chunks.len() * SECTIONS >= WARM_MIN);
+        assert!(chunks.len() * crate::chunk::sections() >= WARM_MIN);
         warmed.warm(&chunks);
         assert_eq!(bodies(&warmed), expected);
         // Run on this thread alone, the job makes every column's heightmaps
@@ -1403,7 +1403,10 @@ mod tests {
         let mut cold = ChunkEncoder::new(states, &builtin, &[], &[]);
         cold.tables = alone.tables.clone();
         let job = cold.job(&chunks).unwrap();
-        assert_eq!((job.columns.len(), job.sections.len()), (16, 17 * SECTIONS));
+        assert_eq!(
+            (job.columns.len(), job.sections.len()),
+            (16, 17 * crate::chunk::sections())
+        );
         job.run();
         cold.keep(&job);
         assert_eq!(cold.heights.lock().unwrap().len(), 16);
@@ -1427,7 +1430,7 @@ mod tests {
         encoder.set_dimension(0, 256, false);
         let nether = encoder.encode(&chunk, &HashMap::new());
         // An all-air section is the same bytes wherever it is.
-        let per_section = overworld.chunk.buffer.len() / SECTIONS;
+        let per_section = overworld.chunk.buffer.len() / crate::chunk::sections();
         assert_eq!(nether.chunk.buffer.len(), per_section * 16);
         assert!(nether.light.sky.is_empty() && nether.light.sky_mask.is_empty());
         // Block light layers: one below and one above the sixteen sections.

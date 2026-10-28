@@ -352,7 +352,7 @@ impl Hub {
             .unwrap_or(0);
         let clock_ids = (0..sync.dynamic.len("minecraft:world_clock") as i32).collect();
         let mut encoder = encoder;
-        let d = horizon_protocol::registry::DimensionType::vanilla(&config.dimension);
+        let d = super::data::dimension_type(&config.dimension);
         encoder.set_dimension(d.min_y, d.height, d.has_skylight);
         Self {
             lan,
@@ -1486,7 +1486,7 @@ impl Hub {
         if log.is_empty() {
             return;
         }
-        let mut changes: Vec<((i32, i32), u32)> = log.drain().collect();
+        let mut changes: Vec<((i32, i32), u128)> = log.drain().collect();
         changes.sort_unstable();
         for ((x, z), sections) in changes {
             let tracked = |g: &Guest, x: i32, z: i32| g.sent_chunks.contains(&(x, z));
@@ -2634,7 +2634,7 @@ impl Hub {
             .sync
             .id("minecraft:dimension_type", dimension)
             .unwrap_or(0);
-        let d = horizon_protocol::registry::DimensionType::vanilla(dimension);
+        let d = super::data::dimension_type(dimension);
         self.encoder
             .set_dimension(d.min_y, d.height, d.has_skylight);
     }

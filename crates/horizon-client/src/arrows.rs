@@ -1141,7 +1141,7 @@ impl FluidInteractionWorld for Ticker<'_, '_, '_, '_> {
         Ok(self.scene.world.chunks.contains_key(&(x, z)).then_some(()))
     }
     fn chunk_sections(&mut self, _: ()) -> Result<FluidSections<'_>, Error> {
-        static SECTIONS: [bool; crate::chunk::SECTIONS] = [true; crate::chunk::SECTIONS];
+        static SECTIONS: [bool; crate::chunk::MAX_SECTIONS] = [true; crate::chunk::MAX_SECTIONS];
         Ok(FluidSections {
             minimum_section_y: crate::chunk::MIN_Y >> 4,
             has_fluid: &SECTIONS,

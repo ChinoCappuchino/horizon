@@ -8,7 +8,7 @@ use horizon_client::{
     assets::Assets,
     biome::Biomes,
     blocks::BlockFacts,
-    chunk::{Chunk, HEIGHT},
+    chunk::Chunk,
     light::LightTables,
     mesher::{MeshTables, Mesher, Region, SectionMesh, borrow},
     models,
@@ -96,7 +96,7 @@ fn columns_loaded_past_the_render_distance_mesh_when_they_come_in_range() {
             if (x - cx).pow(2) + (z - cz).pow(2) > 16 {
                 continue;
             }
-            for sy in 0..HEIGHT / 16 {
+            for sy in 0..horizon_client::chunk::height() / 16 {
                 assert!(
                     meshed.contains(&(x, sy, z)),
                     "section {x} {sy} {z} is in range but was never meshed"

@@ -4,7 +4,7 @@
 //! order only inserts the result (`ClientPacketListener.handleLevelChunkWithLight`).
 use super::Game;
 use horizon_client::{
-    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, SECTIONS, Section, block_strategy},
+    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, Section, block_strategy},
     streaming::Streaming,
 };
 use horizon_core::paletted::{PalettedContainer, Strategy};
@@ -67,7 +67,7 @@ impl ChunkFormat {
                 );
             }
             biome_cells.push(cells);
-            if !(0..SECTIONS as i32).contains(&target) {
+            if !(0..horizon_client::chunk::sections() as i32).contains(&target) {
                 continue;
             }
             // A global section is as wide as the server's registry: 16 bits
@@ -107,7 +107,7 @@ impl ChunkFormat {
         // (the column's top or bottom cell layer repeated).
         if !biome_cells.is_empty() {
             let last = biome_cells.len() - 1;
-            for si in 0..SECTIONS as i32 {
+            for si in 0..horizon_client::chunk::sections() as i32 {
                 let i = si - offset;
                 if (0..sections.len() as i32).contains(&i) {
                     continue;
@@ -133,16 +133,16 @@ impl ChunkFormat {
     /// above the column's top section (from the light section just above
     /// it, else open sky).
     pub(super) fn light(&self, light: &LightData) -> (Vec<SectionLight>, [u8; 256]) {
-        let mut layers: Vec<SectionLight> = vec![(None, None); SECTIONS];
+        let mut layers: Vec<SectionLight> = vec![(None, None); horizon_client::chunk::sections()];
         let sky = self.has_skylight;
         let mut above = [if sky { 15 } else { 0 }; 256];
         // Light section b is the dimension's section b - 1.
         let first = (self.min_y - MIN_Y).div_euclid(16) - 1;
         for (b, layer) in light.layers(self.sections + 2).into_iter().enumerate() {
             let si = first + b as i32;
-            if (0..SECTIONS as i32).contains(&si) {
+            if (0..horizon_client::chunk::sections() as i32).contains(&si) {
                 layers[si as usize] = layer;
-            } else if si == SECTIONS as i32
+            } else if si == horizon_client::chunk::sections() as i32
                 && sky
                 && let Some(l) = &layer.0
             {
