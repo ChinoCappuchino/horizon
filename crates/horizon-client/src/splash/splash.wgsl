@@ -106,3 +106,35 @@ fn fs_quad(in: Quad) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(c.rgb * c.a, c.a);
 }
+
+// The splash's own texture (premultiplied, sRGB values) to the window:
+// as it is, with straight alpha, or over a backdrop on an opaque window;
+// encoded for an sRGB surface (which encodes again on write).
+struct Resolve {
+    // mode (0 premultiplied, 1 straight, 2 opaque), sRGB surface
+    mode: vec4<f32>,
+    backdrop: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> resolve: Resolve;
+@group(0) @binding(1) var scene: texture_2d<f32>;
+
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+@fragment
+fn fs_resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let c = textureLoad(scene, vec2<i32>(frag.xy), 0);
+    var rgb = c.rgb;
+    var a = c.a;
+    if (resolve.mode.x == 1.0) {
+        rgb = rgb / max(a, 0.0001);
+    } else if (resolve.mode.x == 2.0) {
+        rgb = rgb + resolve.backdrop.rgb * (1.0 - a);
+        a = 1.0;
+    }
+    if (resolve.mode.y == 1.0) {
+        rgb = to_linear(rgb);
+    }
+    return vec4<f32>(rgb, a);
+}

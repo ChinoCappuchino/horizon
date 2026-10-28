@@ -22,6 +22,9 @@ const FLIGHT_SPREAD: f32 = 0.35;
 /// Drops leave at least this far apart, so a fast start still shows the pool
 /// grow drop by drop.
 const LAUNCH_GAP: f32 = 0.12;
+/// Once loading is done, the drops still to come hurry: the game is waiting.
+const HURRY_GAP: f32 = 0.05;
+const HURRY_FLIGHT: f32 = 0.55;
 /// The finale never starts before this many seconds of splash.
 const MIN_BEFORE_FINALE: f32 = 3.0;
 /// The finale: after the last landing, the crouch, then the leap to its apex.
@@ -136,6 +139,8 @@ pub struct Timeline {
     /// Where the lap ended, for the pounce.
     fox_at: (f32, f32),
     lap_phase: f32,
+    /// The pool's height on the surface, as a share of it.
+    centre_y: f32,
 }
 
 impl Timeline {
@@ -167,7 +172,14 @@ impl Timeline {
             finale: None,
             fox_at: (0.0, 0.0),
             lap_phase: 0.0,
+            centre_y: 0.47,
         }
+    }
+    /// The pool in the exact middle: when the splash fills the game
+    /// window's own rectangle, the window it turns into matches its edges.
+    pub fn centred(mut self) -> Self {
+        self.centre_y = 0.5;
+        self
     }
     fn random(&mut self) -> f32 {
         // Park-Miller, as the prototype.
@@ -175,7 +187,7 @@ impl Timeline {
         (self.seed - 1) as f32 / 2_147_483_646.0
     }
     pub fn centre(&self) -> (f32, f32) {
-        (self.width / 2.0, self.height * 0.47)
+        (self.width / 2.0, self.height * self.centre_y)
     }
     fn total(&self) -> usize {
         self.names.len().max(1)
@@ -216,12 +228,16 @@ impl Timeline {
         } else {
             ((progress.clamp(0.0, 1.0) * self.total() as f32).floor() as usize).min(self.total())
         };
-        let gap = if self.look.still { 0.0 } else { LAUNCH_GAP };
+        let gap = match (self.look.still, self.loaded) {
+            (true, _) => 0.0,
+            (false, true) => HURRY_GAP,
+            (false, false) => LAUNCH_GAP,
+        };
         while self.drops.len() < due && self.t - self.last_launch >= gap {
-            let flight = if self.look.still {
-                0.0
-            } else {
-                FLIGHT + self.random() * FLIGHT_SPREAD
+            let flight = match (self.look.still, self.loaded) {
+                (true, _) => 0.0,
+                (false, true) => HURRY_FLIGHT + self.random() * 0.15,
+                (false, false) => FLIGHT + self.random() * FLIGHT_SPREAD,
             };
             let edge = (self.random() * 4.0) as u8 % 4;
             let along = self.random();
@@ -568,15 +584,17 @@ mod tests {
             sizes.push(f.pool);
         }
         let finale = t.finale().expect("finale");
-        // 30 drops at least 0.12 s apart, the last one's flight, and the settle.
+        // 30 drops at least HURRY_GAP apart, the last one's flight; never
+        // before the minimum, and no later: the game is waiting.
         assert!(
-            finale >= MIN_BEFORE_FINALE && finale > 29.0 * LAUNCH_GAP + FLIGHT,
+            finale >= MIN_BEFORE_FINALE && finale > 29.0 * HURRY_GAP + HURRY_FLIGHT,
             "{finale}"
         );
+        assert!(finale < MIN_BEFORE_FINALE + 0.1, "{finale}");
         // The pool grew over a few seconds, not in one frame.
         let full = sizes.last().copied().unwrap_or(0.0);
         let half = sizes.iter().position(|&s| s > full / 2.0).unwrap();
-        assert!(half > 60, "half-size after {half} frames");
+        assert!(half > 30, "half-size after {half} frames");
     }
 
     #[test]

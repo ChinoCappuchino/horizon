@@ -15073,7 +15073,10 @@ impl Loading {
         // The splash, until the title is ready and its finale played: then
         // the game window opens where the pool turned into it.
         if let Some(splash) = self.splash.as_mut() {
-            if splash.step(self.progress.fraction(), self.gui.is_some()) {
+            // Ready when the game can open at once: the title's artwork and
+            // the loader's resources are both here.
+            let ready = self.gui.is_some() && self.loaded.is_some();
+            if splash.step(self.progress.fraction(), ready) {
                 let size = self
                     .options
                     .as_ref()
@@ -15086,8 +15089,10 @@ impl Loading {
                     self.started.elapsed().as_millis()
                 );
                 self.resumed(event_loop);
+                event_loop.set_control_flow(ControlFlow::Poll);
+                return;
             }
-            event_loop.set_control_flow(ControlFlow::Poll);
+            event_loop.set_control_flow(ControlFlow::WaitUntil(splash.next_frame()));
             return;
         }
         if let Some(w) = &self.window {

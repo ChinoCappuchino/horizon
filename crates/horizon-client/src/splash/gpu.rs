@@ -119,17 +119,32 @@ enum Target {
     Window {
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
+        output: Output,
     },
-    Offscreen {
-        texture: wgpu::Texture,
-    },
+    Offscreen,
 }
+
+/// How the scene reaches a window.
+#[derive(Clone, Copy)]
+enum Output {
+    Premultiplied,
+    /// Straight alpha (a compositor blending post-multiplied).
+    Straight,
+    /// No transparency here: over a dark backdrop.
+    Opaque,
+}
+
+const SCENE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// The opaque fallback's backdrop: the game window's own dark face.
+const BACKDROP: [f32; 4] = [0.07, 0.11, 0.16, 1.0];
 
 pub struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     target: Target,
-    format: wgpu::TextureFormat,
+    scene: wgpu::Texture,
+    /// The scene to the window (none offscreen).
+    resolve: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Buffer)>,
     /// Physical size, and physical pixels per logical pixel.
     size: (u32, u32),
     scale: f32,
@@ -148,24 +163,90 @@ pub struct Gpu {
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 impl Gpu {
-    /// A surface for `window`, which must have been made transparent. Errs
-    /// when the surface can't be blended over the desktop.
-    pub fn for_window(window: Arc<winit::window::Window>, assets: &Assets) -> Result<Self> {
-        let instance =
-            wgpu::Instance::new(crate::gfx::instance_descriptor(wgpu::Backends::PRIMARY));
-        let surface = instance.create_surface(window.clone())?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))?;
+    /// A surface for `window`. `transparent`: drawn over the desktop (the
+    /// window was made transparent), else over a dark backdrop. Errs when a
+    /// transparent surface isn't offered here: on Windows only DirectX 12
+    /// through DirectComposition offers one, on macOS Metal, elsewhere
+    /// Vulkan where the compositor does.
+    pub fn for_window(
+        window: Arc<winit::window::Window>,
+        assets: &Assets,
+        transparent: bool,
+    ) -> Result<Self> {
+        let started = std::time::Instant::now();
+        // The splash needs no validation or debug layers (they made opening
+        // its device take seconds); OpenGL only when nothing else opens.
+        let backends: &[wgpu::Backends] = if transparent && cfg!(windows) {
+            &[wgpu::Backends::DX12]
+        } else if transparent {
+            &[wgpu::Backends::PRIMARY]
+        } else {
+            &[wgpu::Backends::PRIMARY, wgpu::Backends::GL]
+        };
+        let mut opened = None;
+        let mut failures = Vec::new();
+        for &backends in backends {
+            let mut descriptor = crate::gfx::instance_descriptor(backends);
+            descriptor.flags = wgpu::InstanceFlags::empty();
+            descriptor.backend_options.dx12.presentation_system =
+                wgpu::Dx12SwapchainKind::DxgiFromVisual;
+            let instance = wgpu::Instance::new(descriptor);
+            let surface = match instance.create_surface(window.clone()) {
+                Ok(s) => s,
+                Err(e) => {
+                    failures.push(e.to_string());
+                    continue;
+                }
+            };
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            })) {
+                Ok(adapter) => {
+                    opened = Some((surface, adapter));
+                    break;
+                }
+                Err(e) => failures.push(e.to_string()),
+            }
+        }
+        let (surface, adapter) = opened.ok_or_else(|| failures.join("; "))?;
+        let adapter_ms = started.elapsed().as_millis();
         let caps = surface.get_capabilities(&adapter);
-        let alpha_mode = [
-            wgpu::CompositeAlphaMode::PreMultiplied,
-            wgpu::CompositeAlphaMode::PostMultiplied,
-        ]
-        .into_iter()
-        .find(|m| caps.alpha_modes.contains(m))
-        .ok_or("the window can't be transparent here")?;
+        let (alpha_mode, output) = if transparent {
+            if caps
+                .alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+            {
+                (
+                    wgpu::CompositeAlphaMode::PreMultiplied,
+                    Output::Premultiplied,
+                )
+            } else if caps
+                .alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+            {
+                // Metal's "post-multiplied" is a layer that isn't opaque:
+                // Core Animation still blends its contents premultiplied.
+                let metal = adapter.get_info().backend == wgpu::Backend::Metal;
+                (
+                    wgpu::CompositeAlphaMode::PostMultiplied,
+                    if metal {
+                        Output::Premultiplied
+                    } else {
+                        Output::Straight
+                    },
+                )
+            } else {
+                return Err("the window can't be transparent here".into());
+            }
+        } else {
+            let mode = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
+                wgpu::CompositeAlphaMode::Opaque
+            } else {
+                wgpu::CompositeAlphaMode::Auto
+            };
+            (mode, Output::Opaque)
+        };
         let format = caps
             .formats
             .iter()
@@ -174,13 +255,24 @@ impl Gpu {
             .unwrap_or(caps.formats[0]);
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+        log::info!(
+            "Horizon: startup splash on {:?}: adapter {adapter_ms} ms, device {} ms",
+            adapter.get_info().backend,
+            started.elapsed().as_millis()
+        );
         let physical = window.inner_size();
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: physical.width.max(1),
             height: physical.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
+            // Mailbox where offered (as the game's own window): Fifo held a
+            // transparent full-screen surface on KWin to 20 frames a second.
+            present_mode: if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+                wgpu::PresentMode::Mailbox
+            } else {
+                wgpu::PresentMode::Fifo
+            },
             desired_maximum_frame_latency: 2,
             alpha_mode,
             view_formats: vec![],
@@ -188,15 +280,44 @@ impl Gpu {
         };
         surface.configure(&device, &config);
         let size = (config.width, config.height);
+        let scene = Self::scene(&device, size, false);
         Ok(Self::build(
             device,
             queue,
-            Target::Window { surface, config },
-            format,
+            Target::Window {
+                surface,
+                config,
+                output,
+            },
+            scene,
             size,
             window.scale_factor() as f32,
             assets,
         ))
+    }
+
+    /// The splash's own colour target: premultiplied, sRGB values.
+    fn scene(device: &wgpu::Device, size: (u32, u32), readable: bool) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Splash scene"),
+            size: wgpu::Extent3d {
+                width: size.0.max(1),
+                height: size.1.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SCENE,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | if readable {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::empty()
+                },
+            view_formats: &[],
+        })
     }
 
     /// An offscreen target of `size` physical pixels, for tests and previews.
@@ -206,26 +327,12 @@ impl Gpu {
         let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
-        let format = wgpu::TextureFormat::Rgba8Unorm;
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Splash offscreen"),
-            size: wgpu::Extent3d {
-                width: size.0,
-                height: size.1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
+        let scene = Self::scene(&device, size, true);
         Ok(Self::build(
             device,
             queue,
-            Target::Offscreen { texture },
-            format,
+            Target::Offscreen,
+            scene,
             size,
             scale,
             assets,
@@ -284,7 +391,7 @@ impl Gpu {
         device: wgpu::Device,
         queue: wgpu::Queue,
         target: Target,
-        format: wgpu::TextureFormat,
+        scene: wgpu::Texture,
         size: (u32, u32),
         scale: f32,
         assets: &Assets,
@@ -305,7 +412,7 @@ impl Gpu {
         };
         let blend = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
         let color = [Some(wgpu::ColorTargetState {
-            format,
+            format: SCENE,
             blend,
             write_mask: wgpu::ColorWrites::ALL,
         })];
@@ -471,11 +578,18 @@ impl Gpu {
         let model = quads("Splash fox", true);
         let overlay = quads("Splash overlay", false);
         let depth = Self::depth_view(&device, size);
+        let resolve = match &target {
+            Target::Window { config, .. } => {
+                Some(Self::resolve_pipeline(&device, &shader, config.format))
+            }
+            Target::Offscreen => None,
+        };
         Gpu {
             device,
             queue,
             target,
-            format,
+            scene,
+            resolve,
             size,
             scale,
             depth,
@@ -502,11 +616,16 @@ impl Gpu {
     pub fn resize(&mut self, physical: (u32, u32), scale: f32) {
         self.scale = scale;
         self.size = (physical.0.max(1), physical.1.max(1));
-        if let Target::Window { surface, config } = &mut self.target {
+        let readable = matches!(self.target, Target::Offscreen);
+        if let Target::Window {
+            surface, config, ..
+        } = &mut self.target
+        {
             config.width = self.size.0;
             config.height = self.size.1;
             surface.configure(&self.device, config);
         }
+        self.scene = Self::scene(&self.device, self.size, readable);
         self.depth = Self::depth_view(&self.device, self.size);
     }
 
@@ -576,11 +695,7 @@ impl Gpu {
             },
             Target::Offscreen { .. } => None,
         };
-        let view = match (&surface_texture, &self.target) {
-            (Some(t), _) => t.texture.create_view(&Default::default()),
-            (None, Target::Offscreen { texture }) => texture.create_view(&Default::default()),
-            _ => unreachable!("a window has its texture"),
-        };
+        let view = self.scene.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let behind = frame.fox.is_some_and(|f| f.behind);
         let fox_count = fox.len() as u32;
@@ -638,6 +753,56 @@ impl Gpu {
                 }
             }
         }
+        // The scene to the window, converted for how it composites.
+        if let (Some(t), Some((pipeline, layout, uniform)), Target::Window { config, output, .. }) =
+            (&surface_texture, &self.resolve, &self.target)
+        {
+            let mode = match output {
+                Output::Premultiplied => 0.0,
+                Output::Straight => 1.0,
+                Output::Opaque => 2.0,
+            };
+            let srgb = if config.format.is_srgb() { 1.0 } else { 0.0 };
+            self.queue.write_buffer(
+                uniform,
+                0,
+                bytemuck::cast_slice(&[[mode, srgb, 0.0, 0.0], BACKDROP]),
+            );
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Splash resolve"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                ],
+            });
+            let target = t.texture.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Splash resolve"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         self.queue.submit([encoder.finish()]);
         if let Some(t) = surface_texture {
             self.queue.present(t);
@@ -645,11 +810,82 @@ impl Gpu {
         Ok(())
     }
 
+    fn resolve_pipeline(
+        device: &wgpu::Device,
+        shader: &wgpu::ShaderModule,
+        format: wgpu::TextureFormat,
+    ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Buffer) {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Splash resolve bindings"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Splash resolve"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Splash resolve"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Splash resolve"),
+                    bind_group_layouts: &[Some(&layout)],
+                    ..Default::default()
+                }),
+            ),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vs_full"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_resolve"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        (pipeline, layout, uniform)
+    }
+
     /// The offscreen target's pixels (RGBA, premultiplied).
     pub fn read(&self) -> Result<Vec<u8>> {
-        let Target::Offscreen { texture } = &self.target else {
+        let Target::Offscreen = &self.target else {
             return Err("not offscreen".into());
         };
+        let texture = &self.scene;
         let row = (self.size.0 * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Splash readback"),
@@ -692,8 +928,22 @@ impl Gpu {
         Ok(out)
     }
 
+    /// The window's format, or the scene's offscreen.
     pub fn format(&self) -> wgpu::TextureFormat {
-        self.format
+        match &self.target {
+            Target::Window { config, .. } => config.format,
+            Target::Offscreen => SCENE,
+        }
+    }
+    /// Whether the splash is drawn over the desktop (else over its backdrop).
+    pub fn transparent(&self) -> bool {
+        !matches!(
+            self.target,
+            Target::Window {
+                output: Output::Opaque,
+                ..
+            }
+        )
     }
 }
 
