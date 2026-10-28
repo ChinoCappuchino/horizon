@@ -49,6 +49,12 @@ required-features = ["runtime", "pack"]
 name = "worldgen"
 required-features = ["runtime", "pack"]
 
+# A world-generation mod's terrain in chunks a second: `cargo run --release -p horizon-mods
+# --features runtime,pack --example worldgen_bench -- <mod.hmod>`.
+[[example]]
+name = "worldgen_bench"
+required-features = ["runtime", "pack"]
+
 # docs/api/mods-reference.md from the WIT contract (HORIZON_WRITE_DOCS=1 rewrites it).
 [[test]]
 name = "api_reference"
