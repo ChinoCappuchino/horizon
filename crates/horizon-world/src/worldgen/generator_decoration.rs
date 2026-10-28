@@ -117,6 +117,28 @@ fn possible_biomes(source: &ResolvedBiomeSource) -> Vec<String> {
         .filter(|name| seen.insert(name.clone()))
         .collect()
 }
+/// What a mod's claim does to a feature a biome would place (fork
+/// `afterwinter`, M3g, docs/research/worldgen-hooks.md "Claims").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FeatureDecision {
+    Keep,
+    Drop,
+    /// The claimant's placed feature in its place.
+    Replace(String),
+}
+/// The mods' claims on features, settled with the pack's rules: asked once
+/// per biome and feature when a generator is built.
+pub trait FeatureClaims: Send + Sync {
+    fn decide(
+        &self,
+        preset: &str,
+        biome: &str,
+        biome_tags: &[&str],
+        feature: &str,
+        feature_tags: &[&str],
+    ) -> FeatureDecision;
+}
+
 /// Which of vanilla's features vanilla's own biomes place before which, in
 /// each step (fork `afterwinter`). A mod's biome lists vanilla's features in
 /// the order vanilla's helpers gave them in the version it was made for; where
@@ -195,6 +217,7 @@ impl Decoration {
     pub(super) fn new(
         data: &Arc<GeneratorData>,
         source: &ResolvedBiomeSource,
+        preset: &str,
     ) -> Result<Option<Self>, GeneratorError> {
         let Some(resources) = &data.feature_resources else {
             return Ok(None);
@@ -302,6 +325,20 @@ impl Decoration {
             .map(|(i, _)| steps_of(BiomeId(i as u32)))
             .collect::<Result<Vec<_>, _>>()?;
         let before = VanillaOrder::new(&vanilla);
+        // The tags of each biome and feature, for the claims that name tags.
+        let claims = data.feature_claims();
+        let mut biome_tags_of: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (tag, biomes) in &data.biome_tags {
+            for b in biomes {
+                biome_tags_of.entry(b).or_default().push(tag);
+            }
+        }
+        let mut feature_tags_of: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (tag, features) in &tags {
+            for f in features {
+                feature_tags_of.entry(f).or_default().push(tag);
+            }
+        }
         let mut plan = Vec::new();
         for name in possible_biomes(source) {
             let id = data
@@ -311,6 +348,32 @@ impl Decoration {
             if !name.starts_with("minecraft:") {
                 for (i, step) in named.iter_mut().enumerate() {
                     before.follow(i, step);
+                }
+            }
+            if let Some(claims) = &claims {
+                let biome_tags = biome_tags_of
+                    .get(name.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                for step in &mut named {
+                    let mut kept: Vec<String> = Vec::with_capacity(step.len());
+                    for feature in step.drain(..) {
+                        let feature_tags = feature_tags_of
+                            .get(feature.as_str())
+                            .cloned()
+                            .unwrap_or_default();
+                        match claims.decide(preset, &name, &biome_tags, &feature, &feature_tags) {
+                            FeatureDecision::Keep => kept.push(feature),
+                            FeatureDecision::Drop => {}
+                            // Several features one claim replaces become one.
+                            FeatureDecision::Replace(with) => {
+                                if !kept.contains(&with) {
+                                    kept.push(with);
+                                }
+                            }
+                        }
+                    }
+                    *step = kept;
                 }
             }
             let mut steps = Vec::new();

@@ -195,6 +195,9 @@ pub struct GeneratorData {
     /// Concentric ring positions by seed and dimension generator (see
     /// `rings_for`), most recent last.
     ring_cache: Mutex<Vec<RingCacheEntry>>,
+    /// What the mods' claims do to features (fork `afterwinter`, M3g), for
+    /// the generators built after it is set.
+    feature_claims: std::sync::RwLock<Option<Arc<dyn super::generator_decoration::FeatureClaims>>>,
 }
 type RingCacheEntry = ((i64, String), Arc<OnceLock<super::structure::start::Rings>>);
 /// Generators whose ring positions are kept: the dimensions of a few worlds.
@@ -538,6 +541,7 @@ impl GeneratorData {
             biome_tags,
             feature_resources,
             ring_cache: Mutex::new(Vec::new()),
+            feature_claims: std::sync::RwLock::new(None),
         }))
     }
     /// The concentric ring positions (strongholds) of the generator for
@@ -677,6 +681,19 @@ impl GeneratorData {
         Ok(ResolvedBiomeSource::Regions(ClimateRegions::new(
             seed, lists,
         )))
+    }
+    /// The mods' claims on features (fork `afterwinter`, M3g): generators
+    /// built from now on drop or replace the features they take.
+    pub fn set_feature_claims(
+        &self,
+        claims: Option<Arc<dyn super::generator_decoration::FeatureClaims>>,
+    ) {
+        *self.feature_claims.write().unwrap() = claims;
+    }
+    pub(super) fn feature_claims(
+        &self,
+    ) -> Option<Arc<dyn super::generator_decoration::FeatureClaims>> {
+        self.feature_claims.read().unwrap().clone()
     }
     /// The biome a sample that fails falls back to: plains, as vanilla's
     /// registry defaults (ids follow the names' order, so with mods' biomes
@@ -907,6 +924,7 @@ where
         settings_json: &Value,
         with_structures: bool,
         level: Option<(i32, i32)>,
+        preset: &str,
     ) -> Result<Self, GeneratorError> {
         let registry = data.registry;
         let noise = &settings_json["noise"];
@@ -1073,7 +1091,7 @@ where
             provider: None,
         };
         pipeline.decoration =
-            super::generator_decoration::Decoration::new(&pipeline.data, &pipeline.source)?;
+            super::generator_decoration::Decoration::new(&pipeline.data, &pipeline.source, preset)?;
         if with_structures {
             let possible = pipeline
                 .source
@@ -2908,6 +2926,7 @@ impl OverworldGenerator {
                 &settings_json,
                 with_structures,
                 level,
+                preset,
             )?;
             pipeline.provider = provider;
             Arc::new(pipeline)
@@ -2920,6 +2939,7 @@ impl OverworldGenerator {
                 &settings_json,
                 with_structures,
                 level,
+                preset,
             )?;
             pipeline.provider = provider;
             Arc::new(pipeline)
@@ -3124,6 +3144,7 @@ mod tests {
             &settings,
             false,
             None,
+            "minecraft:normal",
         )
         .unwrap();
         let mut worker = OverworldGenerator::for_world(
@@ -3456,6 +3477,71 @@ mod tests {
         Some(GeneratorData::load(&root.join("worldgen"), registry).expect("worldgen data"))
     }
 
+    /// Mods' claims on features (fork `afterwinter`, M3g): a generator built
+    /// with claims that take vanilla's iron ores out places no iron ore,
+    /// and still places coal; one built before places both.
+    #[test]
+    fn feature_claims_take_features_out_of_decoration() {
+        use super::super::{FeatureClaims, FeatureDecision};
+        struct NoIron;
+        impl FeatureClaims for NoIron {
+            fn decide(
+                &self,
+                preset: &str,
+                _: &str,
+                _: &[&str],
+                f: &str,
+                _: &[&str],
+            ) -> FeatureDecision {
+                assert_eq!(preset, "minecraft:normal");
+                match f.starts_with("minecraft:ore_iron") {
+                    true => FeatureDecision::Drop,
+                    false => FeatureDecision::Keep,
+                }
+            }
+        }
+        let Some(data) = prepared_data() else {
+            return;
+        };
+        let ores = |generator: &OverworldGenerator| -> (usize, usize) {
+            let mut worker = generator.worker();
+            let mut region: Vec<ProtoChunk> = Vec::new();
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    region.push(worker.generate_proto(ChunkPos::new(dx, dz)).expect("proto"));
+                }
+            }
+            let mut region: [ProtoChunk; 9] = region.try_into().ok().expect("nine");
+            worker.decorate(&mut region).expect("decorate");
+            let centre = &region[4];
+            let (mut iron, mut coal) = (0, 0);
+            for y in centre.terrain.min_y()..centre.terrain.min_y() + centre.terrain.height() {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let name = centre.block_name(x, y, z);
+                        iron += usize::from(name.ends_with("iron_ore"));
+                        coal += usize::from(name.ends_with("coal_ore"));
+                    }
+                }
+            }
+            (iron, coal)
+        };
+        let before = OverworldGenerator::new(data.clone(), 42).expect("generator");
+        data.set_feature_claims(Some(Arc::new(NoIron)));
+        let after = OverworldGenerator::new(data.clone(), 42).expect("generator");
+        data.set_feature_claims(None);
+        let (iron, coal) = ores(&before);
+        assert!(
+            iron > 0 && coal > 0,
+            "without claims: {iron} iron, {coal} coal"
+        );
+        let (iron, coal) = ores(&after);
+        assert!(
+            iron == 0 && coal > 0,
+            "with claims: {iron} iron, {coal} coal"
+        );
+    }
+
     /// Seed 1234's strongholds where vanilla 26.3 puts them
     /// (VanillaStructureStartOracle with HORIZON_RINGS). Each search sampled
     /// its quarts through fresh resolvers, which broke climate ties their own
@@ -3646,6 +3732,7 @@ mod tests {
                 &settings,
                 true,
                 Some((-64, 384)),
+                "minecraft:normal",
             )
             .expect("pipeline"),
         );

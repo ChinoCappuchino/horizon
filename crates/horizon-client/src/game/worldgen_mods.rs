@@ -6,10 +6,14 @@
 use horizon_client::{mod_list, vanillagen::ProviderRequest};
 use horizon_mods::{
     Capability, Manifest, Package,
+    worldgen::{Candidate, Contributor, Decision, Place, Plan, Rules, Stage},
     worldgen_runtime::{WorldInfo, WorldgenMod},
     worldgen_world::ModTerrain,
 };
-use horizon_world::worldgen::provider::{ProviderWorker, TerrainProvider};
+use horizon_world::worldgen::{
+    FeatureClaims, FeatureDecision,
+    provider::{ProviderWorker, TerrainProvider},
+};
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -21,6 +25,8 @@ use std::{
 pub(super) struct Providers {
     mods: Vec<(PathBuf, Manifest)>,
     cells: PathBuf,
+    /// The claims of every mod that is on, settled with the pack's rules.
+    claims: Option<Arc<dyn FeatureClaims>>,
 }
 
 impl Providers {
@@ -31,24 +37,36 @@ impl Providers {
         let mut paths = horizon_mods::find(&here.join(mod_list::DIR));
         paths.retain(|p| !dev.contains(p));
         paths.extend(dev.iter().cloned());
-        let mods = paths
+        let on: Vec<(PathBuf, Manifest)> = paths
             .into_iter()
             .filter_map(|path| {
                 let package = Package::read(&path).ok()?;
                 let m = package.manifest;
-                let on = enabled.contains(&m.id) || dev.contains(&path);
-                (on && m.capabilities.contains(&Capability::Worldgen)).then_some((path, m))
+                (enabled.contains(&m.id) || dev.contains(&path)).then_some((path, m))
             })
+            .collect();
+        let contributors: Vec<Contributor> = on
+            .iter()
+            .filter(|(_, m)| m.worldgen.is_some() || m.capabilities.contains(&Capability::Worldgen))
+            .map(|(_, m)| Contributor::of(m))
+            .collect();
+        let claims = ModClaims::new(&contributors, &here);
+        let mods = on
+            .into_iter()
+            .filter(|(_, m)| m.capabilities.contains(&Capability::Worldgen))
             .collect();
         Providers {
             mods,
             cells: world_root.join("data/horizon/worldgen"),
+            claims,
         }
     }
 
     /// The provider of the request's preset, or none when no mod that is on
     /// provides it (or it fails to load: the game says why).
     pub(super) fn make(&self, request: &ProviderRequest<'_>) -> Option<Arc<dyn TerrainProvider>> {
+        // Every generator of the world, provided or not, decorates by the claims.
+        request.data.set_feature_claims(self.claims.clone());
         let (path, manifest) = self.mods.iter().find(|(_, m)| {
             m.worldgen
                 .as_ref()
@@ -102,6 +120,114 @@ impl Providers {
             request.dimension
         );
         Some(Arc::new(SavedTerrain { terrain, file }))
+    }
+}
+
+/// Placed features in the fork's own tags (docs/research/worldgen-hooks.md):
+/// `horizon:ores` holds vanilla's real ores, every height variant and the
+/// Nether's, without the stone and soil blobs (dirt, gravel, granite,
+/// diorite, andesite, tuff, clay, infested stone, magma, soul sand,
+/// blackstone), for mods that place ores their own way.
+const HORIZON_FEATURE_TAGS: [(&str, &[&str]); 1] = [(
+    "horizon:ores",
+    &[
+        "minecraft:ore_ancient_debris_large",
+        "minecraft:ore_coal_lower",
+        "minecraft:ore_coal_upper",
+        "minecraft:ore_copper",
+        "minecraft:ore_copper_large",
+        "minecraft:ore_debris_small",
+        "minecraft:ore_diamond",
+        "minecraft:ore_diamond_buried",
+        "minecraft:ore_diamond_large",
+        "minecraft:ore_diamond_medium",
+        "minecraft:ore_emerald",
+        "minecraft:ore_gold",
+        "minecraft:ore_gold_deltas",
+        "minecraft:ore_gold_extra",
+        "minecraft:ore_gold_lower",
+        "minecraft:ore_gold_nether",
+        "minecraft:ore_iron_middle",
+        "minecraft:ore_iron_small",
+        "minecraft:ore_iron_upper",
+        "minecraft:ore_lapis",
+        "minecraft:ore_lapis_buried",
+        "minecraft:ore_quartz_deltas",
+        "minecraft:ore_quartz_nether",
+        "minecraft:ore_redstone",
+        "minecraft:ore_redstone_lower",
+    ],
+)];
+
+/// The mods' claims on features (M3g): the first claim in the plan's order
+/// that applies decides; a feature belongs to the mod owning its namespace.
+/// Claims scoped to a mod's regions need the chunk and do not act here.
+struct ModClaims {
+    plan: Plan,
+    /// Namespace → the mod that owns it.
+    owners: HashMap<String, String>,
+}
+impl ModClaims {
+    fn new(contributors: &[Contributor], game: &Path) -> Option<Arc<dyn FeatureClaims>> {
+        if !contributors.iter().any(|c| {
+            c.section
+                .claims
+                .iter()
+                .any(|claim| claim.stage == Stage::Features)
+        }) {
+            return None;
+        }
+        let rules = match std::fs::read_to_string(game.join(horizon_mods::worldgen::RULES)) {
+            Ok(text) => Rules::parse(&text).unwrap_or_else(|e| {
+                log::warn!("Horizon: {e}; the pack's world-generation rules are not applied");
+                Rules::default()
+            }),
+            Err(_) => Rules::default(),
+        };
+        let plan = Plan::new(contributors, &rules);
+        for problem in plan.problems() {
+            log::warn!("Horizon: world generation: {problem}");
+        }
+        let owners = contributors
+            .iter()
+            .flat_map(|c| c.namespaces.iter().map(|ns| (ns.clone(), c.id.clone())))
+            .collect();
+        Some(Arc::new(ModClaims { plan, owners }))
+    }
+}
+impl FeatureClaims for ModClaims {
+    fn decide(
+        &self,
+        preset: &str,
+        biome: &str,
+        biome_tags: &[&str],
+        feature: &str,
+        feature_tags: &[&str],
+    ) -> FeatureDecision {
+        let ns = feature.split_once(':').map_or("minecraft", |(ns, _)| ns);
+        let owner = self.owners.get(ns).map_or(ns, String::as_str);
+        let mut tags = feature_tags.to_vec();
+        for (tag, members) in HORIZON_FEATURE_TAGS {
+            if members.contains(&feature) {
+                tags.push(tag);
+            }
+        }
+        let place = Place {
+            preset,
+            biome,
+            biome_tags,
+            regions: &[],
+        };
+        let thing = Candidate {
+            owner,
+            id: feature,
+            tags: &tags,
+        };
+        match self.plan.decide(Stage::Features, &place, &thing) {
+            Decision::Keep { .. } => FeatureDecision::Keep,
+            Decision::Drop { .. } | Decision::Off => FeatureDecision::Drop,
+            Decision::Replace { with, .. } => FeatureDecision::Replace(with),
+        }
     }
 }
 
@@ -193,6 +319,58 @@ fn decode(bytes: &[u8]) -> Option<Vec<(u8, String, Vec<u8>)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FarView's geology claim (M3g): `#horizon:ores` replaced with its own
+    /// deposits in its preset only; the stone blobs, other presets and its
+    /// own features untouched; the pack's rules can deny it.
+    #[test]
+    fn a_preset_claim_replaces_vanillas_real_ores_only() {
+        let manifest = Manifest::parse(
+            "id = \"farview\"\nname = \"FarView\"\nversion = \"1\"\napi = \"0.3\"\nside = \"server\"\n\
+             capabilities = [\"worldgen\"]\nexperimental = [\"worldgen\"]\n\
+             [worldgen]\npresets = [\"farview:earth\"]\nstages = [\"terrain\", \"features\"]\n\
+             [[worldgen.claims]]\nname = \"geology_ores\"\nstage = \"features\"\naction = \"replace\"\n\
+             scope = \"preset:farview:earth\"\ntargets = [\"#horizon:ores\"]\nwith = \"farview:geology_ores\"\n",
+        )
+        .unwrap();
+        let game = std::env::temp_dir().join(format!("horizon-claims-{}", std::process::id()));
+        std::fs::create_dir_all(&game).unwrap();
+        let claims = ModClaims::new(&[Contributor::of(&manifest)], &game).expect("claims");
+        let at = |preset: &str, feature: &str| {
+            claims.decide(preset, "minecraft:plains", &[], feature, &[])
+        };
+        let geology = FeatureDecision::Replace("farview:geology_ores".into());
+        assert_eq!(at("farview:earth", "minecraft:ore_iron_upper"), geology);
+        assert_eq!(at("farview:earth", "minecraft:ore_quartz_nether"), geology);
+        assert_eq!(
+            at("farview:earth", "minecraft:ore_granite_upper"),
+            FeatureDecision::Keep
+        );
+        assert_eq!(
+            at("farview:earth", "minecraft:trees_plains"),
+            FeatureDecision::Keep
+        );
+        assert_eq!(
+            at("minecraft:normal", "minecraft:ore_iron_upper"),
+            FeatureDecision::Keep
+        );
+        // The pack's last word.
+        let rules = game.join(horizon_mods::worldgen::RULES);
+        std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+        std::fs::write(&rules, "[claims.\"farview/geology_ores\"]\nallow = false\n").unwrap();
+        let denied = ModClaims::new(&[Contributor::of(&manifest)], &game).expect("claims");
+        assert_eq!(
+            denied.decide(
+                "farview:earth",
+                "minecraft:plains",
+                &[],
+                "minecraft:ore_iron_upper",
+                &[]
+            ),
+            FeatureDecision::Keep
+        );
+        std::fs::remove_dir_all(&game).unwrap();
+    }
 
     #[test]
     fn saved_cells_round_trip_and_damage_is_refused() {
