@@ -56,8 +56,60 @@ Preset `earth`, seed 1, chunks -4..4 around the origin (radius 4), alone in the 
 - One mineshaft start; logs 10,714, leaves 37,972, ore blocks 92,439 in the 81 chunks.
 
 The matrix (tools/worldgen_matrix.toml: seeds 2, 42, 8675309, two load orders, alone and with Biomes
-O' Plenty, Towns and Towers and the rest of the pack's world generation) records the rest; its
-results go in "Observed across the matrix" below once it has run.
+O' Plenty, Towns and Towers and the rest of the pack's world generation) records the rest, below.
+
+## Observed across the matrix (2026-10-28, `matrix-v2`, radius 4)
+
+**`earth`, alone and combined: every run passes.** 6 of 6 runs alone, and 6 of 6 each with Biomes
+O' Plenty, with Towns and Towers, and in the pack row (Farview, its settlements and tracks add-ons,
+Biomes O' Plenty, Towns and Towers, Large Ore Deposits). Terrain (base height, biomes at it,
+structure starts) is identical in both load orders for every seed. Decoration differs by at most
+1.54 % between load orders, inside vanilla's own 5.37 %.
+
+| seed | ground (min, max) | logs alone | logs with Biomes O' Plenty | ore blocks alone | ore blocks, pack |
+|---:|---|---:|---:|---:|---:|
+| 2 | 703 to 752 | 204 | 211 | 126,831 | 135,456 |
+| 42 | 979 to 989 | 9 | 34 | 127,738 | 136,342 |
+| 8675309 | 483 to 495 | 3,530 | 1,333 | 94,492 | 100,753 |
+
+What this shows for the port:
+
+- The terrain does not move when other mods are added: ground ranges are the same in every
+  combination. Biomes O' Plenty changes the trees (logs), not the land; Towns and Towers changes
+  nothing measurable in this area; Large Ore Deposits in the pack row adds about 7 % ore blocks.
+  So the cooperative case (one mod shapes, the others add) already holds on NeoForge.
+- The land height varies a lot between seeds (483 to 989), so a port cannot assume a fixed band.
+
+**Every other preset crashes, intermittently.** Out of 6 runs each (3 seeds × 2 load orders):
+
+| preset | runs that finished | | preset | runs that finished |
+|---|---:|---|---|---:|
+| coastal_life | 2 | | alpine | 1 |
+| living_wilds | 2 | | civilisation | 2 |
+| landscapes | 0 | | rugged | 2 |
+| temperate | 1 | | wildlands | 1 |
+| watersheds | 0 | | highlands | 2 |
+| integrated | 2 | | atlas | 0 |
+
+A second pass over `atlas` and `temperate` (`check-crash`) finished 1 and 2 of 6 runs, different ones
+than the first time: the counts are samples, not fixed per seed.
+
+All crashes are the same exception:
+`java.lang.IllegalStateException: Runs must ascend` in `AtlasChunkGenerator$Runs.run`, called from
+`ReferenceTerrainSampler.columns` ← `AtlasChunkGenerator.fill` ← `fillFromNoise`. The same preset and
+seed passes in one load order and crashes in the other, so it is not the seed's terrain. The stack
+trace (a crash report, not the code) shows the sampler running *inside* another sampler call on the
+same thread: `PlanCache.get` waits on a `CompletableFuture`, the fork-join pool lends the waiting
+thread to another chunk's `fill`, and that nested call fails. That points at state shared per
+thread (or per sampler) being reused while the outer call is still using it: a bug for Farview
+itself, outside this fork. Most crashes happen while the spawn area generates, before the probe
+starts; the probe driver now reads the server's crash report for those.
+
+The runs that finished show what the presets are: ground 101 to 313 (not `earth`'s 483 to 989),
+and the older terrain versions (integrated, civilisation, rugged; versions 7, 5, 4) give the same
+ground range for the same seed (129 to 142 on seed 2), differing in trees. Until the crash is fixed,
+the matrix cannot check these presets' determinism; the rows stay in the matrix so the fix is
+checked when it lands.
 
 ## Still to observe
 

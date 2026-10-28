@@ -21,6 +21,7 @@ import random
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 import zipfile
 from pathlib import Path
@@ -129,6 +130,19 @@ def resolve(wanted, index):
     return sorted(jars)
 
 
+def crash_report(run_dir, since):
+    """The newest crash report the server wrote since `since`, as (path, exception line): a crash while the
+    spawn area generates happens before the probe starts, so the probe has no chance to record it."""
+    reports = sorted((p for p in (run_dir / 'crash-reports').glob('*.txt') if p.stat().st_mtime >= since),
+                     key=lambda p: p.stat().st_mtime)
+    if not reports:
+        return None
+    lines = reports[-1].read_text(errors='replace').splitlines()
+    cause = next((l for l in lines if l and not l[0].isspace() and ('Exception' in l or 'Error' in l)
+                  and not l.startswith(('Description:', '//'))), None)
+    return reports[-1], cause or next((l for l in lines if l.startswith('Description:')), '?')
+
+
 def rows():
     return tomllib.loads(MATRIX.read_text())['row']
 
@@ -161,6 +175,7 @@ def run(args):
     error = Path(f'{out}.error')
     for stale in (out, error):
         stale.unlink(missing_ok=True)
+    started = time.time()
     try:
         seconds, log = oracle.start(home, run_dir, {
             'horizon.probe.out': out, 'horizon.probe.radius': args.radius,
@@ -169,6 +184,9 @@ def run(args):
         sys.exit(f'timed out after {args.timeout} s (server log: {run_dir / "server.log"})')
     if error.exists():
         sys.exit(f'generation crashed: {error.read_text().splitlines()[0]} (details: {error})')
+    crash = crash_report(run_dir, started)
+    if not out.exists() and crash:
+        sys.exit(f'generation crashed: {crash[1]} (details: {crash[0]})')
     if not out.exists():
         tail = '\n'.join(log.splitlines()[-30:])
         sys.exit(f'no probe output after {seconds:.0f} s; the server log ends with:\n{tail}')
@@ -241,12 +259,17 @@ def matrix(args):
                 results[f'{row["name"]}/{seed}'] = {'terrain_identical': False, 'failed': True, 'runs': 0}
                 lines.append(f'| {row["name"]} | {seed} | FAILED | - | - | - | - | - | - | - |')
                 continue
-            same = len(ok) == len(files) and all(terrain(f) == terrain(ok[0]) for f in ok)
-            spread = decoration_spread(ok) if ok else None
-            s = summarise(ok[0]) if ok else {}
+            # Terrain is compared between the runs that finished; runs that crashed are counted apart, so a
+            # crash is not mistaken for load order changing the world.
+            same = all(terrain(f) == terrain(ok[0]) for f in ok)
+            partial = len(ok) < len(files)
+            verdict = ('yes' if same else 'NO') + (f' (partial: {len(ok)} of {len(files)} runs, rest crashed)'
+                                                   if partial else '')
+            spread = decoration_spread(ok)
+            s = summarise(ok[0])
             results[f'{row["name"]}/{seed}'] = {'terrain_identical': same, 'decoration_spread_percent': spread,
-                                                'runs': len(ok), **s}
-            lines.append(f'| {row["name"]} | {seed} | {"yes" if same else "NO"} | {spread} % | '
+                                                'runs': len(ok), 'crashed': len(files) - len(ok), **s}
+            lines.append(f'| {row["name"]} | {seed} | {verdict} | {spread} % | '
                          f'{s.get("generator", "-")} | {s.get("land", "-")} % | {s.get("ground", "-")} | '
                          f'{len(s.get("starts", []))} | {s.get("logs", "-")} | {s.get("ores", "-")} |')
     OUT.mkdir(parents=True, exist_ok=True)
@@ -257,8 +280,10 @@ def matrix(args):
              '|---|---:|---|---:|---|---:|---|---:|---:|---:|', *lines]
     (OUT / f'{tag}.md').write_text('\n'.join(table) + '\n')
     print('\n'.join(table))
-    if not all(r['terrain_identical'] for r in results.values()):
+    if not all(r['terrain_identical'] for r in results.values() if not r.get('failed')):
         sys.exit('load order changed the terrain in at least one row')
+    if any(r.get('failed') or r.get('crashed') for r in results.values()):
+        sys.exit('generation crashed in at least one run (see FAILED and partial rows)')
 
 
 def main():
