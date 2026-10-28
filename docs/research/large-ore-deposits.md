@@ -65,8 +65,29 @@ axes 0.70, 0.47 and 0.24 times the size's cube root against NeoForge's 0.70, 0.4
 within the configs' ranges (copper 797 to 1,466, iron up to 1,413, diamond 500, redstone 500 and
 529). Drawing positions until the size was reached left deposits a quarter short where caves, dirt
 and water take positions; the port draws 1.3 times the size, as the mod's deposits have their full
-size placed. Deposit counts (14 here, 18 on NeoForge, about 18 expected) are Poisson: one seed
-cannot compare them; comparing them needs runs of several seeds (not run yet).
+size placed.
+
+Over seeds 7, 2 and 99 (3 × 4,225 chunks), deposits of at least 150 blocks:
+
+| Deposit | Expected (chunks / rarity) | NeoForge | Horizon | Mean size, NeoForge / Horizon |
+|---|---:|---:|---:|---|
+| coal | 15.5 | 16 | 15 | 1,374 / 1,511 |
+| copper | 8.7 | 13 | 13 | 1,025 / 1,093 |
+| iron | 12.4 | 11 | 14 | 932 / 1,011 |
+| gold | 3.9 | 4 | 4 | 614 / 941 |
+| redstone | 4.1 | 7 | 7 | 512 / 495 |
+| lapis | 3.5 | 7 | 3 | 462 / 454 |
+| diamond | 3.0 | 1 | 4 | 471 / 548 |
+| emerald | 2.8 | 1 | 1 | 434 / 599 |
+| all | 54.0 | 60 | 61 | |
+
+Counts agree within Poisson noise; sizes within 10 % for the common deposits (the rare ones
+rest on one to four deposits).
+
+Open: with the mod, NeoForge also lacks some of vanilla's own ore blocks that the run without it
+has: 560 on seed 7, 14,224 on seed 2 (about 1 %), 1,704 on seed 99, in chunks with deposits but
+at any height (up to y 133). Horizon's port leaves vanilla's veins alone (19 to 191 blocks, where
+a deposit took their place). Why the mod changes vanilla's veins is not known yet.
 
 Not ported yet: surface indicators (flowers in circles above a deposit), descendants (none in the
 pack), biome lists (all empty in the pack), relative altitudes (none in the pack).
