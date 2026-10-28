@@ -321,7 +321,7 @@ impl Game<'_> {
                 let mut chunk = Chunk::empty(cx, cz);
                 for section in &mut chunk.sections {
                     Arc::make_mut(section).biomes = horizon_core::paletted::PalettedContainer::new(
-                        horizon_client::chunk::BIOME_STRATEGY,
+                        horizon_client::chunk::biome_strategy(),
                         plains,
                     );
                 }

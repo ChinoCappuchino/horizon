@@ -16,7 +16,7 @@
 use crate::{
     Result,
     biome::Biomes,
-    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, Section, block_strategy},
+    chunk::{Chunk, Light, MIN_Y, Section, biome_strategy, block_strategy},
     streaming::ChunkGenerator,
 };
 use horizon_core::{
@@ -1394,11 +1394,11 @@ fn decode_column(
             let palette: Vec<u32> = ids.iter().map(|&id| u32::from(id)).collect();
             let target = Arc::make_mut(&mut chunk.sections[si as usize]);
             if let Ok(container) =
-                PalettedContainer::from_packed(BIOME_STRATEGY, palette.clone(), data.as_deref())
+                PalettedContainer::from_packed(biome_strategy(), palette.clone(), data.as_deref())
             {
                 target.biomes = container;
             } else if let Some(&first) = palette.first() {
-                target.biomes = PalettedContainer::new(BIOME_STRATEGY, first);
+                target.biomes = PalettedContainer::new(biome_strategy(), first);
             }
         }
     }

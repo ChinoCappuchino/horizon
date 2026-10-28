@@ -39,9 +39,22 @@ pub fn set_height(height: i32) -> i32 {
     sections * 16
 }
 
-/// Biomes are 4x4x4 containers over the biome table (67 entries: a 7-bit
-/// global palette).
-pub const BIOME_STRATEGY: Strategy = Strategy::biomes(7);
+/// Bits of the biomes' global palette: 7 for vanilla's 67 biomes, more when
+/// mods add biomes past 128 (fork `afterwinter`). Set with the biome table,
+/// before the first chunk.
+static BIOME_BITS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(7);
+
+/// Biomes are 4x4x4 containers over the biome table: vanilla's 7-bit global
+/// palette, wider with enough mods' biomes.
+pub fn biome_strategy() -> Strategy {
+    Strategy::biomes(BIOME_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Sizes the biomes' global palette for a table of `biomes`.
+pub fn set_biomes(biomes: usize) {
+    let bits = horizon_core::paletted::ceil_log2(biomes).max(7);
+    BIOME_BITS.store(bits, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Bits of the block states' global palette: 16 for vanilla's 35,723 states
 /// (what vanilla servers and clients send), more when content mods add states
@@ -107,7 +120,7 @@ impl Default for Section {
     fn default() -> Self {
         Self {
             blocks: PalettedContainer::new(block_strategy(), 0),
-            biomes: PalettedContainer::new(BIOME_STRATEGY, 0),
+            biomes: PalettedContainer::new(biome_strategy(), 0),
             light: Light::Uniform(0xF0),
         }
     }

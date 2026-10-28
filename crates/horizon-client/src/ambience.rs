@@ -70,7 +70,15 @@ impl AmbientTables {
         };
         Self {
             dimensions: read("dimension_type"),
-            biomes: read("worldgen/biome"),
+            // Every namespace's biomes (fork `afterwinter`: mods' too).
+            biomes: crate::biome::biome_files(root)
+                .into_iter()
+                .filter_map(|(name, path)| {
+                    let json: Value = serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
+                    let v = &json["attributes"]["minecraft:audio/ambient_sounds"];
+                    (!v.is_null()).then(|| (name, AmbientSounds::parse(v)))
+                })
+                .collect(),
         }
     }
     /// `EnvironmentAttributes.AMBIENT_SOUNDS` at a position.

@@ -176,7 +176,14 @@ impl MusicTables {
         };
         Self {
             dimensions: read("dimension_type"),
-            biomes: read("worldgen/biome"),
+            // Every namespace's biomes (fork `afterwinter`: mods' too).
+            biomes: crate::biome::biome_files(root)
+                .into_iter()
+                .filter_map(|(name, path)| {
+                    let json: Value = serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
+                    Some((name, Layer::parse(&json)))
+                })
+                .collect(),
         }
     }
     /// `EnvironmentAttributes.BACKGROUND_MUSIC` at a position.

@@ -281,7 +281,11 @@ impl GameplayAttributes {
                 }
             }
         }
-        for (biome, v) in list("worldgen/biome") {
+        // Every namespace's biomes (fork `afterwinter`: mods' too).
+        let biomes = crate::biome::biome_files(root)
+            .into_iter()
+            .filter_map(|(name, path)| Some((name, read(path)?)));
+        for (biome, v) in biomes {
             for key in keys {
                 if let Some(b) = v["attributes"][key].as_bool() {
                     out.biomes

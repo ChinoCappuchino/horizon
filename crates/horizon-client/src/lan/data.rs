@@ -144,11 +144,24 @@ impl SyncData {
         for key in SYNCHRONIZED {
             let path = key.trim_start_matches("minecraft:");
             let mut found = BTreeMap::new();
-            walk(&root.join(path), "", &mut found);
-            let (names, json): (Vec<_>, Vec<_>) = found
-                .into_iter()
-                .map(|(n, v)| (format!("minecraft:{n}"), v))
-                .unzip();
+            if *key == "minecraft:worldgen/biome" {
+                // Every namespace's biomes (fork `afterwinter`: mods' too).
+                for (name, file) in crate::biome::biome_files(resources) {
+                    if let Some(v) = std::fs::read(&file)
+                        .ok()
+                        .and_then(|b| serde_json::from_slice(&b).ok())
+                    {
+                        found.insert(name, v);
+                    }
+                }
+            } else {
+                walk(&root.join(path), "", &mut found);
+                found = found
+                    .into_iter()
+                    .map(|(n, v)| (format!("minecraft:{n}"), v))
+                    .collect();
+            }
+            let (names, json): (Vec<_>, Vec<_>) = found.into_iter().unzip();
             dynamic.registries.insert(
                 (*key).to_owned(),
                 names.iter().map(|n| (n.clone(), None)).collect(),
@@ -200,6 +213,8 @@ impl SyncData {
                         let tall = key == "minecraft:dimension_type"
                             && name == "minecraft:overworld"
                             && crate::chunk::height() != 384;
+                        // A mod's entry is in no pack the client knows.
+                        let known_pack = known_pack && name.starts_with("minecraft:");
                         RegistryEntry {
                             id: name.clone(),
                             data: match (known_pack, tall) {

@@ -352,7 +352,11 @@ impl Game<'_> {
         reg.effects.sort();
         reg.enchantments = list("data/minecraft/enchantment");
         reg.structures = list("data/minecraft/worldgen/structure");
-        reg.biomes = list("data/minecraft/worldgen/biome");
+        // Every namespace's biomes (fork `afterwinter`: mods' too).
+        reg.biomes = horizon_client::biome::biome_files(&root)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
         reg.clocks = list("data/minecraft/world_clock");
         reg.dimensions = vec![
             "minecraft:overworld".into(),

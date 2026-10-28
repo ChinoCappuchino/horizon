@@ -340,6 +340,21 @@ loopback: the client took the 2048-high Overworld from the synced `dimension_typ
 117 columns with no decode errors and drew the land at y 1564. Not tested: a vanilla 26.3
 client (the synced dimension type is what vanilla reads, so it should hold).
 
+**M3f, generation and game done (2026-10-28); decoration with M3g.** Biomes O' Plenty works as
+horizon-port-pack carries it, with its regions as data (docs/research/climate-regions.md): its
+1.21.1 biomes upgraded to 26.3's shape, merged with their carvers and tags; climate regions as a
+biome source; carvers of Java types left out; mods' biomes taking vanilla's feature order where
+vanilla moved a feature (else the sorter finds a cycle). The game: every namespace's biomes in
+the client's table, ambience, music, fog, particles and commands; the biome palette widened past
+7 bits (136 biomes: 8); the LAN registry with every namespace's biomes, sent as data outside
+`minecraft:`. Proof: the matrix's region comparison (below the per-chunk table: seeds 7 and 99,
+64 km squares, Horizon's biome one of the regions' picks at 99.75 % of samples, shares within
+NeoForge's own spread), a dedicated server on seed 99 saving 82,468 of 124,416 biome cells as
+Biomes O' Plenty's and loading them back unchanged, and a client in another process joining it
+and drawing old-growth woodland's grass colour. Not yet: decoration (Biomes O' Plenty's features
+are mostly Java types: M3g), its surface rules (code), mods' biome tags over the network, and a
+remote client building a biome it lacks from the server's data (it shows plains).
+
 2048 sections per column is about five times the memory and light work of vanilla's 384; M3d is
 measured against vanilla worlds so they don't get slower.
 

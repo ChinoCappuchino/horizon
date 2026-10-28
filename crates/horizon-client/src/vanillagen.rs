@@ -2,7 +2,7 @@
 //! aquifers, surface rules, carvers and placed features) to chunk streaming.
 use crate::{
     biome::Biomes,
-    chunk::{BIOME_STRATEGY, Chunk, MIN_Y, Section},
+    chunk::{Chunk, MIN_Y, Section, biome_strategy},
     save::SavedProto,
     streaming::{ChunkGenerator, LodSampler, Proto},
 };
@@ -389,7 +389,7 @@ impl VanillaTerrain {
                 *cell = u32::from(self.biome_map.get(id.0 as usize).copied().unwrap_or(0));
             }
             Arc::make_mut(&mut out.sections[si as usize]).biomes =
-                PalettedContainer::from_values(BIOME_STRATEGY, &cells);
+                PalettedContainer::from_values(biome_strategy(), &cells);
         }
         out
     }

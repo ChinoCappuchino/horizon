@@ -193,7 +193,7 @@ impl ChunkGenerator for FlatTerrain {
         let mut chunk = Chunk::empty(cx, cz);
         for s in &mut chunk.sections {
             std::sync::Arc::make_mut(s).biomes = horizon_core::paletted::PalettedContainer::new(
-                crate::chunk::BIOME_STRATEGY,
+                crate::chunk::biome_strategy(),
                 u32::from(self.biome),
             );
         }

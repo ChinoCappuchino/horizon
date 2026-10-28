@@ -4,7 +4,7 @@
 //! order only inserts the result (`ClientPacketListener.handleLevelChunkWithLight`).
 use super::Game;
 use horizon_client::{
-    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, Section, block_strategy},
+    chunk::{Chunk, Light, MIN_Y, Section, biome_strategy, block_strategy},
     streaming::Streaming,
 };
 use horizon_core::paletted::{PalettedContainer, Strategy};
@@ -97,7 +97,7 @@ impl ChunkFormat {
             }
             let mut section = Section {
                 blocks,
-                biomes: PalettedContainer::from_values(BIOME_STRATEGY, &cells),
+                biomes: PalettedContainer::from_values(biome_strategy(), &cells),
                 light: Light::Uniform(0xF0),
             };
             section.compact();
@@ -118,7 +118,7 @@ impl ChunkFormat {
                     *cell = biome_cells[edge][layer * 16 + j % 16];
                 }
                 Arc::make_mut(&mut chunk.sections[si as usize]).biomes =
-                    PalettedContainer::from_values(BIOME_STRATEGY, &cells);
+                    PalettedContainer::from_values(biome_strategy(), &cells);
             }
         }
         // ClientPacketListener.applyLightData: the column keeps the light

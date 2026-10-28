@@ -27,10 +27,25 @@ are sampled every 16 blocks.
   follow the climate. 29 % of the samples are Biomes O' Plenty biomes.
 - **Not observable without the code:** the exact function that assigns a position to a region.
 
+Over 64 km squares sampled every 256 blocks (seeds 7 and 99, `--climate-step 256`), the regions'
+shares of the area, estimated from every sample's set of matching regions (maximum likelihood),
+are their weights' shares: 34/33/27/6 % and 33/34/27/7 % against 33/33/27/7 %. Two samples are
+in the same region 69 % of the time 256 blocks apart, 50 % at 512, and by chance (42 %) from
+768 on.
+
 ## What Horizon does with it
 
-Regions become data (a mod's region: weight and parameter points, from the dump), and Horizon
-assigns positions to regions with its own seeded noise, weighted as observed. Within a region,
-biomes are exact (vanilla's rule); where a region's patch begins and ends is not. The matrix
-compares Horizon with NeoForge statistically: each biome's share of the area and the patch
-sizes, within a tolerance recorded in worldgen-tolerance.md.
+- **Data.** A mod's region is a file, `data/<ns>/worldgen/horizon_climate_region/<name>.json`:
+  `{"preset", "weight", "biomes": [{"coordinates", "offset", "biome"}]}` in quantized climate
+  units. `tools/worldgen_probe.py regions <run>.climate.json <carried mod>` writes them from a
+  NeoForge run. Entries naming a biome that is not installed are left out.
+- **Placement** (`horizon_world::worldgen::biome_source::regions`). The preset's own list is
+  region 0 (weight 10, TerraBlender's default), then the mods' regions by id. A jittered grid of
+  points 576 blocks apart splits the world into cells (each position takes its nearest point's),
+  and each cell picks a region by weight from the world seed. Its unit test checks the shares and
+  the patch sizes above. Within a region the biome is vanilla's rule, exactly.
+- **Results** (`worldgen_probe.py horizon biomesoplenty`). At NeoForge's climate, Horizon's biome
+  is one of the regions' picks at 99.75 % (seed 7) and 99.73 % (seed 99) of 66,049 samples; the
+  rest are 26.3's new vanilla biomes (dappled forest, pale garden, sulfur caves). Biome shares
+  differ by 1.97 % and 1.93 %, less than NeoForge's two seeds differ from each other (3.25 %).
+  Biomes O' Plenty is 40.2 % of the area on Horizon, 39.7 % on NeoForge (seed 7).

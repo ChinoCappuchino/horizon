@@ -416,14 +416,12 @@ impl ChunkEncoder {
             entity_types.push(t);
             block_ids.push(blocks.and_then(|b| b.id(&name)).unwrap_or(0));
         }
+        // A biome the registry lacks goes as plains, as vanilla's default.
+        let position = |n: &str| biome_registry.iter().position(|b| b == n);
+        let plains = position("minecraft:plains").unwrap_or(0);
         let biome_ids = biome_names
             .iter()
-            .map(|n| {
-                biome_registry
-                    .iter()
-                    .position(|b| b == n)
-                    .map_or(0, |i| i as i32)
-            })
+            .map(|n| position(n).unwrap_or(plains) as i32)
             .collect();
         Self {
             coder: Arc::new(SectionCoder {
