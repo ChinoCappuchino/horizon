@@ -186,7 +186,8 @@ def run(args):
         seconds, log = oracle.start(home, run_dir, {
             'horizon.probe.out': out, 'horizon.probe.radius': args.radius,
             'horizon.probe.cx': args.cx, 'horizon.probe.cz': args.cz,
-            'horizon.probe.starts_radius': getattr(args, 'starts_radius', 0)}, timeout=args.timeout)
+            'horizon.probe.starts_radius': getattr(args, 'starts_radius', 0),
+            'horizon.probe.climate_radius': getattr(args, 'climate_radius', 0)}, timeout=args.timeout)
     except subprocess.TimeoutExpired:
         sys.exit(f'timed out after {args.timeout} s (server log: {run_dir / "server.log"})')
     if error.exists():
@@ -425,6 +426,8 @@ def main():
     r.add_argument('--radius', type=int, default=4)
     r.add_argument('--cx', type=int, default=0)
     r.add_argument('--cz', type=int, default=0)
+    r.add_argument('--climate-radius', type=int, default=0,
+                   help='also sample climate and biome every 16 blocks this far out (chunks), and dump TerraBlender regions')
     r.add_argument('--starts-radius', type=int, default=0,
                    help='also list every structure start this far out (chunks), from STRUCTURE_STARTS only')
     r.add_argument('--timeout', type=int, default=1800)

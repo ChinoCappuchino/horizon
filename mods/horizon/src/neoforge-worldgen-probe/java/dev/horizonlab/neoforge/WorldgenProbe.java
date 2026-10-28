@@ -65,6 +65,14 @@ public final class WorldgenProbe {
                     JsonWriter json = new JsonWriter(w)) {
                 write(server.overworld(), json, radius, cx0, cz0);
             }
+            int climateRadius = Integer.getInteger("horizon.probe.climate_radius", 0);
+            if (climateRadius > 0) {
+                Path climate = Path.of(out.toString().replaceFirst("\\.json$", "") + ".climate.json");
+                try (Writer w = Files.newBufferedWriter(climate, StandardCharsets.UTF_8);
+                        JsonWriter json = new JsonWriter(w)) {
+                    writeClimate(server.overworld(), json, climateRadius, cx0, cz0);
+                }
+            }
             if (startsRadius > 0) {
                 Path starts = Path.of(out.toString().replaceFirst("\\.json$", "") + ".starts.json");
                 try (Writer w = Files.newBufferedWriter(starts, StandardCharsets.UTF_8);
@@ -114,6 +122,78 @@ public final class WorldgenProbe {
         for (int cz = cz0 - radius; cz <= cz0 + radius; cz++) {
             for (int cx = cx0 - radius; cx <= cx0 + radius; cx++) {
                 chunk(level, structures, level.getChunk(cx, cz, ChunkStatus.FULL, true), cx, cz, json);
+            }
+        }
+        json.endArray();
+        json.endObject();
+    }
+
+    /**
+     * The overworld's climate and biomes over a wide square, and the climate regions other mods
+     * registered with TerraBlender, read through its public API (by reflection: the probe neither
+     * depends on it nor reads its code). Samples every 16 blocks at y 64 (quart y 16): the six
+     * climate values of the noise sampler and the biome the biome source picks there.
+     */
+    private static void writeClimate(ServerLevel level, JsonWriter json, int radius, int cx0, int cz0)
+            throws IOException {
+        json.beginObject();
+        json.name("regions").beginArray();
+        try {
+            Class<?> regions = Class.forName("terrablender.api.Regions");
+            Class<?> type = Class.forName("terrablender.api.RegionType");
+            Object overworld = type.getField("OVERWORLD").get(null);
+            java.util.List<?> list = (java.util.List<?>) regions.getMethod("get", type).invoke(null, overworld);
+            Registry<Biome> biomes = level.registryAccess().registryOrThrow(Registries.BIOME);
+            for (Object region : list) {
+                json.beginObject();
+                json.name("name").value(String.valueOf(region.getClass().getMethod("getName").invoke(region)));
+                json.name("weight").value(((Number) region.getClass().getMethod("getWeight").invoke(region)).intValue());
+                json.name("points").beginArray();
+                java.util.List<Object[]> points = new java.util.ArrayList<>();
+                java.util.function.Consumer<Object> sink = pair -> {
+                    try {
+                        Object first = pair.getClass().getMethod("getFirst").invoke(pair);
+                        Object second = pair.getClass().getMethod("getSecond").invoke(pair);
+                        points.add(new Object[] {first, second});
+                    } catch (ReflectiveOperationException e) {
+                        throw new RuntimeException(e);
+                    }
+                };
+                region.getClass().getMethod("addBiomes", Registry.class, java.util.function.Consumer.class)
+                        .invoke(region, biomes, sink);
+                for (Object[] point : points) {
+                    net.minecraft.world.level.biome.Climate.ParameterPoint pp =
+                            (net.minecraft.world.level.biome.Climate.ParameterPoint) point[0];
+                    json.beginObject().name("biome").value(String.valueOf(
+                            ((net.minecraft.resources.ResourceKey<?>) point[1]).location()));
+                    json.name("parameters").beginArray();
+                    for (net.minecraft.world.level.biome.Climate.Parameter q : java.util.List.of(
+                            pp.temperature(), pp.humidity(), pp.continentalness(), pp.erosion(),
+                            pp.depth(), pp.weirdness())) {
+                        json.beginArray().value(q.min()).value(q.max()).endArray();
+                    }
+                    json.value(pp.offset());
+                    json.endArray().endObject();
+                }
+                json.endArray().endObject();
+            }
+        } catch (ClassNotFoundException e) {
+            // No TerraBlender in this row.
+        } catch (ReflectiveOperationException e) {
+            json.beginObject().name("error").value(String.valueOf(e)).endObject();
+        }
+        json.endArray();
+        net.minecraft.world.level.biome.Climate.Sampler sampler = level.getChunkSource().randomState().sampler();
+        net.minecraft.world.level.biome.BiomeSource source = level.getChunkSource().getGenerator().getBiomeSource();
+        json.name("samples").beginArray();
+        for (int z = (cz0 - radius) * 16; z <= (cz0 + radius) * 16; z += 16) {
+            for (int x = (cx0 - radius) * 16; x <= (cx0 + radius) * 16; x += 16) {
+                int qx = x >> 2, qy = 16, qz = z >> 2;
+                net.minecraft.world.level.biome.Climate.TargetPoint t = sampler.sample(qx, qy, qz);
+                json.beginArray().value(x).value(z)
+                        .value(key(source.getNoiseBiome(qx, qy, qz, sampler)))
+                        .value(t.temperature()).value(t.humidity()).value(t.continentalness())
+                        .value(t.erosion()).value(t.depth()).value(t.weirdness()).endArray();
             }
         }
         json.endArray();
