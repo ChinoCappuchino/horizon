@@ -5,6 +5,12 @@
 //!
 //! worldgen_probe <client resource dir> <out.json> [--seed S] [--radius R]
 //!     [--center CX CZ] [--preset ID] [--starts-radius N]
+//!     [--mod <file.hmod> [--settings JSON]]
+//!
+//! With `--mod`, the world-generation mod provides the terrain and biomes of
+//! its preset (its manifest's first, or `--preset`) through the generator's
+//! provider seam, over vanilla's overworld settings (M3a: at vanilla height
+//! until dimension types are data).
 //!
 //! Per chunk, on a 4-block grid: `base` (the top of the noise column's
 //! solid blocks, before carvers: vanilla's `getBaseHeight(OCEAN_FLOOR_WG)`), `biomes` at it (through vanilla's
@@ -16,13 +22,18 @@ use horizon_core::{
     biome::{BiomeZoom, obfuscate_seed},
     position::{BlockPos, ChunkPos},
 };
+use horizon_mods::{
+    Package,
+    worldgen_runtime::{WorldInfo, WorldgenMod},
+    worldgen_world::ModTerrain,
+};
 use horizon_world::{
     heightmap::HeightmapType,
     level::data::load_registry,
     worldgen::generator::{GeneratorData, OverworldGenerator, ProtoChunk},
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 const STEP: i32 = 4;
@@ -98,6 +109,8 @@ fn main() -> Result<(), Error> {
     let (mut seed, mut radius, mut center) = (1i64, 4i32, (0, 0));
     let mut preset = String::from("minecraft:normal");
     let mut starts_radius = 0i32;
+    let mut mod_path: Option<PathBuf> = None;
+    let mut settings = String::new();
     while let Some(arg) = args.next() {
         let mut next = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -106,13 +119,56 @@ fn main() -> Result<(), Error> {
             "--center" => center = (next()?.parse()?, next()?.parse()?),
             "--preset" => preset = next()?,
             "--starts-radius" => starts_radius = next()?.parse()?,
+            "--mod" => mod_path = Some(PathBuf::from(next()?)),
+            "--settings" => settings = next()?,
             _ => return Err(format!("unknown argument {arg}").into()),
         }
     }
     let registry = Box::leak(Box::new(load_registry(&resources)?));
     let data = GeneratorData::load(&resources.join("worldgen"), registry)?;
-    let generator =
-        OverworldGenerator::for_dimension(data.clone(), seed, &preset, "minecraft:overworld")?;
+    let mut terrain = None;
+    let generator = match &mod_path {
+        None => {
+            OverworldGenerator::for_dimension(data.clone(), seed, &preset, "minecraft:overworld")?
+        }
+        Some(path) => {
+            let package = Package::read(path)?;
+            if preset == "minecraft:normal" {
+                preset = package
+                    .manifest
+                    .worldgen
+                    .as_ref()
+                    .and_then(|w| w.presets.first().cloned())
+                    .ok_or("the mod provides no preset: pass --preset")?;
+            }
+            let m = WorldgenMod::load(&package)?;
+            let base = OverworldGenerator::for_dimension(
+                data.clone(),
+                seed,
+                "minecraft:normal",
+                "minecraft:overworld",
+            )?;
+            let info = WorldInfo {
+                seed,
+                preset: preset.clone(),
+                dimension: "minecraft:overworld".into(),
+                min_y: -64,
+                height: 384,
+                sea_level: base.sea_level(),
+                settings: settings.clone(),
+            };
+            let provider = Arc::new(ModTerrain::new(&m, data.clone(), info));
+            terrain = Some(provider.clone());
+            OverworldGenerator::with_provider(
+                data.clone(),
+                seed,
+                "minecraft:normal",
+                "minecraft:overworld",
+                true,
+                provider,
+            )?
+        }
+    };
     let mut worker = generator.worker();
 
     // Terrain two chunks beyond the probed square; features one beyond, so
@@ -242,7 +298,11 @@ fn main() -> Result<(), Error> {
         "generator": "horizon:OverworldGenerator",
         "dimension_type": "minecraft:overworld",
         "preset": preset,
-        "mods": {},
+        "mods": mod_path.as_ref().map_or(json!({}), |_| json!({ "worldgen": preset })),
+        "shared_cells": terrain.as_ref().map(|t| {
+            let s = t.world().shared_stats();
+            json!({ "built": s.builds, "kept": s.cells, "bytes": s.bytes })
+        }),
         "center": [center.0, center.1],
         "radius": radius,
         "chunks": out_chunks,

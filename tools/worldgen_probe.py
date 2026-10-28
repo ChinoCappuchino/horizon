@@ -336,7 +336,7 @@ def horizon(args):
     m = tomllib.loads(MATRIX.read_text())
     wanted = [r for r in m['row'] if not args.rows or r['name'] in args.rows]
     work = Path(os.environ.get('HORIZON_PORT_WORK', ROOT.parent / 'ports' / 'afterwinter'))
-    subprocess.run(['cargo', 'build', '--release', '-q', '-p', 'horizon-world', '--example', 'worldgen_probe'],
+    subprocess.run(['cargo', 'build', '--release', '-q', '-p', 'horizon-mods', '--features', 'world', '--example', 'worldgen_probe'],
                    check=True, cwd=ROOT)
     binary = lab.cargo_target() / 'release' / 'examples' / 'worldgen_probe'
     lines, wide_lines, failed = [], [], False

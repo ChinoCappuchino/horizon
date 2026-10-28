@@ -24,6 +24,9 @@ sha2 = { version = "0.10", optional = true }
 minisign-verify = { version = "0.3", optional = true }
 # World-generation mods' prefetch threads run only when a core is idle.
 horizon-threads = { path = "../horizon-threads", optional = true }
+# A world-generation mod as the game's terrain provider (feature `world`).
+horizon-world = { path = "../horizon-world", optional = true }
+horizon-core = { path = "../horizon-core", optional = true }
 # A shader pack's check (kind `shader`): the one the game runs before it loads a pack.
 horizon-shader-api = { path = "../horizon-shader-api", optional = true }
 
@@ -38,6 +41,8 @@ wit-parser = "0.254"
 # game's tests and probes) skip wasmtime and cranelift.
 runtime = ["dep:wasmtime", "dep:wasmparser", "dep:horizon-threads"]
 pack = ["dep:wit-component", "dep:wit-parser"]
+# A world-generation mod as horizon-world's terrain provider (worldgen_world.rs).
+world = ["runtime", "dep:horizon-world", "dep:horizon-core"]
 # The mod registry's index (docs/api/mod-index.md): the launcher, the registry server and its CI.
 index = ["dep:sha2", "dep:minisign-verify", "dep:horizon-shader-api", "dep:wasmparser"]
 
@@ -51,11 +56,22 @@ required-features = ["runtime", "pack"]
 name = "worldgen"
 required-features = ["runtime", "pack"]
 
+# A world-generation mod through horizon-world's generator (needs the prepared 26.3 resources).
+[[test]]
+name = "worldgen_world"
+required-features = ["world", "pack"]
+
 # A world-generation mod's terrain in chunks a second: `cargo run --release -p horizon-mods
 # --features runtime,pack --example worldgen_bench -- <mod.hmod>`.
 [[example]]
 name = "worldgen_bench"
 required-features = ["runtime", "pack"]
+
+# The fork's world-generation matrix, Horizon's side: vanilla, carried mods' data, or a
+# world-generation mod's preset through the real generator (tools/worldgen_probe.py horizon).
+[[example]]
+name = "worldgen_probe"
+required-features = ["world"]
 
 # docs/api/mods-reference.md from the WIT contract (HORIZON_WRITE_DOCS=1 rewrites it).
 [[test]]

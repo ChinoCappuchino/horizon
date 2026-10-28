@@ -20,6 +20,8 @@ pub mod testing;
 pub mod worldgen;
 #[cfg(feature = "runtime")]
 pub mod worldgen_runtime;
+#[cfg(feature = "world")]
+pub mod worldgen_world;
 
 pub use content::Content;
 pub use manifest::{Capability, Manifest, Package, Side, find};

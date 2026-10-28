@@ -1492,8 +1492,10 @@ dependencies = [
 name = "horizon-mods"
 version = "0.1.0"
 dependencies = [
+ "horizon-core",
  "horizon-shader-api",
  "horizon-threads",
+ "horizon-world",
  "log",
  "minisign-verify",
  "serde",

@@ -104,7 +104,7 @@ pub(super) fn read_state(registry: &BlockRegistry, tag: &Tag) -> BlockStateId {
     registry.id(&state).unwrap_or(default)
 }
 /// Parse `name[key=value,...]` (BlockStateParser without NBT); None if invalid.
-pub(super) fn parse_state_string(registry: &BlockRegistry, text: &str) -> Option<BlockStateId> {
+pub fn parse_state_string(registry: &BlockRegistry, text: &str) -> Option<BlockStateId> {
     let text = text.split('{').next().unwrap_or(text).trim();
     let (name, properties) = match text.split_once('[') {
         Some((name, rest)) => (name, rest.strip_suffix(']')?),

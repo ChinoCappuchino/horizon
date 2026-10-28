@@ -53,6 +53,7 @@ pub mod material_surface;
 pub mod ore_feature;
 pub mod placement;
 pub mod projected;
+pub mod provider;
 pub mod replace_blobs;
 pub mod root_system;
 pub mod router;

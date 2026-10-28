@@ -276,6 +276,19 @@ steps that each prove something on their own, the height change late:
 | M3f | Mod biomes (Biomes O' Plenty): biomes from mod content, climate regions, the client's biome table (7-bit palette), registry sync, feature order across the new biomes | the biomesoplenty matrix row against NeoForge |
 | M3g | Mod features in decoration (Large Ore Deposits, FarView's decoration): `decorate` steps and biome-modifier-like additions | the large-ore-deposits row, statistically |
 
+**M3a, done (2026-10-28).** `horizon_world::worldgen::provider::{TerrainProvider, ProviderWorker}`;
+`OverworldGenerator::with_provider` keeps the preset's noise settings for sea level, default
+block and fluid, and takes biomes (per quart, `KEEP_BIOME` falls back to vanilla's source) and
+land (columns, or density interpolated into columns) from the provider. The land is final: no
+aquifers, surface rules or carvers over it (as FarView's Java generator: its author, 2026-10-28).
+Structure placement, `/locate biome` and the probe read the provider's biomes and columns
+(`noise_column` takes the worker). `horizon_mods::worldgen_world::ModTerrain` (feature `world`)
+is a world-generation mod as that provider; `worldgen_probe` (now in horizon-mods) takes
+`--mod`. Proof: vanilla's probe output is byte-identical before and after on seeds 2, 42 and
+8675309 (chunks and the wide starts); `tests/worldgen_world.rs` checks every column of
+generated chunks against the stand-in mod's own heights. Left for M3c: far terrain (`lod_grid`,
+`surface_sample`'s biome) still samples vanilla's noise in a provider world.
+
 2048 sections per column is about five times the memory and light work of vanilla's 384; M3d is
 measured against vanilla worlds so they don't get slower.
 
