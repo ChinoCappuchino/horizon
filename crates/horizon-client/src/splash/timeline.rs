@@ -385,7 +385,8 @@ impl Timeline {
         } else if self.mods {
             format!("Loading mods {shown} / {n} · {name}")
         } else {
-            format!("Loading · {name}")
+            // The stages say it themselves ("Loading assets").
+            name
         };
         let text_alpha = if t > finale {
             (1.0 - (t - finale) * 3.0).max(0.0)
@@ -478,6 +479,8 @@ impl Timeline {
         } else {
             std::f32::consts::PI + 0.45
         };
+        // Over the window's top edge; with a window nearly the screen's
+        // height the leap may leave the screen for a moment (chino: fine).
         let top = cy - rh / 2.0 - 46.0 * k;
         let c = (t - finale) / CROUCH;
         let u = (t - finale - CROUCH) / LEAP;

@@ -33,8 +33,8 @@ choices are made at run time) but have not been run yet.
 
 ## For development
 
-- `HORIZON_SPLASH_TRACE=FILE` writes every frame's inputs; `examples/splash_frames.rs --replay
-  FILE BACKGROUND.png OUT` renders that run again offscreen at 60 frames a second (then
+- `HORIZON_SPLASH_TRACE=FILE` writes every frame's inputs; `splash_frames <prepared resources> OUT
+  --replay FILE BACKGROUND.png` renders that run again offscreen at 60 frames a second (then
   `ffmpeg -framerate 60 -i OUT/frame-%05d.png ...`).
 - `examples/splash_frames.rs` alone renders chosen moments of a simulated loading; `--fox-test`
   draws the fox at four headings.
