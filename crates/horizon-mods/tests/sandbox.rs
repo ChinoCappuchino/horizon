@@ -255,8 +255,11 @@ experimental = ["ui", "render", "input", "recipes"]
         needed(imports(&wasm).unwrap().iter().map(String::as_str)).0
     };
     assert_eq!(level("coords_hud.hmod"), 0);
-    // The UI guest draws far terrain (`render.set-far-terrain`).
-    assert_eq!(level("horizon_mods_test_ui_guest.hmod"), LEVEL);
+    // The UI guest draws far terrain (`render.set-far-terrain`); the levels
+    // after it are the fork's world-generation functions.
+    let far_terrain = horizon_mods::api_level::level_of("render.set-far-terrain").unwrap();
+    assert_eq!(level("horizon_mods_test_ui_guest.hmod"), far_terrain);
+    assert!(far_terrain < LEVEL);
 }
 
 #[test]

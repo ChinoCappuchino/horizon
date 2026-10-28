@@ -99,12 +99,135 @@ that list is a failure.
 
 | | Milestone | Proof |
 |---|---|---|
-| M1 | Behaviour spec for Farview (clean room) and the oracle probe | probe exports for vanilla and Farview on NeoForge 1.21.1 |
-| M2 | WIT interfaces and manifest schema for the five stages and claims | API reference generated, sandbox tests |
+| M1 | Behaviour spec for Farview (clean room) and the oracle probe (done) | probe exports for vanilla and Farview on NeoForge 1.21.1 |
+| M2 | WIT interfaces and manifest schema for the five stages and claims (done, see below) | API reference generated, sandbox tests |
 | M3 | Climate and terrain hooks in `horizon-world` | vanilla rows unchanged; a test provider |
 | M4 | Structures, features, claims, the report | matrix rows with stand-in mods |
 | M5 | Farview port (Rust to WebAssembly) from the spec | Farview rows and the pack row pass |
 | M6 | Proposal upstream | issue with the design and the matrix results |
+
+## M2: the contract
+
+Landed on the fork, 2026-10-28. Nothing in the game calls it yet (that is M3); what exists is
+the contract, the code that holds mods to it, and the tests.
+
+**Where it lives.**
+
+| Part | File |
+|---|---|
+| WIT: `worldgen` (what the mod reads), `worldgen-events` (what the game calls), world `horizon-worldgen-mod` | `crates/horizon-mod-sdk/wit/horizon.wit` |
+| Generated reference | `docs/api/mods-reference.md` |
+| Manifest: capability `worldgen`, the `[worldgen]` section | `crates/horizon-mods/src/manifest.rs` |
+| Claims, the pack's rules, the plan that settles them, the report | `crates/horizon-mods/src/worldgen.rs` |
+| Running a mod: instances per worker, every answer checked | `crates/horizon-mods/src/worldgen_runtime.rs` |
+| SDK: `WorldgenMod`, `export_worldgen_mod!` | `crates/horizon-mod-sdk/src/lib.rs` (`mod worldgen`) |
+| A stand-in mod that misbehaves on request, and its tests | `crates/horizon-mods/tests/worldgen_guest/`, `crates/horizon-mods/tests/worldgen.rs` |
+
+**Version.** An experimental capability on the server-mod line (`api = "0.3"`, `side =
+"server"`, `experimental = ["worldgen"]`): additive, so nothing upstream changes meaning. Its
+four imported functions are API level 8, a number upstream may later give to something else;
+the fork renumbers if it ever merges upstream's level 8.
+
+**The stages as calls.** `open(world-info)` once per instance, then per chunk:
+
+| Stage | Call | Answer, checked by the game |
+|---|---|---|
+| climate | `biomes(request)` with vanilla's six climate values per quart (empty in a mod's preset) | a biome per quart; `4294967295` keeps what the next mod or vanilla puts there |
+| terrain | `terrain(x, z)`; `heights(columns)` without generating | `density` on vanilla's 4 × 4 × 8 grid, or exact `columns` of runs that must ascend; heights inside the world |
+| surface | `decorate(x, z, surface \| carvers)` | blocks in the chunk only |
+| structures | `starts(x, z)` | starts in the mod's own namespaces, pieces (templates, or blocks inside the start's box) |
+| features | `decorate(x, z, <vanilla's 11 steps>)`, reading `region-block` and `region-height` | blocks in the chunk and up to 16 blocks around it, vanilla's limit for features |
+| (claims) | `regions(x, z)` | only names the manifest declares |
+
+Block states and biomes go across as numbers (`state-id`, `biome-id`), resolved once, so a
+chunk's answer carries no strings per block.
+
+**The determinism contract.** Every answer follows from the call's arguments, the opened world
+and what `region-block` reads. The game makes one instance per generation worker and may call
+any of them for any chunk, in any order, more than once, so anything a mod keeps between calls
+is a cache. The engine canonicalises NaNs and lowers relaxed SIMD deterministically, and a
+world-generation mod imports nothing but `log` and `worldgen`: no clock, no storage, no
+randomness that isn't seeded from the world. As a side effect, a call never runs inside another
+call of the same instance: the re-entrancy behind Farview's "Runs must ascend" crash (see
+[farview-spec.md](farview-spec.md)) can't happen in this model, and if a port still sends
+runs that don't ascend, the game refuses that chunk's answer with the column named, instead of
+crashing.
+
+**Failures.** An `err`, or an answer that breaks the rules above, is *refused*: that chunk goes
+without the mod's part, and the report will count it (M4). A trap or a call over its budget
+*stops* that instance for the world. Budgets: 4 × 10⁹ fuel for `open` (a provider may build
+its maps there), 10⁹ per call after it, 256 MiB of memory per instance, 4 log lines per call.
+
+**Claims in the manifest.** A Farview-shaped example (a sketch: the port in M5 decides the
+real one):
+
+```toml
+[worldgen]
+presets = ["afterwinter_worldgen:earth", "afterwinter_worldgen:coastal_life"]
+stages = ["climate", "terrain", "structures", "features"]
+regions = ["settlements", "rails", "lava"]
+
+[[worldgen.claims]]
+name = "settlement_sites"       # the pack's rules call it afterwinter_worldgen/settlement_sites
+stage = "structures"
+action = "reserve"              # no other mod's structures in the sites
+scope = "region:settlements"    # the chunks its regions() puts in `settlements`
+priority = 10
+
+[[worldgen.claims]]
+name = "own_forests"
+stage = "features"
+action = "replace"
+scope = "biome:#minecraft:is_forest"
+targets = ["minecraft:trees_birch_and_oak"]
+with = "afterwinter_worldgen:winter_trees"
+```
+
+A content mod without code (Biomes O' Plenty, Towns and Towers) may have `[worldgen]` with
+claims only. Scopes: `*`, `region:<name>` (the mod's own), `biome:<id>`, `biome:#<tag>`,
+`preset:<id>`. Targets: `*`, `<id>`, `#<tag>`, `mod:<id>`. Terrain has no claims: one provider
+per preset. Checked at load: `replace` names a `with` in the mod's namespaces, `reserve` has a
+scope narrower than everywhere, a region scope names a declared region, `add` only covers the
+mod's own things, and no claim acts on its own mod.
+
+**How a claim decides.** For a thing a mod adds (a biome, a structure, a feature) at a place
+(preset, biome and its tags, the regions each mod's code puts the chunk in), the first claim in
+this order that applies to it decides: highest priority, then the mod id in sorting order, then
+the claim's name. Never the load order. `add` keeps the claimant's own things (a protection
+against lower claims); `remove` and `reserve` take other mods' things out; `replace` swaps in
+the claimant's `with`. A mod's claims never act on its own things.
+
+**The pack author's last word.** `config/horizon/worldgen-rules.toml`:
+
+```toml
+[claims."afterwinter_worldgen/settlement_sites"]
+priority = 50          # instead of the manifest's
+[claims."t_and_t/villages"]
+allow = false          # ignored
+[mods.biomesoplenty]
+off = ["features"]     # none of its features, by data or code
+```
+
+**The report.** `Plan::report()` writes the declared half: who takes part in which stage,
+the claims in the order they decide (with the pack's priority changes marked), the pack's
+rules, the conflicts with who wins and why (priority, or the mod-id tiebreak), and the
+problems: a rule that names nothing, a claim that removes what no installed mod adds. The
+counts of what each claim took out come with generation (M4).
+
+**Tests** (`cargo test -p horizon-mods --features runtime,pack`): `worldgen::tests` (claims are
+checked; priority, then mod id, never load order; the pack's rules; removing what nobody adds),
+`manifest::tests::worldgen_is_a_server_capability_with_a_section`, and `tests/worldgen.rs`
+against the stand-in mod: the same land from every worker in any order, climate-driven biomes,
+features that read the region and stay in their area, structures in the mod's namespaces,
+refused answers (runs that don't ascend, NaN densities, blocks outside the area, a foreign
+structure id, a stage the manifest doesn't list) that leave the mod running, panics and
+endless loops that stop only that instance, the game's hooks leaving the mod to the generator,
+and a reserve claim deciding by the regions the mod's own code computes.
+
+**Left for later.** Terrain *modifiers* (a mod adjusting another provider's density in its
+regions): no Afterwinter mod needs one yet, and it is a new function, so adding it breaks
+nothing. Applying claims to data-driven content (JSON biomes, structure sets, placed features)
+is M4, where the generator knows each thing's owner and tags.
 
 ## Moving to another machine
 

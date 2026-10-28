@@ -17,6 +17,9 @@ pub mod modpack;
 mod runtime;
 #[cfg(feature = "runtime")]
 pub mod testing;
+pub mod worldgen;
+#[cfg(feature = "runtime")]
+pub mod worldgen_runtime;
 
 pub use content::Content;
 pub use manifest::{Capability, Manifest, Package, Side, find};

@@ -58,6 +58,12 @@ pub struct Manifest {
     /// accepted here, so the manifest keeps loading once it is promoted.
     #[serde(default)]
     pub experimental: Vec<Capability>,
+    /// What the mod does in world generation (fork `afterwinter`,
+    /// docs/research/worldgen-hooks.md): the presets and stages of its code
+    /// (capability `worldgen`) and its claims, which a content mod may make
+    /// too.
+    #[serde(default)]
+    pub worldgen: Option<crate::worldgen::Section>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -103,9 +109,12 @@ pub enum Capability {
     /// The recipes and items the game knows, for recipe viewers
     /// (interface `recipes`).
     Recipes,
+    /// Takes part in generating new worlds' terrain, biomes, structures and
+    /// features (interfaces `worldgen` and `worldgen-events`; server mods).
+    Worldgen,
 }
 impl Capability {
-    pub const ALL: [Capability; 12] = [
+    pub const ALL: [Capability; 13] = [
         Capability::GameRead,
         Capability::Chat,
         Capability::Hud,
@@ -118,12 +127,13 @@ impl Capability {
         Capability::Players,
         Capability::World,
         Capability::Recipes,
+        Capability::Worldgen,
     ];
     /// Whether a server mod may have it: the others act on a local player.
     pub fn on_server(self) -> bool {
         matches!(
             self,
-            Capability::Storage | Capability::Players | Capability::World
+            Capability::Storage | Capability::Players | Capability::World | Capability::Worldgen
         )
     }
     /// The WIT interface it grants, in `horizon:mods`.
@@ -141,6 +151,7 @@ impl Capability {
             Capability::Players => "players",
             Capability::World => "world",
             Capability::Recipes => "recipes",
+            Capability::Worldgen => "worldgen",
         }
     }
     /// May change in any release: a mod uses it only with
@@ -148,7 +159,11 @@ impl Capability {
     pub fn is_experimental(self) -> bool {
         matches!(
             self,
-            Capability::Ui | Capability::Render | Capability::Input | Capability::Recipes
+            Capability::Ui
+                | Capability::Render
+                | Capability::Input
+                | Capability::Recipes
+                | Capability::Worldgen
         )
     }
     /// What the player reads before turning the mod on: "May <this>".
@@ -169,6 +184,9 @@ impl Capability {
             Capability::World => "read and change the world's blocks",
             Capability::Recipes => {
                 "read the game's recipes and items and which recipes you know, place recipes in your crafting grid and, in creative mode, give you items"
+            }
+            Capability::Worldgen => {
+                "shape new worlds' land and add or take out their biomes, structures and features"
             }
         }
     }
@@ -211,6 +229,7 @@ impl fmt::Display for Capability {
             Capability::Players => "players",
             Capability::World => "world",
             Capability::Recipes => "recipes",
+            Capability::Worldgen => "worldgen",
         };
         f.write_str(name)
     }
@@ -289,6 +308,26 @@ impl Manifest {
             if *ns == m.id || m.namespaces[..i].contains(ns) {
                 return Err(format!("{MANIFEST}: namespace {ns} is listed twice"));
             }
+        }
+        let code = m.capabilities.contains(&Capability::Worldgen);
+        match &m.worldgen {
+            Some(section) => {
+                if !code && !m.capabilities.contains(&Capability::Registries) {
+                    return Err(format!(
+                        "{MANIFEST}: [worldgen] is for a mod with capability worldgen or content (registries)"
+                    ));
+                }
+                let namespaces: Vec<&str> = m.owned_namespaces().collect();
+                section
+                    .check(&m.id, &namespaces, code)
+                    .map_err(|e| format!("{MANIFEST}: {e}"))?;
+            }
+            None if code => {
+                return Err(format!(
+                    "{MANIFEST}: capability worldgen needs a [worldgen] section with its stages"
+                ));
+            }
+            None => {}
         }
         Ok(m)
     }
@@ -540,6 +579,47 @@ capabilities = ["game-read", "hud"]
         assert_eq!(p.manifest.id, "coords_hud");
         assert_eq!(p.wasm.as_deref(), Some(&b"\0asm"[..]));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn worldgen_is_a_server_capability_with_a_section() {
+        let base = "id = \"terra\"\nname = \"T\"\nversion = \"1\"\n";
+        let code = format!(
+            "{base}api = \"0.3\"\nside = \"server\"\ncapabilities = [\"worldgen\"]\nexperimental = [\"worldgen\"]\n"
+        );
+        let section = "[worldgen]\npresets = [\"terra:flat\"]\nstages = [\"terrain\"]\n";
+        let m = Manifest::parse(&format!("{code}{section}")).unwrap();
+        assert_eq!(m.worldgen.unwrap().presets, ["terra:flat"]);
+        let e = Manifest::parse(&code).unwrap_err();
+        assert!(e.contains("needs a [worldgen] section"), "{e}");
+        let e = Manifest::parse(&code.replace("experimental = [\"worldgen\"]\n", "")).unwrap_err();
+        assert!(e.contains("experimental = [\"worldgen\"]"), "{e}");
+        let client = format!("{base}api = \"0.1\"\ncapabilities = [\"worldgen\"]\n{section}");
+        assert!(
+            Manifest::parse(&client)
+                .unwrap_err()
+                .contains("for server mods")
+        );
+        // A content mod may claim, not run stages; a plain client mod neither.
+        let content = format!("{base}api = \"0.2\"\ncapabilities = [\"registries\"]\n");
+        let claim = "[worldgen]\n[[worldgen.claims]]\nname = \"no_oaks\"\nstage = \"features\"\naction = \"remove\"\ntargets = [\"minecraft:oak\"]\n";
+        Manifest::parse(&format!("{content}{claim}")).unwrap();
+        let e = Manifest::parse(&format!("{content}{section}")).unwrap_err();
+        assert!(e.contains("need capability worldgen"), "{e}");
+        let e = Manifest::parse(&format!("{EXAMPLE}{claim}")).unwrap_err();
+        assert!(e.contains("[worldgen] is for"), "{e}");
+        // Its code needs the capability's interface to be declared.
+        let m = Manifest::parse(&format!("{code}{section}")).unwrap();
+        assert_eq!(m.check_imports(["horizon:mods/worldgen@0.1.0"]), Ok(()));
+        let server = Manifest::parse(
+            "id = \"w\"\nname = \"W\"\nversion = \"1\"\napi = \"0.3\"\nside = \"server\"\n",
+        )
+        .unwrap();
+        assert!(
+            server
+                .check_imports(["horizon:mods/worldgen@0.1.0"])
+                .is_err()
+        );
     }
 
     #[test]

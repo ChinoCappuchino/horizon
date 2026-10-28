@@ -568,6 +568,20 @@ items or block states yet, and `^` coordinates; in-frame single player's chat
 box lists server mods' commands by name only (the server still parses their
 arguments).
 
+### World-generation mods (fork `afterwinter`, experimental)
+
+On the `afterwinter` fork only: a server mod with capability `worldgen`
+(`experimental = ["worldgen"]`) builds against the world
+`horizon-worldgen-mod` (`horizon_mod_sdk::worldgen`) and takes part in
+generating new worlds: biomes, the land of the presets it provides,
+surface, structures and features. It runs on the generator's workers, apart
+from the server's hooks, and declares in `[worldgen]` which stages it joins
+and its claims (replace, remove, reserve) over other mods' contributions;
+the pack author overrules claims in `config/horizon/worldgen-rules.toml`.
+The contract, the claims and their tests:
+[research/worldgen-hooks.md](research/worldgen-hooks.md#m2-the-contract).
+The generator calls it from milestone M3 on.
+
 ## Publish your mod
 
 Horizon's registry lists mods, modpacks (`.hpack`) and resource packs made for Horizon, each reviewed before it is

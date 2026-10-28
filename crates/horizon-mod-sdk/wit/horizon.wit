@@ -783,6 +783,239 @@ interface server-events {
     block-placed: func(player: player, pos: block-pos, state: string);
 }
 
+/// Capability `worldgen`, world-generation mods only (manifest `api =
+/// "0.3"`, `side = "server"`, experimental; fork `afterwinter`,
+/// docs/research/worldgen-hooks.md): what such a mod reads while the
+/// game asks it for its part of a chunk. Block states and biomes travel as
+/// numbers the game hands out once; every answer is checked before it is
+/// used.
+interface worldgen {
+    /// The game's number for a block state (`minecraft:stone`,
+    /// `minecraft:oak_log[axis=y]`; properties left out take the block's
+    /// defaults), for the states a mod's answers carry. The same in every
+    /// call of one world. Errs on a block or property the game doesn't have.
+    state-id: func(state: string) -> result<u32, string>;
+    /// The game's number for a biome (`minecraft:plains`, `<mod>:<path>`),
+    /// for `worldgen-events.biomes`; none for a biome the world doesn't
+    /// have.
+    biome-id: func(biome: string) -> option<u32>;
+    /// During `decorate` only: the block state's number at a position of
+    /// the area the step may read (the chunk and its eight neighbours, as
+    /// vanilla's features see them). None outside that area and outside
+    /// `decorate`.
+    region-block: func(x: s32, y: s32, z: s32) -> option<u32>;
+    /// During `decorate` only: the y above the highest block that blocks
+    /// motion or holds a fluid (vanilla's `OCEAN_FLOOR` heightmap, `true`
+    /// for `WORLD_SURFACE`: the highest block that isn't air) in a column of
+    /// the area `region-block` reads; none outside it.
+    region-height: func(x: s32, z: s32, surface: bool) -> option<s32>;
+}
+
+/// What the game calls on a world-generation mod (capability `worldgen`).
+/// Only the stages `open` names are called, for the worlds the mod opens.
+///
+/// Every answer depends only on the call's arguments, the world `open` was
+/// given and what `region-block` reads: the game runs several instances of
+/// the mod on its generation workers, calls them in any order and may ask
+/// for the same chunk twice, so anything kept between calls is a cache.
+/// A call that errs leaves the mod's part out of that chunk (the
+/// world-generation report counts it); a trap or a call over its budget
+/// stops the mod.
+interface worldgen-events {
+    /// The world being generated.
+    record world-info {
+        /// The world's seed.
+        seed: s64,
+        /// The world preset picked on the create-world screen
+        /// (`minecraft:normal`, `<mod>:<preset>`).
+        preset: string,
+        /// The dimension (`minecraft:overworld`).
+        dimension: string,
+        /// The dimension type's lowest y and height in blocks (a multiple
+        /// of 16, at most 4064).
+        min-y: s32,
+        height: u32,
+        /// The preset's sea level.
+        sea-level: s32,
+        /// The preset's generator settings, as the JSON text of its world
+        /// preset file's generator, or "" for vanilla's.
+        settings: string,
+    }
+    /// A stage of generation, in the order the game runs them.
+    enum stage {
+        /// Which biome goes where (`biomes`).
+        climate,
+        /// The shape of the land (`terrain`, `heights`): only for the
+        /// presets the mod's manifest lists.
+        terrain,
+        /// Surface blocks and carved caves (`decorate`, steps `surface` and
+        /// `carvers`).
+        surface,
+        /// Structure starts (`starts`).
+        structures,
+        /// Features (`decorate`, the feature steps).
+        features,
+    }
+    /// What the mod does in a world it opens.
+    record contribution {
+        /// The stages to call, each one its manifest lists in `stages`.
+        stages: list<stage>,
+    }
+    /// Called once per instance, before any other call: the game makes a
+    /// mod's instances for one world and dimension. An error keeps the mod
+    /// out of that world (and is in the report); an empty `stages` means it
+    /// has no part in it.
+    open: func(info: world-info) -> result<contribution, string>;
+
+    /// Vanilla's climate at a 4 × 4 × 4 cell (a quart), from its
+    /// multi-noise sampler.
+    record climate {
+        temperature: f32,
+        humidity: f32,
+        continentalness: f32,
+        erosion: f32,
+        depth: f32,
+        weirdness: f32,
+    }
+    /// The quarts of one chunk whose biomes the game asks for: the 4 × 4
+    /// columns from `min-quart-y` up, `quarts-y` high.
+    record biome-request {
+        chunk-x: s32,
+        chunk-z: s32,
+        /// In quarts (y / 4).
+        min-quart-y: s32,
+        quarts-y: u32,
+        /// Vanilla's climate for each quart, in the order of the answer;
+        /// empty when the preset's terrain is a mod's (vanilla's climate
+        /// isn't sampled there).
+        climate: list<climate>,
+    }
+    /// Stage `climate`: a biome number for each quart of the request, x
+    /// fastest, then z, then y (16 × `quarts-y` numbers). 4294967295 keeps
+    /// what the next mod or vanilla puts there.
+    biomes: func(request: biome-request) -> result<list<u32>, string>;
+
+    /// Blocks of one state, up to and including `top`, from where the run
+    /// below ended (or from the bottom of the world).
+    record run {
+        /// From `worldgen.state-id`.
+        state: u32,
+        top: s32,
+    }
+    /// The blocks of one column, bottom up: each run's `top` above the one
+    /// before it. Above the last run is air.
+    record column {
+        runs: list<run>,
+    }
+    /// The land of a chunk, as the terrain's provider shapes it.
+    variant land {
+        /// Density at the corners of vanilla's noise cells: 5 × 5 corners
+        /// every 4 blocks across the chunk (its far edge included) and every
+        /// 8 blocks up from `min-y` (height / 8 + 1 of them), x fastest,
+        /// then z, then y. Above 0 is solid: the game interpolates between
+        /// the corners as vanilla does and fills stone, and water below sea
+        /// level.
+        density(list<f32>),
+        /// The exact blocks: 256 columns, x fastest, then z.
+        columns(list<column>),
+    }
+    /// Stage `terrain`, for a preset the mod provides: the chunk's land.
+    terrain: func(chunk-x: s32, chunk-z: s32) -> result<land, string>;
+    /// A column, in blocks.
+    record column-pos {
+        x: s32,
+        z: s32,
+    }
+    /// Stage `terrain`: the y above the highest solid block of each column
+    /// (vanilla's `OCEAN_FLOOR_WG`), as `terrain` would make it, without
+    /// generating the chunk: for structure placement and the spawn point.
+    /// One number per column, in order (at most 4096 columns a call).
+    heights: func(columns: list<column-pos>) -> result<list<s32>, string>;
+
+    /// A block the mod sets.
+    record block-edit {
+        x: s32,
+        y: s32,
+        z: s32,
+        /// From `worldgen.state-id`.
+        state: u32,
+    }
+    /// Where in a chunk's generation `decorate` is called: `surface` and
+    /// `carvers` for stage `surface`, the rest (vanilla's decoration steps,
+    /// in its order) for stage `features`.
+    enum step {
+        surface,
+        carvers,
+        raw-generation,
+        lakes,
+        local-modifications,
+        underground-structures,
+        surface-structures,
+        strongholds,
+        underground-ores,
+        underground-decoration,
+        fluid-springs,
+        vegetal-decoration,
+        top-layer-modification,
+    }
+    /// Stages `surface` and `features`: the blocks the mod sets in one
+    /// step of a chunk, at most 65536. `surface` and `carvers` set blocks
+    /// of the chunk only; the feature steps those of the chunk and up to 16
+    /// blocks into its neighbours (vanilla's limit for features). One
+    /// outside its area makes the whole answer refused.
+    decorate: func(chunk-x: s32, chunk-z: s32, step: step) -> result<list<block-edit>, string>;
+
+    /// How a structure piece's template turns.
+    enum rotation {
+        none,
+        clockwise-90,
+        clockwise-180,
+        counterclockwise-90,
+    }
+    /// A structure template from the mod's `data/` (or vanilla's), placed
+    /// as vanilla's template pieces are.
+    record template-piece {
+        /// `<mod>:<path>` for `data/<mod>/structure/<path>.nbt`.
+        template: string,
+        /// Its lowest corner, before turning.
+        x: s32,
+        y: s32,
+        z: s32,
+        rotation: rotation,
+        /// Mirrored front to back, before turning.
+        mirror: bool,
+    }
+    /// A part of a structure.
+    variant piece {
+        template(template-piece),
+        /// Blocks the mod lists itself.
+        blocks(list<block-edit>),
+    }
+    /// A structure that starts in a chunk. The game builds the part of it
+    /// in each chunk it reaches, in step `surface-structures`.
+    record structure-start {
+        /// The structure's id, in the mod's own namespaces: what claims
+        /// and the report name.
+        id: string,
+        /// The box around every piece: lowest and highest corners.
+        min-x: s32,
+        min-y: s32,
+        min-z: s32,
+        max-x: s32,
+        max-y: s32,
+        max-z: s32,
+        /// At most 1024; with every block of `blocks` pieces inside the box.
+        pieces: list<piece>,
+    }
+    /// Stage `structures`: the structures that start in the chunk.
+    starts: func(chunk-x: s32, chunk-z: s32) -> result<list<structure-start>, string>;
+
+    /// The mod's regions (the manifest's `regions`) the chunk lies in,
+    /// for its claims with scope `region:<name>`. Called only for a mod
+    /// whose manifest declares regions.
+    regions: func(chunk-x: s32, chunk-z: s32) -> result<list<string>, string>;
+}
+
 /// A client mod: runs in the player's game.
 world horizon-mod {
     import log;
@@ -803,6 +1036,16 @@ world horizon-server-mod {
     import players;
     import %world;
     export server-events;
+}
+
+/// A world-generation mod (capability `worldgen`, manifest `api = "0.3"`,
+/// `side = "server"`, experimental): runs on the game's generation workers,
+/// apart from the server's hooks, so it imports nothing that changes from
+/// one run to the next.
+world horizon-worldgen-mod {
+    import log;
+    import worldgen;
+    export worldgen-events;
 }
 
 /// A mod with widgets (capability `ui`): the SDK builds every mod against

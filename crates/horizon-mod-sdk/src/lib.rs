@@ -22,7 +22,8 @@
 //!
 //! Every interface but `log` is a capability: list the ones the mod uses in
 //! `horizon-mod.toml` (`game-read`, `chat`, `hud`, `storage`, `command`, `ui`;
-//! a server mod `storage` and `players`). Server mods: [`server`].
+//! a server mod `storage` and `players`). Server mods: [`server`];
+//! world-generation mods: [`worldgen`].
 //!
 //! Widgets (capability `ui`): a mod shows a screen it owns with
 //! [`ui::open_screen`] and a page in Options > Mods with
@@ -442,6 +443,133 @@ macro_rules! export_server_mod {
             $crate::server::__export_horizon_server_mod!(Export);
             #[cfg(not(target_arch = "wasm32"))]
             let _ = <Export as $crate::server::__Guest>::init;
+        };
+    };
+}
+
+/// World-generation mods (capability `worldgen`, manifest `api = "0.3"`,
+/// `side = "server"`, experimental; fork `afterwinter`,
+/// docs/research/worldgen-hooks.md): a type implementing
+/// [`WorldgenMod`](worldgen::WorldgenMod), exported with
+/// [`export_worldgen_mod!`]. The game makes several instances of it, each
+/// for one world and dimension, and calls them from its generation workers
+/// in any order: every answer must follow from the call's arguments, the
+/// world and what [`region_block`](worldgen::region_block) reads.
+pub mod worldgen {
+    wit_bindgen::generate!({
+        path: "wit",
+        world: "horizon-worldgen-mod",
+        pub_export_macro: true,
+        export_macro_name: "__export_horizon_worldgen_mod",
+        default_bindings_module: "horizon_mod_sdk::worldgen",
+        with: {
+            "horizon:mods/log@0.1.0": crate::log,
+        },
+    });
+
+    pub use exports::horizon::mods::worldgen_events::{
+        BiomeRequest, BlockEdit, Climate, Column, ColumnPos, Contribution, Guest as __Guest, Land,
+        Piece, Rotation, Run, Stage, Step, StructureStart, TemplatePiece, WorldInfo,
+    };
+    pub use horizon::mods::worldgen::{biome_id, region_block, region_height, state_id};
+
+    /// The biome number that keeps what the next mod or vanilla puts there.
+    pub const KEEP_BIOME: u32 = u32::MAX;
+
+    /// The game's calls into a world-generation mod. Only the stages
+    /// [`WorldgenMod::open`] names are called; the others may stay as their
+    /// defaults.
+    pub trait WorldgenMod: Sized + 'static {
+        /// Once per instance, for the world it serves: the mod's state and
+        /// the stages it takes part in (none: no part in this world).
+        fn open(info: &WorldInfo) -> Result<(Self, Vec<Stage>), String>;
+        /// Stage `climate`: a biome number per quart, x fastest, then z,
+        /// then y; [`KEEP_BIOME`] keeps what is there.
+        fn biomes(&mut self, _request: &BiomeRequest) -> Result<Vec<u32>, String> {
+            Err("no climate stage".into())
+        }
+        /// Stage `terrain`: the chunk's land.
+        fn terrain(&mut self, _chunk_x: i32, _chunk_z: i32) -> Result<Land, String> {
+            Err("no terrain stage".into())
+        }
+        /// Stage `terrain`: the y above the highest solid block per column.
+        fn heights(&mut self, _columns: &[ColumnPos]) -> Result<Vec<i32>, String> {
+            Err("no terrain stage".into())
+        }
+        /// Stages `surface` and `features`: the blocks set in one step.
+        fn decorate(
+            &mut self,
+            _chunk_x: i32,
+            _chunk_z: i32,
+            _step: Step,
+        ) -> Result<Vec<BlockEdit>, String> {
+            Ok(Vec::new())
+        }
+        /// Stage `structures`: the structures that start in the chunk.
+        fn starts(&mut self, _chunk_x: i32, _chunk_z: i32) -> Result<Vec<StructureStart>, String> {
+            Ok(Vec::new())
+        }
+        /// The manifest's regions the chunk lies in.
+        fn regions(&mut self, _chunk_x: i32, _chunk_z: i32) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// Exports a [`WorldgenMod`](worldgen::WorldgenMod) as the component's
+/// `worldgen-events` interface.
+#[macro_export]
+macro_rules! export_worldgen_mod {
+    ($t:ty) => {
+        const _: () = {
+            use ::std::cell::RefCell;
+            use $crate::worldgen::{
+                BiomeRequest, BlockEdit, ColumnPos, Contribution, Land, Step, StructureStart,
+                WorldInfo, WorldgenMod,
+            };
+            ::std::thread_local! {
+                static STATE: RefCell<Option<$t>> = const { RefCell::new(None) };
+            }
+            fn with<R>(f: impl FnOnce(&mut $t) -> Result<R, String>) -> Result<R, String> {
+                STATE.with(|s| match s.borrow_mut().as_mut() {
+                    Some(m) => f(m),
+                    None => Err("the mod has not opened a world".to_string()),
+                })
+            }
+            struct Export;
+            impl $crate::worldgen::__Guest for Export {
+                fn open(info: WorldInfo) -> Result<Contribution, String> {
+                    let (m, stages) = <$t as WorldgenMod>::open(&info)?;
+                    STATE.with(|s| *s.borrow_mut() = Some(m));
+                    Ok(Contribution { stages })
+                }
+                fn biomes(request: BiomeRequest) -> Result<Vec<u32>, String> {
+                    with(|m| m.biomes(&request))
+                }
+                fn terrain(chunk_x: i32, chunk_z: i32) -> Result<Land, String> {
+                    with(|m| m.terrain(chunk_x, chunk_z))
+                }
+                fn heights(columns: Vec<ColumnPos>) -> Result<Vec<i32>, String> {
+                    with(|m| m.heights(&columns))
+                }
+                fn decorate(
+                    chunk_x: i32,
+                    chunk_z: i32,
+                    step: Step,
+                ) -> Result<Vec<BlockEdit>, String> {
+                    with(|m| m.decorate(chunk_x, chunk_z, step))
+                }
+                fn starts(chunk_x: i32, chunk_z: i32) -> Result<Vec<StructureStart>, String> {
+                    with(|m| m.starts(chunk_x, chunk_z))
+                }
+                fn regions(chunk_x: i32, chunk_z: i32) -> Result<Vec<String>, String> {
+                    with(|m| m.regions(chunk_x, chunk_z))
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            $crate::worldgen::__export_horizon_worldgen_mod!(Export);
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = <Export as $crate::worldgen::__Guest>::open;
         };
     };
 }

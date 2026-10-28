@@ -567,6 +567,11 @@ impl Mods {
         let Some(wasm) = &package.wasm else {
             return Ok(None);
         };
+        // A world-generation mod runs on the generator's workers
+        // (`WorldgenMod`), apart from the game's and the server's hooks.
+        if m.capabilities.contains(&crate::Capability::Worldgen) {
+            return Ok(None);
+        }
         // Two running mods with the same id would share one `data_dir`
         // (capability `storage`): the first loaded keeps the id.
         if self
@@ -1338,7 +1343,7 @@ fn modified(path: &Path) -> Option<SystemTime> {
 }
 
 /// A trap or error, as the player reads it.
-fn reason(e: &wasmtime::Error) -> String {
+pub(crate) fn reason(e: &wasmtime::Error) -> String {
     match e.downcast_ref::<Trap>() {
         Some(Trap::OutOfFuel) => "it took too long (an endless loop?)".into(),
         Some(Trap::UnreachableCodeReached) => "it crashed (a panic)".into(),

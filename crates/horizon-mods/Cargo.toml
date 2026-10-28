@@ -44,6 +44,11 @@ index = ["dep:sha2", "dep:minisign-verify", "dep:horizon-shader-api", "dep:wasmp
 name = "sandbox"
 required-features = ["runtime", "pack"]
 
+# World-generation mods in the sandbox (capability `worldgen`, fork `afterwinter`).
+[[test]]
+name = "worldgen"
+required-features = ["runtime", "pack"]
+
 # docs/api/mods-reference.md from the WIT contract (HORIZON_WRITE_DOCS=1 rewrites it).
 [[test]]
 name = "api_reference"
