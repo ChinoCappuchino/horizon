@@ -257,6 +257,38 @@ regions): no Afterwinter mod needs one yet, and it is a new function, so adding 
 nothing. Applying claims to data-driven content (JSON biomes, structure sets, placed features)
 is M4, where the generator knows each thing's owner and tags.
 
+## M3 plan: preset settings
+
+A preset's settings travel as `world-info.settings` (JSON text). The game writes them into the
+world's save when the world is created and hands the same text to every `open` of that world, so
+they never change afterwards. To let the create-world screen offer them for any mod, without
+code of the mod's in the game, the manifest declares them:
+
+```toml
+[[worldgen.settings]]
+preset = "farview:earth"
+path = "climate.mode"            # where the value goes in the settings JSON
+label = "Climate"
+choices = ["latitude", "planet", "regional", "temperate", "winter"]
+default = "latitude"
+
+[[worldgen.settings]]
+preset = "farview:earth"
+path = "strengths.world_scale"
+label = "World scale"
+range = [0.5, 2.0]
+default = 1.0
+```
+
+The game draws one widget per entry (a cycling button for `choices`, a slider for `range`),
+builds the JSON from the chosen values (fields left at their default may be left out: the mod
+fills defaults), and shows them read-only once the world exists. FarView's Earth (from its
+author, 2026-10-28): `climate.mode` (latitude, planet, regional, temperate, winter),
+`climate.warmth` -1 to 1 (0.35), `climate.band_width` 4096 to 1048576 blocks (65536),
+`climate.equator_z` ±29,000,000 (0), and `strengths.world_scale` 0.5 to 2, `mountains`,
+`detail`, `rivers`, `lakes` 0 to 2 (all 1.0). `world_scale` and `mountains` redraw the drainage
+plans, so no setting may change after creation.
+
 ## Moving to another machine
 
 All scripts take paths from environment variables (`HORIZON_PACK_DIR`, `HORIZON_MINECRAFT_DIR`,
