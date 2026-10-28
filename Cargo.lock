@@ -1531,6 +1531,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-port-adlods"
+version = "0.1.0"
+dependencies = [
+ "horizon-mod-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "horizon-port-pack"
 version = "0.1.0"
 dependencies = [

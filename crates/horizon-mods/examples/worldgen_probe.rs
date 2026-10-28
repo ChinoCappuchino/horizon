@@ -5,6 +5,7 @@
 //!
 //! worldgen_probe <client resource dir> <out.json> [--seed S] [--radius R]
 //!     [--center CX CZ] [--preset ID] [--starts-radius N] [--climate RADIUS STEP]
+//!     [--decorator HMOD]... [--ores]
 //!     [--mod <file.hmod> [--settings JSON]]
 //!
 //! With `--mod`, the world-generation mod provides the terrain and biomes of
@@ -25,7 +26,7 @@ use horizon_core::{
 use horizon_mods::{
     Package,
     worldgen_runtime::{WorldInfo, WorldgenMod},
-    worldgen_world::ModTerrain,
+    worldgen_world::{ModDecorator, ModTerrain},
 };
 use horizon_world::{
     heightmap::HeightmapType,
@@ -110,6 +111,8 @@ fn main() -> Result<(), Error> {
     let mut preset = String::from("minecraft:normal");
     let mut starts_radius = 0i32;
     let mut climate = (0i32, 16i32);
+    let mut decorators: Vec<PathBuf> = Vec::new();
+    let mut ores = false;
     let mut mod_path: Option<PathBuf> = None;
     let mut settings = String::new();
     while let Some(arg) = args.next() {
@@ -121,6 +124,8 @@ fn main() -> Result<(), Error> {
             "--preset" => preset = next()?,
             "--starts-radius" => starts_radius = next()?.parse()?,
             "--climate" => climate = (next()?.parse()?, next()?.parse()?),
+            "--decorator" => decorators.push(PathBuf::from(next()?)),
+            "--ores" => ores = true,
             "--mod" => mod_path = Some(PathBuf::from(next()?)),
             "--settings" => settings = next()?,
             _ => return Err(format!("unknown argument {arg}").into()),
@@ -170,6 +175,26 @@ fn main() -> Result<(), Error> {
                 provider,
             )?
         }
+    };
+    // World-generation mods decorating the world (M3g).
+    let generator = if decorators.is_empty() {
+        generator
+    } else {
+        let mut list: Vec<Arc<dyn horizon_world::worldgen::provider::Decorator>> = Vec::new();
+        for path in &decorators {
+            let m = WorldgenMod::load(&Package::read(path)?)?;
+            let info = WorldInfo {
+                seed,
+                preset: preset.clone(),
+                dimension: "minecraft:overworld".into(),
+                min_y: -64,
+                height: 384,
+                sea_level: generator.sea_level(),
+                settings: String::new(),
+            };
+            list.push(Arc::new(ModDecorator::new(&m, data.clone(), info)));
+        }
+        generator.with_decorators(list)?
     };
     let mut worker = generator.worker();
 
@@ -257,6 +282,48 @@ fn main() -> Result<(), Error> {
                 }
             }
         }
+    }
+    if ores {
+        // Every ore block of the probed chunks, as the Java probe's --ores-radius writes them.
+        let mut palette: Vec<String> = Vec::new();
+        let mut rows = Vec::new();
+        for z in -radius..=radius {
+            for x in -radius..=radius {
+                let chunk = chunks[at(x, z)].as_ref().expect("decorated");
+                let mut flat = Vec::new();
+                let bottom = chunk.terrain.min_y();
+                for y in bottom..bottom + chunk.terrain.height() {
+                    for lz in 0..16 {
+                        for lx in 0..16 {
+                            let name = block_id(chunk.block_name(lx, y, lz));
+                            if name.ends_with("_ore") || name == "minecraft:ancient_debris" {
+                                let index = match palette.iter().position(|p| p == name) {
+                                    Some(i) => i,
+                                    None => {
+                                        palette.push(name.to_owned());
+                                        palette.len() - 1
+                                    }
+                                };
+                                flat.extend([lx, y, lz, index as i32]);
+                            }
+                        }
+                    }
+                }
+                rows.push(json!([center.0 + x, center.1 + z, flat]));
+            }
+        }
+        let path = out.with_extension("ores.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(
+                &json!({"dimension": "minecraft:overworld", "chunks": rows, "palette": palette}),
+            )?,
+        )?;
+        println!(
+            "wrote the ores of {} chunks to {}",
+            rows.len(),
+            path.display()
+        );
     }
     let mut out_chunks = Vec::new();
     for ((x, z), (base, biomes, starts)) in probed {
