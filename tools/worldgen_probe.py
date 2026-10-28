@@ -360,7 +360,8 @@ def horizon(args):
                 why = (done.stderr.strip().splitlines() or ['?'])[-1][:160].replace('|', '/')
                 lines.append(f'| {name} | {seed} | FAILED: {why} | | | |')
                 continue
-            refs = sorted((OUT / name).glob(f'seed-{seed}-order-*.json'))
+            refs = sorted(r for r in (OUT / name).glob(f'seed-{seed}-order-*.json')
+                          if not r.name.endswith('.starts.json'))
             if not refs:
                 lines.append(f'| {name} | {seed} | no NeoForge run to compare with | | | |')
                 continue
