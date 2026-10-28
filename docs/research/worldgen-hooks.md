@@ -278,6 +278,14 @@ path = "strengths.world_scale"
 label = "World scale"
 range = [0.5, 2.0]
 default = 1.0
+
+[[worldgen.settings]]
+preset = "farview:earth"
+path = "climate.band_width"
+label = "Latitude band width"
+range = [4096, 1048576]
+step = 1024                      # optional: the slider's step (1 for whole blocks)
+default = 65536
 ```
 
 The game draws one widget per entry (a cycling button for `choices`, a slider for `range`),

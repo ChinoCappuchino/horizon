@@ -315,8 +315,15 @@ impl Section {
                     if !v.is_some_and(|v| (lo..=hi).contains(&v)) {
                         return Err(format!("{at}: the default is not a number in [{lo}, {hi}]"));
                     }
+                    if o.step.is_some_and(|step| !(step > 0.0 && step <= hi - lo)) {
+                        return Err(format!(
+                            "{at}: the step is not above 0 and within the range"
+                        ));
+                    }
                 }
-                (choices, None, toml::Value::String(d)) if !choices.is_empty() => {
+                (choices, None, toml::Value::String(d))
+                    if !choices.is_empty() && o.step.is_none() =>
+                {
                     if !choices.contains(d) {
                         return Err(format!("{at}: the default {d:?} is not one of the choices"));
                     }
@@ -414,6 +421,8 @@ pub struct PresetSetting {
     #[serde(default)]
     pub choices: Vec<String>,
     pub range: Option<[f64; 2]>,
+    /// The slider's step within `range` (1 for whole blocks); none: any value.
+    pub step: Option<f64>,
     /// A choice's text, or a number in the range.
     pub default: toml::Value,
 }
@@ -1005,7 +1014,10 @@ priority = 5
         };
         check("path = \"climate.mode\"\nlabel = \"Climate\"\nchoices = [\"latitude\", \"winter\"]\ndefault = \"latitude\"").unwrap();
         check("path = \"strengths.world_scale\"\nlabel = \"World scale\"\nrange = [0.5, 2.0]\ndefault = 1.0").unwrap();
-        check("path = \"climate.band_width\"\nlabel = \"Band\"\nrange = [4096, 1048576]\ndefault = 65536").unwrap();
+        check("path = \"climate.band_width\"\nlabel = \"Band\"\nrange = [4096, 1048576]\nstep = 1024\ndefault = 65536").unwrap();
+        let e = check("path = \"a\"\nlabel = \"X\"\nrange = [0.0, 1.0]\nstep = 0\ndefault = 0.5")
+            .unwrap_err();
+        assert!(e.contains("the step"), "{e}");
         for (entry, why) in [
             (
                 "path = \"a..b\"\nlabel = \"X\"\nrange = [0.0, 1.0]\ndefault = 0.5",
