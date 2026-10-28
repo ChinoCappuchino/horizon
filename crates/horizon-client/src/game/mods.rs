@@ -212,10 +212,9 @@ pub(super) fn content_root(
         };
         let m = &package.manifest;
         let on = enabled.contains(&m.id) || dev.contains(path);
-        if !on
-            || !m.capabilities.contains(&Capability::Registries)
-            || mods.iter().any(|c| c.id == m.id)
-        {
+        let has_content = m.capabilities.contains(&Capability::Registries)
+            || m.capabilities.contains(&Capability::Worldgen);
+        if !on || !has_content || mods.iter().any(|c| c.id == m.id) {
             continue;
         }
         let content = Content::read(path, m).and_then(|content| {

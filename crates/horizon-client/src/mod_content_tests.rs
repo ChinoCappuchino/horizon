@@ -881,3 +881,65 @@ fn a_replacing_mod_tag_reaches_the_root() {
     );
     let _ = fs::remove_dir_all(&scratch);
 }
+
+/// A world-generation mod (code, and data without `registries`; fork
+/// `afterwinter`) adds its world preset and its dimension type, and the
+/// generator's data has both, beside vanilla's.
+#[test]
+#[ignore = "full content root: CI and pr_ready run it"]
+fn a_worldgen_mods_preset_and_dimension_type_reach_the_generator() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch =
+        std::env::temp_dir().join(format!("horizon-worldgen-content-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let dir = scratch.join("terra");
+    let files: [(&str, &str); 3] = [
+        (
+            "horizon-mod.toml",
+            "id = \"terra\"\nname = \"Terra\"\nversion = \"1\"\napi = \"0.3\"\nside = \"server\"\n\
+             capabilities = [\"worldgen\"]\nexperimental = [\"worldgen\"]\n\
+             [worldgen]\npresets = [\"terra:earth\"]\nstages = [\"terrain\"]\n",
+        ),
+        (
+            "data/terra/worldgen/world_preset/earth.json",
+            r#"{"dimensions": {"minecraft:overworld": {"type": "terra:highlands",
+                "generator": {"type": "terra:earth", "settings": "minecraft:overworld"}}}}"#,
+        ),
+        (
+            "data/terra/dimension_type/highlands.json",
+            r#"{"min_y": -64, "height": 2048, "logical_height": 2048}"#,
+        ),
+    ];
+    for (name, text) in files {
+        let path = dir.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let manifest =
+        horizon_mods::Manifest::parse(&fs::read_to_string(dir.join("horizon-mod.toml")).unwrap())
+            .unwrap();
+    let m = ContentMod {
+        id: "terra".into(),
+        content: Content::read(&dir, &manifest).unwrap(),
+    };
+    let root = resource_root(&base, std::slice::from_ref(&m), &scratch.join("cache")).unwrap();
+    let registry = Box::leak(Box::new(
+        horizon_world::level::data::load_registry(&root).unwrap(),
+    ));
+    let data =
+        horizon_world::worldgen::generator::GeneratorData::load(&root.join("worldgen"), registry)
+            .unwrap();
+    assert_eq!(data.dimension_height("terra:highlands"), Some((-64, 2048)));
+    assert_eq!(
+        data.dimension_height("minecraft:overworld"),
+        Some((-64, 384))
+    );
+    let overworld = data
+        .preset_dimension("terra:earth", "minecraft:overworld")
+        .unwrap();
+    assert_eq!(overworld["type"], "terra:highlands");
+    assert!(data.world_preset_ids().any(|p| p == "minecraft:amplified"));
+    fs::remove_dir_all(&scratch).unwrap();
+}

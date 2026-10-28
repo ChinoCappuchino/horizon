@@ -36,6 +36,9 @@ pub struct WorldOptions {
     pub flat_settings: Option<super::flat::FlatSettings>,
     pub structures: bool,
     pub bonus_chest: bool,
+    /// The world preset when not flat (`minecraft:normal`, `minecraft:amplified`,
+    /// a world-generation mod's).
+    pub preset: String,
     /// `getGameRules`: the Game Rules screen's values, saved with the world.
     pub rules: crate::gamerules::GameRules,
 }
@@ -50,6 +53,7 @@ impl Default for WorldOptions {
             flat_settings: None,
             structures: true,
             bonus_chest: false,
+            preset: "minecraft:normal".into(),
             rules: crate::gamerules::GameRules::default(),
         }
     }
@@ -76,6 +80,10 @@ impl WorldOptions {
                 .flatten(),
             structures: generation.structures,
             bonus_chest: generation.bonus_chest,
+            preset: match generation.flat {
+                true => "minecraft:normal".into(),
+                false => generation.preset,
+            },
             rules: crate::gamerules::GameRules::load(dir),
             ..Self::default()
         }
@@ -97,6 +105,10 @@ impl WorldOptions {
             flat: self.flat,
             structures: self.structures,
             bonus_chest: self.bonus_chest(),
+            preset: match self.flat {
+                true => "minecraft:flat".into(),
+                false => self.preset.clone(),
+            },
         }
     }
     /// The custom layers, as `write_world_gen_settings_with` takes them.

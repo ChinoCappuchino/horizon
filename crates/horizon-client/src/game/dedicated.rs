@@ -322,11 +322,15 @@ impl Game<'_> {
     /// DedicatedServerProperties.createDimensions for a world that doesn't
     /// exist yet: `level-type`'s preset, a flat world's `generator-settings`
     /// and `generate-structures`, written before the world opens so that
-    /// streaming reads them. Horizon generates the normal and flat presets.
+    /// streaming reads them. Horizon generates flat and every noise preset of
+    /// the data: vanilla's, and those of world-generation mods.
     fn write_world_gen(&self, dir: &std::path::Path, props: &ServerProperties) -> Result<()> {
         let level_type = &props.level_type;
+        // The presets the data has (vanilla's and mods'), by their overworld.
+        let resources = &self.options.resources;
+        let overworld_of = |id: &str| horizon_client::save::preset_overworld(resources, id);
         let preset = parse_identifier(level_type)
-            .filter(|id| WORLD_PRESETS.contains(&id.as_str()))
+            .filter(|id| WORLD_PRESETS.contains(&id.as_str()) || overworld_of(id).is_some())
             .unwrap_or_else(|| {
                 log_from(
                     "Worker-Main-1",
@@ -338,15 +342,24 @@ impl Game<'_> {
                 "minecraft:normal".to_owned()
             });
         let flat = preset == "minecraft:flat";
-        if !flat && preset != "minecraft:normal" {
-            log_from(
-                "Worker-Main-1",
-                "WARN",
-                &format!(
-                    "Horizon doesn't generate the {preset} world preset yet: using minecraft:normal"
-                ),
-            );
-        }
+        let generated = |o: &serde_json::Value| matches!(o["generator"]["type"].as_str(), Some(t) if t != "minecraft:debug" && t != "minecraft:flat");
+        let overworld = (!flat && preset != "minecraft:normal")
+            .then(|| overworld_of(&preset))
+            .flatten();
+        let preset =
+            if flat || preset == "minecraft:normal" || overworld.as_ref().is_some_and(generated) {
+                preset
+            } else {
+                log_from(
+                    "Worker-Main-1",
+                    "WARN",
+                    &format!(
+                        "Horizon doesn't generate the {preset} world preset: using minecraft:normal"
+                    ),
+                );
+                "minecraft:normal".to_owned()
+            };
+        let overworld = overworld.filter(|_| preset != "minecraft:normal");
         let settings = if flat {
             let biomes = self.res.biomes();
             let (settings, errors) = horizon_client::flatgen::settings_from_json(
@@ -365,8 +378,15 @@ impl Game<'_> {
             flat,
             structures: props.generate_structures,
             bonus_chest: false,
+            preset,
         };
-        horizon_client::save::write_world_gen_settings_with(dir, props.seed, options, settings)
+        horizon_client::save::write_world_gen_settings_for(
+            dir,
+            props.seed,
+            options,
+            settings,
+            overworld.as_ref(),
+        )
     }
 }
 

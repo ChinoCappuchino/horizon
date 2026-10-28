@@ -289,6 +289,19 @@ is a world-generation mod as that provider; `worldgen_probe` (now in horizon-mod
 generated chunks against the stand-in mod's own heights. Left for M3c: far terrain (`lod_grid`,
 `surface_sample`'s biome) still samples vanilla's noise in a provider world.
 
+**M3b, done (2026-10-28).** Dimension types are data: `GeneratorData::dimension_height` reads a
+`dimension_types` bundle (mods' `data/<ns>/dimension_type/`, merged by the content overlay; at
+most 4064 high, multiples of 16) before vanilla's three. Mods' world presets merge into the
+presets bundle. A world-generation mod may ship its world generation's data without
+capability `registries` (`data/<ns>/{worldgen, dimension_type, structure, tags/worldgen}`). A
+preset whose generator type is a provider's own runs over the noise settings it names (or
+vanilla overworld's). The world's preset is saved as `horizon:preset` in `world_gen_settings`
+with the preset's own overworld dimension (vanilla's saves keep only the dimensions; a vanilla
+save's preset is read back from its overworld's noise settings), reopened with it, used by far
+decoration, and taken by the dedicated server's `level-type` (any noise preset of the data).
+This also gives Horizon vanilla's amplified, large biomes and single biome presets. The
+create-world screen's world type button comes with M3c's settings page.
+
 2048 sections per column is about five times the memory and light work of vanilla's 384; M3d is
 measured against vanilla worlds so they don't get slower.
 

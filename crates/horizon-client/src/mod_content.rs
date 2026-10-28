@@ -687,19 +687,33 @@ const TAG_BUNDLES: [&str; 2] = ["block-tags.json", "worldgen/block_tags.json"];
 const BIOME_TAGS: &str = "worldgen/biome_tags.json";
 /// Worldgen registries a content mod may add to, and the bundle the
 /// worldgen loader reads each from (id → the file's text): what structure
-/// mods hold. Biomes, noise and density functions change the terrain and
-/// are not read from mods.
-const WORLDGEN_BUNDLES: [(&str, &str); 6] = [
+/// mods hold, and the world presets of world-generation mods (fork
+/// `afterwinter`: a preset whose terrain a mod provides). Biomes, noise and
+/// density functions change the terrain and are not read from mods.
+const WORLDGEN_BUNDLES: [(&str, &str); 7] = [
     ("structure", "worldgen/structures.json"),
     ("structure_set", "worldgen/structure_sets.json"),
     ("template_pool", "worldgen/template_pools.json"),
     ("processor_list", "worldgen/processor_lists.json"),
     ("configured_feature", "worldgen/features.json"),
     ("placed_feature", "worldgen/placed_features.json"),
+    ("world_preset", "worldgen/world_presets.json"),
 ];
+/// Mods' dimension types (`data/<ns>/dimension_type/`, outside `worldgen/`),
+/// for their presets' heights: a bundle the prepared resources don't have.
+const DIMENSION_TYPES: &str = "worldgen/dimension_types.json";
 
 /// A mod file that adds to a worldgen bundle: (bundle, id).
 fn worldgen_entry(file: &str) -> Option<(&'static str, String)> {
+    if let Some((ns, path)) = file
+        .strip_prefix("data/")
+        .and_then(|f| f.split_once("/dimension_type/"))
+    {
+        return Some((
+            DIMENSION_TYPES,
+            format!("{ns}:{}", path.strip_suffix(".json")?),
+        ));
+    }
     let (ns, rest) = file.strip_prefix("data/")?.split_once("/worldgen/")?;
     let (kind, path) = rest.split_once('/')?;
     let (_, bundle) = WORLDGEN_BUNDLES.iter().find(|(k, _)| *k == kind)?;
@@ -1194,10 +1208,12 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
     // Structures and the pools, sets, processors and features they use, then
     // what mods add to sets and pools, in mod and file order.
     for (bundle, entries) in &worldgen {
-        if !base.join(bundle).exists() {
-            continue;
-        }
-        let mut doc = read_json(&base.join(bundle))?;
+        let mut doc = match base.join(bundle).exists() {
+            true => read_json(&base.join(bundle))?,
+            // Only the dimension types start empty: the others need the base.
+            false if *bundle == DIMENSION_TYPES => J::Obj(Vec::new()),
+            false => continue,
+        };
         for (id, text) in entries {
             doc.set(id, J::Str(text.clone()));
         }

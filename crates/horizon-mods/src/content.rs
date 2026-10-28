@@ -47,6 +47,23 @@ pub fn check_path(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// World-generation data a mod with capability `worldgen` may ship without
+/// capability `registries`: `data/<ns>/{worldgen, dimension_type, structure,
+/// tags/worldgen}/...`.
+pub fn is_worldgen_data(name: &str) -> bool {
+    let mut parts = name.splitn(3, '/');
+    let (top, _namespace, rest) = (parts.next(), parts.next(), parts.next().unwrap_or(""));
+    top == Some("data")
+        && [
+            "worldgen/",
+            "dimension_type/",
+            "structure/",
+            "tags/worldgen/",
+        ]
+        .iter()
+        .any(|p| rest.starts_with(p))
+}
+
 /// A vanilla identifier, `minecraft:path`.
 fn vanilla_id(id: &str) -> bool {
     id.strip_prefix("minecraft:").is_some_and(|path| {
@@ -264,9 +281,18 @@ impl Content {
     /// Where content may go, and the declarations.
     fn check(&mut self, manifest: &Manifest) -> Result<(), String> {
         let id = manifest.id.as_str();
-        if !self.files.is_empty() && !manifest.capabilities.contains(&Capability::Registries) {
+        // A world-generation mod (fork `afterwinter`) may ship its world
+        // generation's data without registries: presets, dimension types,
+        // worldgen registries, structure templates and worldgen tags.
+        let worldgen_only = manifest.capabilities.contains(&Capability::Worldgen)
+            && self.files.iter().all(|f| is_worldgen_data(f));
+        if !self.files.is_empty()
+            && !manifest.capabilities.contains(&Capability::Registries)
+            && !worldgen_only
+        {
             return Err(format!(
-                "has assets/ or data/ but not capability registries in {MANIFEST}"
+                "has assets/ or data/ but not capability registries in {MANIFEST} \
+                 (a worldgen mod may ship data/<ns>/worldgen, dimension_type, structure and tags/worldgen without it)"
             ));
         }
         let mut blocks = Vec::new();
@@ -423,7 +449,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::Package;
+    use crate::manifest::{Manifest, Package};
 
     const MANIFEST_TEXT: &str = r#"
 id = "ruby"
@@ -482,6 +508,50 @@ capabilities = ["registries"]
         );
         assert_eq!(content.items[0].id, "ruby:ruby");
         assert_eq!(content.items[0].rarity, Some(Rarity::Uncommon));
+    }
+
+    #[test]
+    fn a_worldgen_mod_ships_its_worldgen_data_without_registries() {
+        let manifest = Manifest::parse(
+            "id = \"terra\"\nname = \"T\"\nversion = \"1\"\napi = \"0.3\"\nside = \"server\"\n\
+             capabilities = [\"worldgen\"]\nexperimental = [\"worldgen\"]\n\
+             [worldgen]\npresets = [\"terra:earth\"]\nstages = [\"terrain\"]\n",
+        )
+        .unwrap();
+        let read = |name: &str, files: &[&str]| {
+            let dir = scratch(name);
+            for f in files {
+                let path = dir.join(f);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"{}").unwrap();
+            }
+            let content = Content::read(&dir, &manifest);
+            std::fs::remove_dir_all(&dir).unwrap();
+            content
+        };
+        let content = read(
+            "worldgen-ok",
+            &[
+                "data/terra/worldgen/world_preset/earth.json",
+                "data/terra/dimension_type/highlands.json",
+                "data/terra/structure/camp.nbt",
+                "data/minecraft/tags/worldgen/biome/is_forest.json",
+            ],
+        )
+        .unwrap();
+        assert_eq!(content.files.len(), 4);
+        for refused in [
+            "assets/terra/lang/en_us.json",
+            "data/terra/horizon/block/rock.json",
+        ] {
+            let e = read("worldgen-refused", &[refused]).unwrap_err();
+            assert!(e.contains("not capability registries"), "{refused}: {e}");
+        }
+        assert!(is_worldgen_data(
+            "data/terra/worldgen/world_preset/earth.json"
+        ));
+        assert!(!is_worldgen_data("data/terra/recipe/x.json"));
+        assert!(!is_worldgen_data("assets/terra/worldgen/x.json"));
     }
 
     #[test]

@@ -767,7 +767,8 @@ fn create_world_tabs_follow_vanilla_and_their_choices_reach_the_action() {
         crate::save::WorldGen {
             flat: true,
             structures: true,
-            bonus_chest: true
+            bonus_chest: true,
+            preset: "minecraft:flat".into(),
         }
     );
     // The More tab's Experiments and Data Packs screens don't exist yet.
@@ -786,8 +787,9 @@ fn new_world_generation_settings_round_trip() {
         flat: true,
         structures: false,
         bonus_chest: true,
+        preset: "minecraft:flat".into(),
     };
-    crate::save::write_world_gen_settings(&dir, 42, options).unwrap();
+    crate::save::write_world_gen_settings(&dir, 42, options.clone()).unwrap();
     assert_eq!(crate::save::WorldGen::read(&dir), Some(options));
     let settings = crate::save::world_gen_settings(&dir).unwrap();
     assert_eq!(
@@ -873,4 +875,38 @@ fn server_fields_edit_at_their_cursor() {
         panic!("direct");
     };
     assert_eq!(address, "one ");
+}
+
+/// A preset beyond normal and flat (vanilla's amplified, a world-generation
+/// mod's) is saved as its overworld and as `horizon:preset`, and read back.
+#[test]
+fn world_presets_round_trip() {
+    let f = Fixture::new();
+    let overworld = serde_json::json!({
+        "type": "minecraft:overworld",
+        "generator": {
+            "type": "minecraft:noise",
+            "settings": "minecraft:amplified",
+            "biome_source": {"type": "minecraft:multi_noise", "preset": "minecraft:overworld"}
+        }
+    });
+    for preset in ["minecraft:amplified", "terra:earth"] {
+        let dir = f.root.join(preset.replace(':', "_"));
+        let options = crate::save::WorldGen {
+            preset: preset.into(),
+            ..crate::save::WorldGen::default()
+        };
+        crate::save::write_world_gen_settings_for(&dir, 7, options.clone(), None, Some(&overworld))
+            .unwrap();
+        assert_eq!(crate::save::WorldGen::read(&dir), Some(options));
+        let settings = crate::save::world_gen_settings(&dir).unwrap();
+        let generator = settings
+            .get("dimensions")
+            .and_then(|d| d.get("minecraft:overworld"))
+            .and_then(|o| o.get("generator"));
+        assert_eq!(
+            crate::save::text(generator.and_then(|g| g.get("settings"))).as_deref(),
+            Some("minecraft:amplified")
+        );
+    }
 }

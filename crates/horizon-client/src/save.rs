@@ -2459,12 +2459,16 @@ const INT_RULES: [&str; 11] = [
 /// the player file.
 /// The world options CreateWorldScreen sets (`WorldOptions` and the world
 /// preset) that `world_gen_settings` keeps.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WorldGen {
     /// The `minecraft:flat` preset (Superflat) instead of `normal`.
     pub flat: bool,
     pub structures: bool,
     pub bonus_chest: bool,
+    /// The world preset (`minecraft:normal`, `minecraft:amplified`, a
+    /// world-generation mod's): Horizon keeps it as `horizon:preset`, since
+    /// vanilla's save keeps only the dimensions it made.
+    pub preset: String,
 }
 impl WorldGen {
     /// A saved world's choices, from its `world_gen_settings`.
@@ -2475,11 +2479,22 @@ impl WorldGen {
             .get("dimensions")
             .and_then(|d| d.get("minecraft:overworld"))
             .and_then(|o| o.get("generator"));
+        let flat = text(generator.and_then(|g| g.get("type")))
+            .is_some_and(|t| t.trim_start_matches("minecraft:") == "flat");
+        // Horizon's own key, else the preset vanilla's dimensions point at.
+        let preset = text(settings.get("horizon:preset")).unwrap_or_else(|| {
+            match text(generator.and_then(|g| g.get("settings"))).as_deref() {
+                _ if flat => "minecraft:flat".into(),
+                Some("minecraft:amplified") => "minecraft:amplified".into(),
+                Some("minecraft:large_biomes") => "minecraft:large_biomes".into(),
+                _ => "minecraft:normal".into(),
+            }
+        });
         Some(Self {
-            flat: text(generator.and_then(|g| g.get("type")))
-                .is_some_and(|t| t.trim_start_matches("minecraft:") == "flat"),
+            flat,
             structures: flag("generate_structures", true),
             bonus_chest: flag("bonus_chest", false),
+            preset,
         })
     }
 }
@@ -2489,6 +2504,7 @@ impl Default for WorldGen {
             flat: false,
             structures: true,
             bonus_chest: false,
+            preset: "minecraft:normal".into(),
         }
     }
 }
@@ -2504,6 +2520,31 @@ pub fn write_world_gen_settings_with(
     seed: i64,
     options: WorldGen,
     flat_settings: Option<Tag>,
+) -> Result<()> {
+    write_world_gen_settings_for(dir, seed, options, flat_settings, None)
+}
+/// A world preset's overworld dimension (`{"type", "generator"}`) from the
+/// resources' world presets (vanilla's, and those mods' content adds); none
+/// for normal, flat, or a preset the data doesn't have.
+pub fn preset_overworld(resources: &Path, preset: &str) -> Option<serde_json::Value> {
+    if matches!(preset, "minecraft:normal" | "minecraft:flat") {
+        return None;
+    }
+    let presets: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&fs::read(resources.join("worldgen/world_presets.json")).ok()?)
+            .ok()?;
+    let preset: serde_json::Value = serde_json::from_str(presets.get(preset)?.as_str()?).ok()?;
+    Some(preset["dimensions"]["minecraft:overworld"].clone()).filter(|o| !o.is_null())
+}
+/// [`write_world_gen_settings_with`] for a preset other than normal or flat:
+/// `overworld` is that preset's overworld dimension (`{"type", "generator"}`
+/// from its world preset JSON), saved as vanilla saves a world's dimensions.
+pub fn write_world_gen_settings_for(
+    dir: &Path,
+    seed: i64,
+    options: WorldGen,
+    flat_settings: Option<Tag>,
+    overworld: Option<&serde_json::Value>,
 ) -> Result<()> {
     fs::create_dir_all(dir)?;
     // worldgen/world_preset/flat.json's overworld: the classic flat layers.
@@ -2571,6 +2612,7 @@ pub fn write_world_gen_settings_with(
                 Tag::Byte(i8::from(options.structures)),
             ),
             ("bonus_chest", Tag::Byte(i8::from(options.bonus_chest))),
+            ("horizon:preset", string(&options.preset)),
             (
                 "dimensions",
                 Tag::compound([
@@ -2578,6 +2620,8 @@ pub fn write_world_gen_settings_with(
                         "minecraft:overworld",
                         if options.flat {
                             flat
+                        } else if let Some(overworld) = overworld {
+                            crate::lan::data::json_to_nbt(overworld)
                         } else {
                             dimension(
                                 "minecraft:overworld",
@@ -3783,6 +3827,46 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
 
 #[cfg(test)]
 mod tests {
+    /// A world vanilla saved (dimensions only, no `horizon:preset`) reads as
+    /// the preset its overworld's noise settings name.
+    #[test]
+    fn a_vanilla_saved_preset_is_read_from_its_dimensions() {
+        use super::*;
+        let root = std::env::temp_dir().join(format!("horizon-preset-{}", std::process::id()));
+        for (settings, preset) in [
+            ("minecraft:amplified", "minecraft:amplified"),
+            ("minecraft:large_biomes", "minecraft:large_biomes"),
+            ("minecraft:overworld", "minecraft:normal"),
+        ] {
+            let dir = root.join(preset.replace(':', "_"));
+            fs::create_dir_all(&dir).unwrap();
+            let overworld = Tag::compound([
+                ("type", string("minecraft:overworld")),
+                (
+                    "generator",
+                    Tag::compound([
+                        ("type", string("minecraft:noise")),
+                        ("settings", string(settings)),
+                    ]),
+                ),
+            ]);
+            write_saved_data(
+                &dir,
+                "world_gen_settings",
+                Tag::compound([
+                    ("seed", Tag::Long(1)),
+                    (
+                        "dimensions",
+                        Tag::compound([("minecraft:overworld", overworld)]),
+                    ),
+                ]),
+            )
+            .unwrap();
+            assert_eq!(WorldGen::read(&dir).unwrap().preset, preset);
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn points_of_interest_save_as_poi_sections() {
         let Some(root) = std::env::var_os("HORIZON_TEST_RESOURCES") else {

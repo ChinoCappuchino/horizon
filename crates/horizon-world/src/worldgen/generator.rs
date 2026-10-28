@@ -168,6 +168,9 @@ pub struct GeneratorData {
     settings: BTreeMap<String, String>,
     presets: BTreeMap<String, String>,
     world_presets: BTreeMap<String, String>,
+    /// Dimension types beyond vanilla's (`dimension_types.json`, from mods'
+    /// `data/<ns>/dimension_type/`): id → the type's JSON text.
+    dimension_types: BTreeMap<String, String>,
     conditions: MaterialConditionRegistry,
     source_catalog: BiomeSourceCatalog,
     biome_names: Vec<Arc<str>>,
@@ -477,6 +480,7 @@ impl GeneratorData {
             rules: read_bundle(dir, "rules")?,
             settings: read_bundle(dir, "settings")?,
             world_presets: read_bundle(dir, "world_presets")?,
+            dimension_types: read_optional_bundle(dir, "dimension_types")?.unwrap_or_default(),
             presets,
             conditions,
             source_catalog,
@@ -533,6 +537,33 @@ impl GeneratorData {
             .placed
             .get(name)
             .map(String::as_str)
+    }
+    /// A dimension type's build range (minimum Y, height): a mod's from the
+    /// `dimension_types` bundle, else vanilla's. None for one unknown, or one
+    /// outside vanilla's limits (a multiple of 16, at most 4064 high, within
+    /// -2032..2031).
+    pub fn dimension_height(&self, name: &str) -> Option<(i32, i32)> {
+        let Some(text) = self.dimension_types.get(name) else {
+            return vanilla_dimension_height(name);
+        };
+        let json: Value = serde_json::from_str(text).ok()?;
+        let min_y = json["min_y"].as_i64()? as i32;
+        let height = json["height"].as_i64()? as i32;
+        let fits = min_y % 16 == 0
+            && height % 16 == 0
+            && (16..=4064).contains(&height)
+            && min_y >= -2032
+            && min_y + height <= 2032;
+        fits.then_some((min_y, height))
+    }
+    /// The world presets the data has (vanilla's and mods'), by id.
+    pub fn world_preset_ids(&self) -> impl Iterator<Item = &str> {
+        self.world_presets.keys().map(String::as_str)
+    }
+    /// A world preset's dimension (`{"type": ..., "generator": ...}`), as JSON.
+    pub fn preset_dimension(&self, preset: &str, dimension: &str) -> Option<Value> {
+        let preset: Value = serde_json::from_str(self.world_presets.get(preset)?).ok()?;
+        Some(preset["dimensions"][dimension].clone()).filter(|d| !d.is_null())
     }
     pub fn biome_names(&self) -> &[Arc<str>] {
         &self.biome_names
@@ -640,7 +671,7 @@ impl ProtoChunk {
 }
 
 /// Build range (minimum Y, height) of the vanilla dimension types.
-fn dimension_type_height(name: &str) -> Option<(i32, i32)> {
+fn vanilla_dimension_height(name: &str) -> Option<(i32, i32)> {
     match name {
         "minecraft:overworld" | "minecraft:overworld_caves" => Some((-64, 384)),
         "minecraft:the_nether" | "minecraft:the_end" => Some((0, 256)),
@@ -2680,10 +2711,26 @@ impl OverworldGenerator {
                 .get(preset)
                 .ok_or_else(|| resource(format!("missing world preset {preset}")))?,
         )?;
-        let generator = preset_json["dimensions"][dimension]["generator"].clone();
+        let mut generator = preset_json["dimensions"][dimension]["generator"].clone();
         let level = preset_json["dimensions"][dimension]["type"]
             .as_str()
-            .and_then(dimension_type_height);
+            .and_then(|t| data.dimension_height(t));
+        if provider.is_some() && generator["type"].as_str() != Some("minecraft:noise") {
+            // A provider's own generator type (a mod's preset, as its Java one
+            // names it): run over the noise settings it names if the data has
+            // them, else vanilla overworld's, with vanilla's biome source for
+            // the quarts the provider keeps.
+            let settings = generator["settings"]
+                .as_str()
+                .filter(|s| data.settings.contains_key(*s))
+                .unwrap_or("minecraft:overworld")
+                .to_owned();
+            generator = serde_json::json!({
+                "type": "minecraft:noise",
+                "settings": settings,
+                "biome_source": {"type": "minecraft:multi_noise", "preset": "minecraft:overworld"},
+            });
+        }
         if generator["type"].as_str() != Some("minecraft:noise") {
             return Err(resource(format!("{dimension} is not a noise generator")));
         }

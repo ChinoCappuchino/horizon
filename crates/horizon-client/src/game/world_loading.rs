@@ -93,11 +93,15 @@ impl WorldRequest {
             level.hardcore = o.hardcore;
             level.difficulty = horizon_client::title::DIFFICULTIES[o.difficulty()].into();
             level.allow_commands = Some(o.commands(creative));
-            horizon_client::save::write_world_gen_settings_with(
+            let generation = o.world_gen();
+            let overworld =
+                horizon_client::save::preset_overworld(&options.resources, &generation.preset);
+            horizon_client::save::write_world_gen_settings_for(
                 &save_root,
                 level.seed,
-                o.world_gen(),
+                generation,
                 o.flat_settings(),
+                overworld.as_ref(),
             )?;
             // WorldCreationUiState.getGameRules, written with the level.
             level.game_rules = o.rules.by_name();
@@ -328,9 +332,10 @@ pub(super) fn make_streaming(
         )
     } else {
         // WorldOptions.generateStructures, from the world's settings.
-        let structures =
-            horizon_client::save::WorldGen::read(world_root).is_none_or(|w| w.structures);
-        let inner = Arc::new(VanillaTerrain::for_world(&options.resources.join("worldgen"), pack.assets.registry, res.biomes(), seed, dim.id(), structures).map_err(|e| {
+        let generation = horizon_client::save::WorldGen::read(world_root);
+        let structures = generation.as_ref().is_none_or(|w| w.structures);
+        let preset = generation.map_or_else(|| "minecraft:normal".to_owned(), |w| w.preset);
+        let inner = Arc::new(VanillaTerrain::for_world(&options.resources.join("worldgen"), pack.assets.registry, res.biomes(), seed, &preset, dim.id(), structures).map_err(|e| {
                 format!("{e}\nPrepare the worldgen bundle with the launcher, or: horizon-prepare --prepare")
             })?);
         if dim == Dim::Overworld && structures {
