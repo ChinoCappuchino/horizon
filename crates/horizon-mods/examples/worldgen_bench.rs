@@ -6,12 +6,13 @@
 //!
 //! worldgen_bench <mod.hmod or folder> [--preset ID] [--seed S] [--settings JSON]
 //!     [--threads T] [--size N] [--center CX CZ] [--min-y Y] [--height H]
-//!     [--sea-level Y] [--shared-mib M] [--verify]
+//!     [--sea-level Y] [--shared-mib M] [--passes N] [--verify]
 //!
 //! `--verify` generates the square again on one thread, in a world of its
 //! own (its shared cells built again), and checks that every chunk's land
 //! is the same: the determinism contract. `--shared-mib` caps the world's
-//! shared cells (512 MiB by default).
+//! shared cells (512 MiB by default). `--passes N` generates the square N
+//! times with the same workers and world: pass 1 cold, the rest hot.
 use horizon_mods::{
     Package,
     worldgen_runtime::{Failure, Land, Palette, WorldInfo, WorldgenMod},
@@ -123,33 +124,54 @@ fn main() -> Result<(), Error> {
         .map_err(|e| format!("open: {e:?}"))?;
     println!("{threads} workers opened in {:.2?}", opened.elapsed());
 
-    let next = AtomicUsize::new(0);
-    let digests = Mutex::new(vec![0u64; chunks.len()]);
-    let failures = Mutex::new(Vec::new());
-    let t = Instant::now();
-    std::thread::scope(|s| {
-        for mut w in workers {
-            let (next, chunks, digests, failures) = (&next, &chunks, &digests, &failures);
-            s.spawn(move || {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(&(x, z)) = chunks.get(i) else { break };
-                    match w.terrain(x, z) {
-                        Ok(land) => digests.lock().unwrap()[i] = digest(&land),
-                        Err(e) => failures.lock().unwrap().push(((x, z), e)),
+    // Each pass generates the whole square again with the same workers and
+    // world: the first is cold (no cells, nothing cached in the instances),
+    // the later ones hot. Every pass must give the same land.
+    let passes = num("--passes", 1)?.max(1);
+    let mut workers = workers;
+    let mut digests = vec![0u64; chunks.len()];
+    let mut failures = Vec::new();
+    for pass in 1..=passes {
+        let next = AtomicUsize::new(0);
+        let these = Mutex::new(vec![0u64; chunks.len()]);
+        let failed = Mutex::new(Vec::new());
+        let t = Instant::now();
+        std::thread::scope(|s| {
+            for w in workers.iter_mut() {
+                let (next, chunks, these, failed) = (&next, &chunks, &these, &failed);
+                s.spawn(move || {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&(x, z)) = chunks.get(i) else { break };
+                        match w.terrain(x, z) {
+                            Ok(land) => these.lock().unwrap()[i] = digest(&land),
+                            Err(e) => failed.lock().unwrap().push(((x, z), e)),
+                        }
                     }
-                }
-            });
+                });
+            }
+        });
+        let secs = t.elapsed().as_secs_f64();
+        let these = these.into_inner().unwrap();
+        failures = failed.into_inner().unwrap();
+        let done = chunks.len() - failures.len();
+        let which = match (passes, pass) {
+            (1, _) => String::new(),
+            (_, 1) => " (pass 1, cold)".into(),
+            _ => format!(" (pass {pass}, hot)"),
+        };
+        println!(
+            "terrain{which}: {done} chunks in {secs:.2} s on {threads} threads = {:.0} chunks/s ({preset}, seed {}, {size} x {size} around {cx},{cz})",
+            done as f64 / secs,
+            info.seed
+        );
+        if pass == 1 {
+            digests = these;
+        } else if these != digests {
+            return Err(format!("pass {pass} gave other land than pass 1").into());
         }
-    });
-    let secs = t.elapsed().as_secs_f64();
-    let failures = failures.into_inner().unwrap();
+    }
     let done = chunks.len() - failures.len();
-    println!(
-        "terrain: {done} chunks in {secs:.2} s on {threads} threads = {:.0} chunks/s ({preset}, seed {}, {size} x {size} around {cx},{cz})",
-        done as f64 / secs,
-        info.seed
-    );
     for ((x, z), e) in failures.iter().take(5) {
         println!("  chunk {x},{z}: {e:?}");
     }
@@ -159,8 +181,9 @@ fn main() -> Result<(), Error> {
     let cells = world.shared_stats();
     if cells.builds > 0 {
         println!(
-            "shared cells: {} built, {} found built, {} waited for, {} dropped; {} kept, {:.1} MiB",
+            "shared cells: {} built ({} ahead), {} found built, {} waited for, {} dropped; {} kept, {:.1} MiB",
             cells.builds,
+            cells.prefetched,
             cells.hits,
             cells.waits,
             cells.evictions,
@@ -174,7 +197,6 @@ fn main() -> Result<(), Error> {
         let mut w = m
             .worker(info.clone(), palette.clone())
             .map_err(|e| format!("open: {e:?}"))?;
-        let digests = digests.into_inner().unwrap();
         let mut differ = 0;
         // Backwards, so no chunk comes in the order the threads took it.
         for (i, &(x, z)) in chunks.iter().enumerate().rev() {

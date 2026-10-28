@@ -1493,6 +1493,7 @@ name = "horizon-mods"
 version = "0.1.0"
 dependencies = [
  "horizon-shader-api",
+ "horizon-threads",
  "log",
  "minisign-verify",
  "serde",

@@ -10,6 +10,7 @@ experimental = ["worldgen"]
 presets = ["test_worldgen:hills"]
 stages = ["climate", "terrain", "structures", "features"]
 regions = ["camps"]
+saved_layers = [1]
 
 [[worldgen.claims]]
 name = "camp_sites"

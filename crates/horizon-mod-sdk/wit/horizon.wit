@@ -819,6 +819,12 @@ interface worldgen {
     /// cycles. Errs when the build fails or the layer rule is broken; keys
     /// are at most 256 bytes.
     shared: func(layer: u8, key: string) -> result<list<u8>, string>;
+    /// Asks the game to build these cells of `layer` ahead, on background
+    /// threads that run only when a core is idle, so that a later `shared`
+    /// finds them kept: the regions next to the ones being generated. Never
+    /// waits and never errs; cells kept or being built already are skipped,
+    /// keys over 256 bytes and requests past the queue's 4096 are dropped.
+    prefetch: func(layer: u8, keys: list<string>);
 }
 
 /// What the game calls on a world-generation mod (capability `worldgen`).

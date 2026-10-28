@@ -31,6 +31,7 @@ experimental = ["worldgen"]
 presets = ["test_worldgen:hills"]
 stages = ["climate", "terrain", "structures", "features"]
 regions = ["camps"]
+saved_layers = [1]
 
 [[worldgen.claims]]
 name = "camp_sites"
@@ -286,6 +287,8 @@ fn a_bad_answer_is_refused_and_the_mod_goes_on() {
 #[test]
 fn a_trap_or_an_endless_loop_stops_the_instance() {
     let m = hills();
+    let second = std::time::Duration::from_secs(1);
+    m.set_time_limits(second * 10, second, second);
     for (settings, why) in [("panic", "a panic"), ("spin", "too long")] {
         let mut w = worker(&m, settings);
         match w.terrain(0, 0) {
@@ -536,4 +539,57 @@ fn a_bad_build_costs_the_chunk_only() {
         // Each fails before it reads layer 1; a failed cell is never kept.
         assert_eq!(world.shared_stats().cells, 0, "{settings}");
     }
+}
+
+/// Cells asked for ahead are built on the prefetch threads; the worker
+/// that gets there finds them kept, and the land is the same.
+#[test]
+fn prefetched_cells_are_built_ahead() {
+    let m = hills();
+    let world = cells_world(&m, "cells prefetch");
+    let mut w = world.worker().unwrap();
+    let first = w.terrain(0, 0).unwrap();
+    // Region (0, 0) asked for (1, 0), (0, 1) and (1, 1) ahead.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while world.shared_stats().prefetched < 3 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let before = world.shared_stats();
+    assert_eq!(before.prefetched, 3, "{before:?}");
+    let ahead = w.terrain(4, 4).unwrap();
+    let after = world.shared_stats();
+    assert!(after.hits > before.hits, "{after:?}");
+    // Region (1, 1) itself asked for three more; the land is as without prefetch.
+    let mut plain = cells_world(&m, "cells").worker().unwrap();
+    assert_eq!(plain.terrain(0, 0).unwrap(), first);
+    assert_eq!(plain.terrain(4, 4).unwrap(), ahead);
+    drop(w);
+    drop(world); // stops the prefetch threads
+}
+
+/// The manifest's saved layers go out with the world's save and come back
+/// in place of building them again.
+#[test]
+fn saved_layers_come_back_without_building() {
+    let m = hills();
+    let world = cells_world(&m, "cells");
+    let mut w = world.worker().unwrap();
+    let land = w.terrain(0, 0).unwrap();
+    let saved = world.saved_cells();
+    // Only layer 1 is saved: the super-region, not the region.
+    assert_eq!(saved.len(), 1);
+    assert_eq!((saved[0].0, saved[0].1.as_str()), (1, "0,0"));
+    let reopened = cells_world(&m, "cells");
+    let kept = reopened.preload(
+        saved
+            .iter()
+            .map(|(l, k, d)| (*l, k.clone(), d.to_vec()))
+            .chain([(0, "0,0".to_string(), vec![9; 1024])]),
+    );
+    assert_eq!(kept, 1, "a layer the manifest doesn't save is not loaded");
+    let mut again = reopened.worker().unwrap();
+    assert_eq!(again.terrain(0, 0).unwrap(), land);
+    // The region was built; the super-region came from the save.
+    let stats = reopened.shared_stats();
+    assert_eq!((stats.builds, stats.cells), (1, 2), "{stats:?}");
 }

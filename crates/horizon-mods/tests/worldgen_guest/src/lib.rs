@@ -9,6 +9,7 @@
 //! With `cells`, each 64-block region is lifted by a shared cell of layer 0,
 //! built from a cell of layer 1 (256 blocks); `samelayer`, `badcell` and
 //! `cellcrash` make building one break the rules, fail or panic.
+//! `prefetch` asks for the next regions' cells ahead.
 use horizon_mod_sdk::worldgen::*;
 use std::{cell::RefCell, collections::HashMap};
 
@@ -51,6 +52,11 @@ impl Hills {
             return Ok(lift);
         }
         let cell = shared(0, &format!("{rx},{rz}"))?;
+        if self.asks("prefetch") {
+            // The regions east and south come next.
+            let next = [(rx + 1, rz), (rx, rz + 1), (rx + 1, rz + 1)];
+            prefetch(0, &next.map(|(x, z)| format!("{x},{z}")));
+        }
         let lift = i32::from(*cell.first().ok_or("an empty cell")?);
         self.lifts.borrow_mut().insert((rx, rz), lift);
         Ok(lift)

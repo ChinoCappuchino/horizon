@@ -73,8 +73,10 @@ Things that matter for a FarView port:
   stand-in mod uses two layers with `--settings cells`.
 - **Height.** Pass the dimension type's floor and height: the `highlands` presets are
   `--min-y -64 --height 2048`.
-- **Limits:** 256 MiB of memory per instance, a fuel budget per call (about 10⁹ instructions;
-  4 × 10⁹ for `open`, where regional maps can be built).
+- **Limits:** 256 MiB of memory per instance; time limits of 10 s per call, 60 s for `open` and
+  for each shared cell's build.
+- **Ahead and kept:** `prefetch(layer, keys)` builds cells on idle cores before they're needed;
+  `saved_layers` in the manifest marks layers the game keeps with the world (from M3).
 
 ## 3. Benchmarks
 
@@ -85,7 +87,8 @@ Things that matter for a FarView port:
 | A server under bots | `python3 tools/server_bench.py --servers horizon,vanilla --bots 1,10 --behaviour explore` | the pack's dedicated server |
 
 `worldgen_bench` options: `--preset ID --seed S --settings JSON --center CX CZ --min-y Y --height H
---sea-level Y --shared-mib M`. It prints how the shared cells were used (built, found, waited for, dropped). `--verify` regenerates every chunk on one thread in reverse and fails if any differs.
+--sea-level Y --shared-mib M --passes N`; with `--passes`, pass 1 is cold and the rest hot
+(same workers and world). It prints how the shared cells were used (built, found, waited for, dropped). `--verify` regenerates every chunk on one thread in reverse and fails if any differs.
 On the Nobara VM (20 threads) the stand-in mod's trivial hills give 13,050 chunks/s on 8 threads:
 the sandbox's ceiling, not a prediction for FarView, whose own work will dominate.
 

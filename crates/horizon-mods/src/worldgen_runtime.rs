@@ -10,8 +10,13 @@ use crate::{
     worldgen::{KEEP_BIOME, Section, Stage, is_id},
 };
 use std::{
-    collections::HashMap,
-    sync::{Arc, Condvar, Mutex},
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread::JoinHandle,
+    time::Duration,
 };
 use wasmtime::{
     Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
@@ -37,10 +42,15 @@ use bindings::{
 /// An instance's linear memory cap: a terrain provider keeps its regional
 /// maps in it, once per generation worker.
 const MEMORY: usize = 256 << 20;
-/// Fuel (about one unit per instruction) for `open`, where a provider may
-/// build its maps, and for each call after it.
-const FUEL_OPEN: u64 = 4_000_000_000;
-const FUEL_CALL: u64 = 1_000_000_000;
+/// How long `open` (where a provider may build its maps), each call after
+/// it and one `build-shared` may take before the call is stopped. Measured
+/// by wasmtime's epochs, a counter the engine's ticker advances every
+/// [`TICK`]: much cheaper than metering fuel, and the limit only decides
+/// whether a runaway call stops, never what a call answers.
+const OPEN_LIMIT: Duration = Duration::from_secs(60);
+const CALL_LIMIT: Duration = Duration::from_secs(10);
+const BUILD_LIMIT: Duration = Duration::from_secs(60);
+const TICK: Duration = Duration::from_millis(10);
 /// The most columns one `heights` call asks for.
 pub const HEIGHT_COLUMNS: usize = 4096;
 /// The most blocks one `decorate` answer, or one chunk's structure starts, set.
@@ -50,8 +60,10 @@ pub const STARTS: usize = 64;
 pub const PIECES: usize = 1024;
 /// Log lines one call may write: a mod runs on every worker.
 const LOG_LINES: u32 = 4;
-/// Fuel for one `build-shared`: a coarse cell may take seconds.
-const FUEL_BUILD: u64 = 50_000_000_000;
+/// Background threads per world that build prefetched cells, and the most
+/// cells waiting for them.
+const PREFETCH_THREADS: usize = 2;
+const PREFETCH_QUEUE: usize = 4096;
 /// The bytes of shared cells a world keeps, one cell's most, a key's
 /// length, and how deep builds may nest (one level per coarser layer).
 const SHARED_CAP: u64 = 512 << 20;
@@ -101,6 +113,11 @@ pub struct WorldgenMod {
 }
 
 struct Compiled {
+    /// The ticker thread advancing the engine's epochs, until dropped.
+    ticking: Arc<AtomicBool>,
+    ticker: Option<JoinHandle<()>>,
+    /// `open`, call and build limits, in ticks.
+    limits: [AtomicU64; 3],
     id: String,
     namespaces: Vec<String>,
     section: Section,
@@ -124,7 +141,7 @@ impl WorldgenMod {
         // relaxed SIMD takes its deterministic lowering.
         config
             .wasm_component_model(true)
-            .consume_fuel(true)
+            .epoch_interruption(true)
             .cranelift_nan_canonicalization(true)
             .relaxed_simd_deterministic(true);
         let engine = Engine::new(&config).map_err(|e| e.to_string())?;
@@ -151,8 +168,24 @@ impl WorldgenMod {
         let mut linker = Linker::new(&engine);
         HorizonWorldgenMod::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s)
             .map_err(|e| e.to_string())?;
+        let ticking = Arc::new(AtomicBool::new(true));
+        let ticker = {
+            let (engine, ticking) = (engine.clone(), ticking.clone());
+            std::thread::Builder::new()
+                .name("worldgen-epochs".into())
+                .spawn(move || {
+                    while ticking.load(Ordering::Relaxed) {
+                        std::thread::sleep(TICK);
+                        engine.increment_epoch();
+                    }
+                })
+                .map_err(|e| e.to_string())?
+        };
         Ok(WorldgenMod {
             compiled: Arc::new(Compiled {
+                ticking,
+                ticker: Some(ticker),
+                limits: [OPEN_LIMIT, CALL_LIMIT, BUILD_LIMIT].map(|l| AtomicU64::new(ticks(l))),
                 id: m.id.clone(),
                 namespaces: m.owned_namespaces().map(str::to_owned).collect(),
                 section: m.worldgen.clone().unwrap_or_default(),
@@ -167,15 +200,24 @@ impl WorldgenMod {
         &self.compiled.id
     }
 
+    /// How long `open`, each call and each cell build may take (60 s, 10 s
+    /// and 60 s unless set).
+    pub fn set_time_limits(&self, open: Duration, call: Duration, build: Duration) {
+        for (limit, d) in self.compiled.limits.iter().zip([open, call, build]) {
+            limit.store(ticks(d), Ordering::Relaxed);
+        }
+    }
+
     /// The mod in the world `info` describes: the workers made from it
     /// share its cells (`worldgen.shared`).
     pub fn world(&self, info: WorldInfo, palette: Arc<dyn Palette>) -> World {
-        World(Arc::new(WorldShared {
+        World(Arc::new(WorldHandle(Arc::new(WorldShared {
             compiled: self.compiled.clone(),
             info,
             palette,
             cells: Cells::new(SHARED_CAP),
-        }))
+            prefetch: Prefetch::default(),
+        }))))
     }
 
     /// A new instance in a world of its own (no cells shared with any
@@ -185,22 +227,111 @@ impl WorldgenMod {
     }
 }
 
+impl Drop for Compiled {
+    fn drop(&mut self) {
+        self.ticking.store(false, Ordering::Relaxed);
+        if let Some(t) = self.ticker.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+fn ticks(d: Duration) -> u64 {
+    (d.as_millis() / TICK.as_millis()).max(1) as u64
+}
+
 /// A world-generation mod in one world and dimension.
 #[derive(Clone)]
-pub struct World(Arc<WorldShared>);
+pub struct World(Arc<WorldHandle>);
+
+/// The world's state; dropping the last [`World`] stops its prefetch threads.
+struct WorldHandle(Arc<WorldShared>);
+impl Drop for WorldHandle {
+    fn drop(&mut self) {
+        let threads = {
+            let mut q = self.0.prefetch.lock();
+            q.stop = true;
+            std::mem::take(&mut q.threads)
+        };
+        self.0.prefetch.wake.notify_all();
+        for t in threads {
+            let _ = t.join();
+        }
+    }
+}
 
 struct WorldShared {
     compiled: Arc<Compiled>,
     info: WorldInfo,
     palette: Arc<dyn Palette>,
     cells: Cells,
+    prefetch: Prefetch,
+}
+
+/// Cells asked for ahead (`worldgen.prefetch`) and the threads building them.
+#[derive(Default)]
+struct Prefetch {
+    queue: Mutex<PrefetchQueue>,
+    wake: Condvar,
+}
+#[derive(Default)]
+struct PrefetchQueue {
+    jobs: VecDeque<(u8, String)>,
+    /// Waiting or being built: asked for again, they are skipped.
+    queued: HashSet<(u8, String)>,
+    threads: Vec<JoinHandle<()>>,
+    stop: bool,
+}
+impl Prefetch {
+    fn lock(&self) -> std::sync::MutexGuard<'_, PrefetchQueue> {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A prefetch thread: builds the cells asked for ahead, one at a time, on
+/// a builder of its own, while a core is idle.
+fn prefetch_thread(world: Arc<WorldShared>) {
+    horizon_threads::idle_current();
+    let mut host: Option<Store<State>> = None;
+    loop {
+        let job = {
+            let mut q = world.prefetch.lock();
+            loop {
+                if q.stop {
+                    return;
+                }
+                if let Some(job) = q.jobs.pop_front() {
+                    break job;
+                }
+                q = world
+                    .prefetch
+                    .wake
+                    .wait(q)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+        };
+        if let Some(ticket) = world.cells.try_claim(job.0, &job.1) {
+            if host.is_none() {
+                host = instance(&world, 0).ok().map(|(store, _, _)| store);
+            }
+            let built = match host.as_mut() {
+                Some(store) => store.data_mut().build(job.0, &job.1).ok(),
+                None => None,
+            };
+            if built.is_some() {
+                world.cells.lock().stats.prefetched += 1;
+            }
+            ticket.finish(built.map(|b| Arc::from(b.as_slice())));
+        }
+        world.prefetch.lock().queued.remove(&job);
+    }
 }
 
 impl World {
     /// A new instance, opened for the world.
     pub fn worker(&self) -> Result<Worker, Failure> {
-        let (store, exports, opened) = instance(&self.0, 0)?;
-        let section = &self.0.compiled.section;
+        let (store, exports, opened) = instance(&self.0.0, 0)?;
+        let section = &self.0.0.compiled.section;
         let mut stages = Vec::new();
         for s in opened.into_iter().map(stage) {
             if !section.stages.contains(&s) {
@@ -213,7 +344,7 @@ impl World {
                 stages.push(s);
             }
         }
-        let info = &self.0.info;
+        let info = &self.0.0.info;
         if stages.contains(&Stage::Terrain) && !section.presets.contains(&info.preset) {
             return Err(Failure::Refused(format!(
                 "open names stage terrain for preset {}, not one of the manifest's worldgen.presets",
@@ -226,17 +357,50 @@ impl World {
             info: info.clone(),
             stages,
             regions: section.regions.clone(),
-            namespaces: self.0.compiled.namespaces.clone(),
+            namespaces: self.0.0.compiled.namespaces.clone(),
             stopped: None,
         })
     }
     /// The bytes of cells the world keeps before it drops the least
     /// recently used (512 MiB unless set).
     pub fn set_shared_cap(&self, bytes: u64) {
-        self.0.cells.lock().cap = bytes;
+        self.0.0.cells.lock().cap = bytes;
+    }
+    /// The kept cells of the manifest's `saved_layers`, for the game to keep
+    /// with the world's save.
+    pub fn saved_cells(&self) -> Vec<(u8, String, Arc<[u8]>)> {
+        let layers = &self.0.0.compiled.section.saved_layers;
+        let cells = self.0.0.cells.lock();
+        let mut out: Vec<_> = cells
+            .map
+            .iter()
+            .filter_map(|((layer, key), c)| match c {
+                Cell::Ready { data, .. } if layers.contains(layer) => {
+                    Some((*layer, key.clone(), data.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        out.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        out
+    }
+    /// Cells read back from the world's save, kept as if built here; those
+    /// of layers the manifest doesn't save, or too big, are skipped. How many
+    /// were kept.
+    pub fn preload(&self, cells: impl IntoIterator<Item = (u8, String, Vec<u8>)>) -> usize {
+        let layers = &self.0.0.compiled.section.saved_layers;
+        let mut map = self.0.0.cells.lock();
+        let mut kept = 0;
+        for (layer, key, data) in cells {
+            if layers.contains(&layer) && data.len() <= CELL_MAX && key.len() <= SHARED_KEY {
+                map.insert_ready((layer, key), Arc::from(data.as_slice()));
+                kept += 1;
+            }
+        }
+        kept
     }
     pub fn shared_stats(&self) -> SharedStats {
-        let cells = self.0.cells.lock();
+        let cells = self.0.0.cells.lock();
         SharedStats {
             cells: cells.map.len(),
             bytes: cells.bytes,
@@ -266,10 +430,10 @@ fn instance(
         building: None,
         builder: None,
     };
-    let stopped = |e: wasmtime::Error| Failure::Stopped(crate::runtime::reason(&e));
+    let stopped = |e: wasmtime::Error| Failure::Stopped(reason(&e));
     let mut store = Store::new(&compiled.engine, state);
     store.limiter(|s| &mut s.limits);
-    store.set_fuel(FUEL_OPEN).map_err(stopped)?;
+    store.set_epoch_deadline(compiled.limits[0].load(Ordering::Relaxed));
     let instance = compiled
         .linker
         .instantiate(&mut store, &compiled.component)
@@ -292,6 +456,8 @@ pub struct SharedStats {
     pub waits: u64,
     /// Cells dropped to stay under the cap.
     pub evictions: u64,
+    /// Cells built ahead on the prefetch threads (`worldgen.prefetch`).
+    pub prefetched: u64,
     /// What is kept now.
     pub cells: usize,
     pub bytes: u64,
@@ -324,7 +490,48 @@ enum Claim<'a> {
     Build(Ticket<'a>),
 }
 
+impl CellMap {
+    /// Keeps a built cell, then drops the least recently used past the cap.
+    fn insert_ready(&mut self, key: (u8, String), data: Arc<[u8]>) {
+        self.clock += 1;
+        let used = self.clock;
+        self.bytes += data.len() as u64;
+        if let Some(Cell::Ready { data, .. }) = self.map.insert(key, Cell::Ready { data, used }) {
+            self.bytes -= data.len() as u64;
+        }
+        while self.bytes > self.cap {
+            let oldest = self
+                .map
+                .iter()
+                .filter_map(|(k, c)| match c {
+                    Cell::Ready { used, .. } => Some((*used, k.clone())),
+                    Cell::Building => None,
+                })
+                .min();
+            let Some((_, k)) = oldest else { break };
+            if let Some(Cell::Ready { data, .. }) = self.map.remove(&k) {
+                self.bytes -= data.len() as u64;
+                self.stats.evictions += 1;
+            }
+        }
+    }
+}
+
 impl Cells {
+    /// The right to build a cell nobody has or is building; never waits.
+    fn try_claim(&self, layer: u8, key: &str) -> Option<Ticket<'_>> {
+        let key = (layer, key.to_string());
+        let mut cells = self.lock();
+        if cells.map.contains_key(&key) {
+            return None;
+        }
+        cells.map.insert(key.clone(), Cell::Building);
+        cells.stats.builds += 1;
+        Some(Ticket {
+            cells: self,
+            key: Some(key),
+        })
+    }
     fn new(cap: u64) -> Cells {
         Cells {
             map: Mutex::new(CellMap {
@@ -391,27 +598,7 @@ impl Ticket<'_> {
             None => {
                 cells.map.remove(&key);
             }
-            Some(data) => {
-                cells.clock += 1;
-                let used = cells.clock;
-                cells.bytes += data.len() as u64;
-                cells.map.insert(key, Cell::Ready { data, used });
-                while cells.bytes > cells.cap {
-                    let oldest = cells
-                        .map
-                        .iter()
-                        .filter_map(|(k, c)| match c {
-                            Cell::Ready { used, .. } => Some((*used, k.clone())),
-                            Cell::Building => None,
-                        })
-                        .min();
-                    let Some((_, k)) = oldest else { break };
-                    if let Some(Cell::Ready { data, .. }) = cells.map.remove(&k) {
-                        cells.bytes -= data.len() as u64;
-                        cells.stats.evictions += 1;
-                    }
-                }
-            }
+            Some(data) => cells.insert_ready(key, data),
         }
         drop(cells);
         self.cells.built.notify_all();
@@ -475,14 +662,12 @@ impl Worker {
             )));
         }
         self.store.data_mut().logged = 0;
-        let result = self
-            .store
-            .set_fuel(FUEL_CALL)
-            .and_then(|()| f(&self.exports, &mut self.store));
-        match result {
+        let limit = self.store.data().world.compiled.limits[1].load(Ordering::Relaxed);
+        self.store.set_epoch_deadline(limit);
+        match f(&self.exports, &mut self.store) {
             Ok(answer) => answer.map_err(Failure::Refused),
             Err(e) => {
-                let why = crate::runtime::reason(&e);
+                let why = reason(&e);
                 log::warn!(
                     "Horizon: world-generation mod {} stopped: {why}",
                     self.store.data().id
@@ -607,6 +792,14 @@ impl Worker {
             ));
         }
         Ok(names)
+    }
+}
+
+/// Why a call stopped: a call past its time limit is an interrupt here.
+fn reason(e: &wasmtime::Error) -> String {
+    match e.downcast_ref::<wasmtime::Trap>() {
+        Some(wasmtime::Trap::Interrupt) => "it took too long (an endless loop?)".into(),
+        _ => crate::runtime::reason(e),
     }
 }
 
@@ -803,11 +996,12 @@ impl State {
         let b = self.builder.as_mut().expect("made above");
         b.store.data_mut().building = Some(layer);
         b.store.data_mut().logged = 0;
-        let result = b.store.set_fuel(FUEL_BUILD).and_then(|()| {
+        let limit = self.world.compiled.limits[2].load(Ordering::Relaxed);
+        b.store.set_epoch_deadline(limit);
+        let result =
             b.exports
                 .horizon_mods_worldgen_events()
-                .call_build_shared(&mut b.store, layer, key)
-        });
+                .call_build_shared(&mut b.store, layer, key);
         b.store.data_mut().building = None;
         match result {
             Ok(Ok(bytes)) if bytes.len() > CELL_MAX => {
@@ -818,7 +1012,7 @@ impl State {
             Err(e) => {
                 // A builder that trapped is not reused.
                 self.builder = None;
-                Err(format!("{at}: {}", crate::runtime::reason(&e)))
+                Err(format!("{at}: {}", reason(&e)))
             }
         }
     }
@@ -874,5 +1068,34 @@ impl worldgen::Host for State {
                 built
             }
         }
+    }
+    fn prefetch(&mut self, layer: u8, keys: Vec<String>) {
+        let world = &self.world;
+        let mut q = world.prefetch.lock();
+        if q.stop {
+            return;
+        }
+        for key in keys {
+            if q.jobs.len() >= PREFETCH_QUEUE {
+                break;
+            }
+            let job = (layer, key);
+            if job.1.len() <= SHARED_KEY && q.queued.insert(job.clone()) {
+                q.jobs.push_back(job);
+            }
+        }
+        while q.threads.len() < PREFETCH_THREADS && !q.jobs.is_empty() {
+            let world = world.clone();
+            let n = q.threads.len();
+            match std::thread::Builder::new()
+                .name(format!("worldgen-prefetch-{n}"))
+                .spawn(move || prefetch_thread(world))
+            {
+                Ok(t) => q.threads.push(t),
+                Err(_) => break,
+            }
+        }
+        drop(q);
+        world.prefetch.wake.notify_all();
     }
 }

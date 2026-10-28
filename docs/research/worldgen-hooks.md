@@ -125,7 +125,7 @@ the contract, the code that holds mods to it, and the tests.
 
 **Version.** An experimental capability on the server-mod line (`api = "0.3"`, `side =
 "server"`, `experimental = ["worldgen"]`): additive, so nothing upstream changes meaning. Its
-first four imported functions are API level 8 and `shared` level 9, numbers upstream may later give to something else;
+first four imported functions are API level 8, `shared` level 9 and `prefetch` level 10, numbers upstream may later give to something else;
 the fork renumbers if it ever merges upstream's level 8.
 
 **The stages as calls.** `open(world-info)` once per instance, then per chunk:
@@ -157,7 +157,7 @@ crashing.
 built on demand, unbounded, 10 to 15 layers from about 128 blocks to 16 km). `shared(layer, key)`
 returns a cell's bytes, the same for every instance of the world (`WorldgenMod::world`, then
 `World::worker` per thread). A cell the world lacks is built once by the mod's
-`build-shared(layer, key)` on a builder instance, with its own budget (5 × 10¹⁰ fuel; a coarse
+`build-shared(layer, key)` on a builder instance, with its own time limit (60 s; a coarse
 drainage cell takes about 2 s in Java). Another thread that asks for it meanwhile waits for that
 build rather than starting its own. Inside a build of layer L only layers above L may be read, so
 builds have no cycles and can't deadlock (FarView's halos are recomputed from coarser layers,
@@ -167,10 +167,22 @@ recently used past that; a dropped cell is rebuilt, identical by determinism. A 
 instance goes on (a crashed builder is replaced). Instances keep their own copies of the cells
 they fetched, as FarView keeps whole cells and interpolates inside them.
 
+**Building ahead, keeping, and time limits** (asked for by the FarView port's benchmarks,
+2026-10-28). `prefetch(layer, keys)` (API level 10) queues cells to build before anyone needs
+them, on up to two threads per world that run only when a core is idle (the OS's idle class); it
+never waits or errs, and results can't change, since a cell is the same whoever builds it. The
+manifest's `saved_layers` names layers slow enough to keep with the world's save:
+`World::saved_cells` hands them to the game and `World::preload` takes them back (the game does
+this from M3). Time limits are wasmtime epochs (a ticker every 10 ms) instead of fuel: 60 s for
+`open`, 10 s per call, 60 s per cell build. Fuel cost the FarView port 14 to 16 % of its
+throughput; a time limit decides only whether a runaway call stops, never what a call answers.
+NaN canonicalisation stays on although it costs 16 to 24 %: without it the same seed could give
+different land on x86 and ARM machines, whose NaN bit patterns differ.
+
 **Failures.** An `err`, or an answer that breaks the rules above, is *refused*: that chunk goes
 without the mod's part, and the report will count it (M4). A trap or a call over its budget
-*stops* that instance for the world. Budgets: 4 × 10⁹ fuel for `open` (a provider may build
-its maps there), 10⁹ per call after it, 256 MiB of memory per instance, 4 log lines per call.
+*stops* that instance for the world. Limits: the time limits above, 256 MiB of memory per
+instance, 4 log lines per call.
 
 **Claims in the manifest.** A Farview-shaped example (a sketch: the port in M5 decides the
 real one):

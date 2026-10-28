@@ -237,6 +237,10 @@ pub struct Section {
     /// `region:<name>`.
     #[serde(default)]
     pub regions: Vec<String>,
+    /// Layers of shared cells (`worldgen.shared`) slow enough to build that
+    /// the game keeps them with the world's save and loads them back.
+    #[serde(default)]
+    pub saved_layers: Vec<u8>,
     #[serde(default)]
     pub claims: Vec<Claim>,
 }
@@ -249,10 +253,13 @@ impl Section {
                 .is_some_and(|(ns, _)| namespaces.contains(&ns))
         };
         if !code
-            && (!self.presets.is_empty() || !self.stages.is_empty() || !self.regions.is_empty())
+            && (!self.presets.is_empty()
+                || !self.stages.is_empty()
+                || !self.regions.is_empty()
+                || !self.saved_layers.is_empty())
         {
             return Err(
-                "worldgen presets, stages and regions are the mod's code: they need capability worldgen"
+                "worldgen presets, stages, regions and saved layers are the mod's code: they need capability worldgen"
                     .into(),
             );
         }
@@ -276,6 +283,11 @@ impl Section {
         for (i, s) in self.stages.iter().enumerate() {
             if self.stages[..i].contains(s) {
                 return Err(format!("worldgen stage {} is listed twice", s.name()));
+            }
+        }
+        for (i, l) in self.saved_layers.iter().enumerate() {
+            if self.saved_layers[..i].contains(l) {
+                return Err(format!("worldgen saved layer {l} is listed twice"));
             }
         }
         for (i, r) in self.regions.iter().enumerate() {

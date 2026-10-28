@@ -471,7 +471,9 @@ pub mod worldgen {
         BiomeRequest, BlockEdit, Climate, Column, ColumnPos, Contribution, Guest as __Guest, Land,
         Piece, Rotation, Run, Stage, Step, StructureStart, TemplatePiece, WorldInfo,
     };
-    pub use horizon::mods::worldgen::{biome_id, region_block, region_height, shared, state_id};
+    pub use horizon::mods::worldgen::{
+        biome_id, prefetch, region_block, region_height, shared, state_id,
+    };
 
     /// The biome number that keeps what the next mod or vanilla puts there.
     pub const KEEP_BIOME: u32 = u32::MAX;
