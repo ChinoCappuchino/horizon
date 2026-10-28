@@ -23,6 +23,19 @@ Horizon needs the game's files from **your own** Minecraft 26.3, prepared once o
 cargo run --release -p horizon-prepare -- --prepare --server-jar ~/Downloads/server.jar   # JDK 25
 ```
 
+What tripped the laptop's first prepare (2026-10-28), and the fix for each:
+
+1. **It picked another launcher's folder.** The CurseForge app's `versions/26.3/26.3.json` was
+   rewritten (another sha1), and there was no `26.3.jar` because 26.3 was never played there.
+   Point `--minecraft-dir` at a folder in the official launcher's layout,
+   `versions/26.3/26.3.jar` and `26.3.json`, with the jar checked against Mojang's version
+   manifest.
+2. **Prism isn't read directly.** Link Prism's `libraries/` and `assets/` into that folder.
+3. **Nobara's `java-25-openjdk` is a JRE without `javac`.** Use a full JDK 25 (Temurin 25.0.5
+   worked) with `JAVA_HOME` set.
+
+The server jar is Mojang's own 26.3 `server.jar`; check its sha1 against the version manifest.
+
 The server: `cargo build --release -p horizon-client --bin horizon-client -p horizon-server`
 ([docs/hosting.md](../hosting.md)).
 
@@ -75,6 +88,11 @@ Things that matter for a FarView port:
 --sea-level Y --shared-mib M`. It prints how the shared cells were used (built, found, waited for, dropped). `--verify` regenerates every chunk on one thread in reverse and fails if any differs.
 On the Nobara VM (20 threads) the stand-in mod's trivial hills give 13,050 chunks/s on 8 threads:
 the sandbox's ceiling, not a prediction for FarView, whose own work will dominate.
+
+Baselines on the laptop (Ryzen 5 5500U, 2026-10-28): the stand-in mod 22,399 chunks/s on 8
+threads (the sandbox's ceiling there); Horizon's vanilla generation (`chunkgen_bench --threads 8
+--size 32`) 457.8 proto chunks/s, decoration 2,349.5 chunks/s; FarView's Java fill bench
+~1,445 to 1,628 chunks/s; the whole pack's dedicated server ~103 to 169 chunks/s.
 
 ## 4. Splitting the work (clean room)
 
