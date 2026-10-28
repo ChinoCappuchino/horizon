@@ -241,6 +241,11 @@ pub struct Section {
     /// the game keeps them with the world's save and loads them back.
     #[serde(default)]
     pub saved_layers: Vec<u8>,
+    /// Options of the presets it provides, for the create-world screen:
+    /// the game writes the chosen values into the world's save as the
+    /// preset's settings JSON (WIT `world-info.settings`).
+    #[serde(default)]
+    pub settings: Vec<PresetSetting>,
     #[serde(default)]
     pub claims: Vec<Claim>,
 }
@@ -256,7 +261,8 @@ impl Section {
             && (!self.presets.is_empty()
                 || !self.stages.is_empty()
                 || !self.regions.is_empty()
-                || !self.saved_layers.is_empty())
+                || !self.saved_layers.is_empty()
+                || !self.settings.is_empty())
         {
             return Err(
                 "worldgen presets, stages, regions and saved layers are the mod's code: they need capability worldgen"
@@ -283,6 +289,49 @@ impl Section {
         for (i, s) in self.stages.iter().enumerate() {
             if self.stages[..i].contains(s) {
                 return Err(format!("worldgen stage {} is listed twice", s.name()));
+            }
+        }
+        for (i, o) in self.settings.iter().enumerate() {
+            let at = format!("worldgen setting {:?}", o.path);
+            if !self.presets.contains(&o.preset) {
+                return Err(format!(
+                    "{at}: preset {} is not in worldgen.presets",
+                    o.preset
+                ));
+            }
+            let path_ok = !o.path.is_empty()
+                && o.path.split('.').all(|k| {
+                    !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                });
+            if !path_ok {
+                return Err(format!("{at}: the path is not keys joined by dots"));
+            }
+            if o.label.is_empty() || o.label.chars().count() > 64 {
+                return Err(format!("{at}: the label is 1 to 64 characters"));
+            }
+            match (&o.choices[..], o.range, &o.default) {
+                ([], Some([lo, hi]), d) if lo < hi => {
+                    let v = d.as_float().or_else(|| d.as_integer().map(|i| i as f64));
+                    if !v.is_some_and(|v| (lo..=hi).contains(&v)) {
+                        return Err(format!("{at}: the default is not a number in [{lo}, {hi}]"));
+                    }
+                }
+                (choices, None, toml::Value::String(d)) if !choices.is_empty() => {
+                    if !choices.contains(d) {
+                        return Err(format!("{at}: the default {d:?} is not one of the choices"));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "{at}: give either choices and a text default, or a range and a number default"
+                    ));
+                }
+            }
+            if self.settings[..i]
+                .iter()
+                .any(|p| p.preset == o.preset && p.path == o.path)
+            {
+                return Err(format!("{at} is listed twice for {}", o.preset));
             }
         }
         for (i, l) in self.saved_layers.iter().enumerate() {
@@ -348,6 +397,25 @@ impl Section {
         }
         Ok(())
     }
+}
+
+/// One option of a preset (`[[worldgen.settings]]`): a cycling button for
+/// `choices`, a slider for `range`.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PresetSetting {
+    /// One of the section's `presets`.
+    pub preset: String,
+    /// Where the value goes in the settings JSON: keys joined by dots
+    /// (`climate.mode`).
+    pub path: String,
+    /// What the create-world screen shows, up to 64 characters.
+    pub label: String,
+    #[serde(default)]
+    pub choices: Vec<String>,
+    pub range: Option<[f64; 2]>,
+    /// A choice's text, or a number in the range.
+    pub default: toml::Value,
 }
 
 /// The pack author's rules (`config/horizon/worldgen-rules.toml`): the
@@ -924,6 +992,50 @@ priority = 5
             );
             assert!(toml::from_str::<Section>(&text).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn preset_settings_are_checked() {
+        let base = "presets = [\"m:earth\"]\nstages = [\"terrain\"]\n";
+        let check = |entry: &str| {
+            section(&format!(
+                "{base}[[settings]]\npreset = \"m:earth\"\n{entry}"
+            ))
+            .check("m", &["m"], true)
+        };
+        check("path = \"climate.mode\"\nlabel = \"Climate\"\nchoices = [\"latitude\", \"winter\"]\ndefault = \"latitude\"").unwrap();
+        check("path = \"strengths.world_scale\"\nlabel = \"World scale\"\nrange = [0.5, 2.0]\ndefault = 1.0").unwrap();
+        check("path = \"climate.band_width\"\nlabel = \"Band\"\nrange = [4096, 1048576]\ndefault = 65536").unwrap();
+        for (entry, why) in [
+            (
+                "path = \"a..b\"\nlabel = \"X\"\nrange = [0.0, 1.0]\ndefault = 0.5",
+                "keys joined by dots",
+            ),
+            (
+                "path = \"a\"\nlabel = \"X\"\nrange = [0.0, 1.0]\ndefault = 2.0",
+                "not a number in",
+            ),
+            (
+                "path = \"a\"\nlabel = \"X\"\nchoices = [\"p\"]\ndefault = \"q\"",
+                "not one of the choices",
+            ),
+            (
+                "path = \"a\"\nlabel = \"X\"\nchoices = [\"p\"]\nrange = [0.0, 1.0]\ndefault = \"p\"",
+                "give either",
+            ),
+        ] {
+            let e = check(entry).unwrap_err();
+            assert!(e.contains(why), "{entry}: {e}");
+        }
+        let other = section(&format!(
+            "{base}[[settings]]\npreset = \"m:mars\"\npath = \"a\"\nlabel = \"X\"\nrange = [0.0, 1.0]\ndefault = 0.5"
+        ));
+        assert!(
+            other
+                .check("m", &["m"], true)
+                .unwrap_err()
+                .contains("not in worldgen.presets")
+        );
     }
 
     #[test]
