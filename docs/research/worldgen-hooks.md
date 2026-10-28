@@ -334,6 +334,12 @@ type it gets. Proof: a dedicated server and a single-player client on `test_worl
 yet: vanilla's frame and light times after the column became a runtime value (they read it
 once per call), and the parity harnesses.
 
+**M3e, done (2026-10-28).** The network side came with M3d; proved separately: a dedicated server
+on `test_worldgen:tall` and a client in another process (no mod installed) joined it over
+loopback: the client took the 2048-high Overworld from the synced `dimension_type`, received
+117 columns with no decode errors and drew the land at y 1564. Not tested: a vanilla 26.3
+client (the synced dimension type is what vanilla reads, so it should hold).
+
 2048 sections per column is about five times the memory and light work of vanilla's 384; M3d is
 measured against vanilla worlds so they don't get slower.
 
