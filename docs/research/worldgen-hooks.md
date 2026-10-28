@@ -257,6 +257,28 @@ regions): no Afterwinter mod needs one yet, and it is a new function, so adding 
 nothing. Applying claims to data-driven content (JSON biomes, structure sets, placed features)
 is M4, where the generator knows each thing's owner and tags.
 
+## M3 plan: steps
+
+Mapped 2026-10-28. The generator in horizon-world already takes any height up to vanilla's 4064
+as a parameter; the game around it (client chunk storage, light, meshing, saves, the LAN encoder,
+server code) assumes the 384-high overworld through `horizon-client/src/chunk.rs`'s `MIN_Y`,
+`HEIGHT` and `SECTIONS` (about 450 uses in 64 files, several u32 section masks). Presets aren't
+data: the game remembers only "flat or not" and always builds `minecraft:normal`. So M3 goes in
+steps that each prove something on their own, the height change late:
+
+| Step | What | Proof |
+|---|---|---|
+| M3a | A provider seam in horizon-world's `Pipeline`: a trait for biomes per quart, the terrain fill (columns or density) and base heights/columns for structures, held per worker; horizon-world stays free of horizon-mods | the stand-in mod's land and biomes in Horizon's own chunks (`worldgen_probe` with a mod), vanilla rows unchanged |
+| M3b | Data: dimension types as a bundle (replacing the three hardcoded heights), world presets from mod content, the preset id through create-world, level.dat (`horizon:preset`), reopening and `level-type` | a world made with a mod's preset reopens with it |
+| M3c | The client bridge: `WorldgenMod`s loaded for the preset in `make_streaming`, one `World` per world and dimension, a worker per generation thread (streaming, queries, ring search, far decoration), saved cells kept with the world, settings from the manifest on the create-world screen | FarView's Earth in a real single-player world at vanilla height |
+| M3d | Height: `chunk::{HEIGHT, SECTIONS}` per world, wider section masks, light, meshing, LOD, saves, server code | a 2048-high world: generate, light, render, save, reopen; vanilla's performance unchanged |
+| M3e | Network: the mod dimension type synced as data, the hub's encoder using the real type, remote chunks above 384 | a LAN guest and a dedicated server's player see the same 2048-high world |
+| M3f | Mod biomes (Biomes O' Plenty): biomes from mod content, climate regions, the client's biome table (7-bit palette), registry sync, feature order across the new biomes | the biomesoplenty matrix row against NeoForge |
+| M3g | Mod features in decoration (Large Ore Deposits, FarView's decoration): `decorate` steps and biome-modifier-like additions | the large-ore-deposits row, statistically |
+
+2048 sections per column is about five times the memory and light work of vanilla's 384; M3d is
+measured against vanilla worlds so they don't get slower.
+
 ## M3 plan: preset settings
 
 A preset's settings travel as `world-info.settings` (JSON text). The game writes them into the
