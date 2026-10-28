@@ -9,7 +9,8 @@
 //! With `cells`, each 64-block region is lifted by a shared cell of layer 0,
 //! built from a cell of layer 1 (256 blocks); `samelayer`, `badcell` and
 //! `cellcrash` make building one break the rules, fail or panic.
-//! `prefetch` asks for the next regions' cells ahead.
+//! `prefetch` asks for the next regions' cells ahead; `slowbuild` makes
+//! building a region's cell take about a second.
 use horizon_mod_sdk::worldgen::*;
 use std::{cell::RefCell, collections::HashMap};
 
@@ -255,6 +256,14 @@ impl WorldgenMod for Hills {
                 }
                 if self.asks("cellcrash") {
                     panic!("asked to");
+                }
+                if self.asks("slowbuild") {
+                    // A slow cell: far longer than a call may run.
+                    let mut n = here;
+                    for _ in 0..400_000_000u64 {
+                        n = std::hint::black_box(mix(n));
+                    }
+                    std::hint::black_box(n);
                 }
                 let parent = shared(1, &format!("{},{}", x >> 2, z >> 2))?;
                 let parent = u64::from_le_bytes(parent.try_into().map_err(|_| "8 bytes")?);

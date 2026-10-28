@@ -593,3 +593,21 @@ fn saved_layers_come_back_without_building() {
     let stats = reopened.shared_stats();
     assert_eq!((stats.builds, stats.cells), (1, 2), "{stats:?}");
 }
+
+/// Time a call spends waiting in `shared` for a cell's build doesn't count
+/// toward the call's own limit: the build has its own.
+#[test]
+fn waiting_for_a_build_is_not_the_callers_time() {
+    let m = hills();
+    let ms = std::time::Duration::from_millis;
+    m.set_time_limits(ms(30_000), ms(200), ms(30_000));
+    let world = cells_world(&m, "cells slowbuild");
+    let mut w = world.worker().unwrap();
+    let started = std::time::Instant::now();
+    w.terrain(0, 0).unwrap();
+    assert!(
+        started.elapsed() > ms(200),
+        "the build should outlast the call's limit"
+    );
+    assert_eq!(w.stopped(), None);
+}

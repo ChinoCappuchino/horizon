@@ -174,7 +174,9 @@ never waits or errs, and results can't change, since a cell is the same whoever 
 manifest's `saved_layers` names layers slow enough to keep with the world's save:
 `World::saved_cells` hands them to the game and `World::preload` takes them back (the game does
 this from M3). Time limits are wasmtime epochs (a ticker every 10 ms) instead of fuel: 60 s for
-`open`, 10 s per call, 60 s per cell build. Fuel cost the FarView port 14 to 16 % of its
+`open`, 10 s per call, 60 s per cell build. Time a call spends blocked in `shared`, waiting for a
+build or building on its builder, doesn't count toward its own limit (the build has its own): a
+first chunk in a new world may wait on a chain of coarse cells far longer than 10 s. Fuel cost the FarView port 14 to 16 % of its
 throughput; a time limit decides only whether a runaway call stops, never what a call answers.
 NaN canonicalisation stays on although it costs 16 to 24 %: without it the same seed could give
 different land on x86 and ARM machines, whose NaN bit patterns differ.

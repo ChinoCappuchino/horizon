@@ -16,10 +16,10 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use wasmtime::{
-    Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
+    Config, Engine, Store, StoreLimits, StoreLimitsBuilder, UpdateDeadline,
     component::{Component, HasSelf, Linker},
 };
 
@@ -240,6 +240,24 @@ fn ticks(d: Duration) -> u64 {
     (d.as_millis() / TICK.as_millis()).max(1) as u64
 }
 
+/// When a call started, how long it spent blocked in the host, and its limit.
+struct CallClock {
+    started: Instant,
+    blocked: Duration,
+    limit: Duration,
+}
+
+/// Starts a call's clock: its deadline `limit` ticks away.
+fn arm(store: &mut Store<State>, limit: &AtomicU64) {
+    let ticks = limit.load(Ordering::Relaxed);
+    store.data_mut().clock = CallClock {
+        started: Instant::now(),
+        blocked: Duration::ZERO,
+        limit: TICK * ticks as u32,
+    };
+    store.set_epoch_deadline(ticks);
+}
+
 /// A world-generation mod in one world and dimension.
 #[derive(Clone)]
 pub struct World(Arc<WorldHandle>);
@@ -429,11 +447,27 @@ fn instance(
         depth,
         building: None,
         builder: None,
+        clock: CallClock {
+            started: Instant::now(),
+            blocked: Duration::ZERO,
+            limit: Duration::ZERO,
+        },
     };
     let stopped = |e: wasmtime::Error| Failure::Stopped(reason(&e));
     let mut store = Store::new(&compiled.engine, state);
     store.limiter(|s| &mut s.limits);
-    store.set_epoch_deadline(compiled.limits[0].load(Ordering::Relaxed));
+    // At the deadline, a call that spent time blocked in `shared` (waiting
+    // for a build, or building on its builder: those have their own limit)
+    // gets that time back; only its own running counts.
+    store.epoch_deadline_callback(|ctx| {
+        let clock = &ctx.data().clock;
+        let ran = clock.started.elapsed().saturating_sub(clock.blocked);
+        Ok(match clock.limit.checked_sub(ran) {
+            Some(left) if !left.is_zero() => UpdateDeadline::Continue(ticks(left)),
+            _ => UpdateDeadline::Interrupt,
+        })
+    });
+    arm(&mut store, &compiled.limits[0]);
     let instance = compiled
         .linker
         .instantiate(&mut store, &compiled.component)
@@ -662,8 +696,8 @@ impl Worker {
             )));
         }
         self.store.data_mut().logged = 0;
-        let limit = self.store.data().world.compiled.limits[1].load(Ordering::Relaxed);
-        self.store.set_epoch_deadline(limit);
+        let world = self.store.data().world.clone();
+        arm(&mut self.store, &world.compiled.limits[1]);
         match f(&self.exports, &mut self.store) {
             Ok(answer) => answer.map_err(Failure::Refused),
             Err(e) => {
@@ -977,6 +1011,8 @@ struct State {
     /// The instance that builds the cells this one asks for, made on the
     /// first one it lacks.
     builder: Option<Box<Builder>>,
+    /// The current call's clock, for its time limit.
+    clock: CallClock,
 }
 
 impl State {
@@ -996,8 +1032,7 @@ impl State {
         let b = self.builder.as_mut().expect("made above");
         b.store.data_mut().building = Some(layer);
         b.store.data_mut().logged = 0;
-        let limit = self.world.compiled.limits[2].load(Ordering::Relaxed);
-        b.store.set_epoch_deadline(limit);
+        arm(&mut b.store, &self.world.compiled.limits[2]);
         let result =
             b.exports
                 .horizon_mods_worldgen_events()
@@ -1060,14 +1095,17 @@ impl worldgen::Host for State {
             ));
         }
         let world = self.world.clone();
-        match world.cells.claim(layer, &key) {
+        let blocked = Instant::now();
+        let answer = match world.cells.claim(layer, &key) {
             Claim::Ready(data) => Ok(data.to_vec()),
             Claim::Build(ticket) => {
                 let built = self.build(layer, &key);
                 ticket.finish(built.as_ref().ok().map(|b| Arc::from(b.as_slice())));
                 built
             }
-        }
+        };
+        self.clock.blocked += blocked.elapsed();
+        answer
     }
     fn prefetch(&mut self, layer: u8, keys: Vec<String>) {
         let world = &self.world;
