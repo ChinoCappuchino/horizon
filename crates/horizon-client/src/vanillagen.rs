@@ -76,9 +76,15 @@ pub struct ProviderRequest<'a> {
     /// The world's preset settings (JSON text, "" for the defaults).
     pub settings: &'a str,
 }
-/// Makes the provider of a preset from the mods that are on; none when no
-/// mod provides it.
-pub type ProviderFactory<'a> = &'a dyn Fn(&ProviderRequest<'_>) -> Option<Arc<dyn TerrainProvider>>;
+/// What the mods that are on do in one world and dimension: the preset's
+/// terrain provider, if a mod provides it, and the mods that decorate.
+#[derive(Default)]
+pub struct ModParts {
+    pub terrain: Option<Arc<dyn TerrainProvider>>,
+    pub decorators: Vec<Arc<dyn horizon_world::worldgen::provider::Decorator>>,
+}
+/// Makes the mods' parts for a world and dimension.
+pub type ProviderFactory<'a> = &'a dyn Fn(&ProviderRequest<'_>) -> ModParts;
 
 /// A proto chunk, or the position of one whose generation failed.
 enum VanillaProto {
@@ -212,7 +218,7 @@ impl VanillaTerrain {
             .map(|name| biomes.id(name))
             .collect();
         let level = data.preset_level(preset, dimension);
-        let provider = match (&level, providers) {
+        let parts = match (&level, providers) {
             (Some(level), Some(make)) => make(&ProviderRequest {
                 data: &data,
                 seed,
@@ -221,8 +227,9 @@ impl VanillaTerrain {
                 level: level.clone(),
                 settings,
             }),
-            _ => None,
+            _ => ModParts::default(),
         };
+        let provider = parts.terrain;
         if provider.is_none()
             && level
                 .as_ref()
@@ -243,6 +250,10 @@ impl VanillaTerrain {
                 p.clone(),
             )?,
             None => OverworldGenerator::for_world(data, seed, preset, dimension, structures)?,
+        };
+        let generator = match parts.decorators.is_empty() {
+            true => generator,
+            false => generator.with_decorators(parts.decorators)?,
         };
         let unsupported = generator.unsupported_features();
         if !unsupported.is_empty() {

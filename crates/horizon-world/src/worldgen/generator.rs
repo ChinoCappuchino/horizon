@@ -858,6 +858,8 @@ struct Pipeline<R: RandomSource> {
     spawn_position: std::sync::OnceLock<[i32; 2]>,
     /// A world-generation mod's terrain and biomes, for a preset it provides.
     provider: Option<Arc<dyn super::provider::TerrainProvider>>,
+    /// World-generation mods decorating every chunk (M3g).
+    decorators: Vec<Arc<dyn super::provider::Decorator>>,
 }
 const CACHE_LIMIT: usize = 16384;
 /// Coordinates only equal missing neighbour keys. Weak entries retain no
@@ -1089,6 +1091,7 @@ where
             spawn_target,
             spawn_position: std::sync::OnceLock::new(),
             provider: None,
+            decorators: Vec::new(),
         };
         pipeline.decoration =
             super::generator_decoration::Decoration::new(&pipeline.data, &pipeline.source, preset)?;
@@ -2058,6 +2061,8 @@ pub(super) struct WorkerState {
     /// This thread's handle on the pipeline's provider, if it has one (or why
     /// it couldn't be made).
     provider: Option<Result<Box<dyn super::provider::ProviderWorker>, String>>,
+    /// One per decorator of the pipeline, in its order.
+    pub(super) decorators: Vec<Result<Box<dyn super::provider::DecoratorWorker>, String>>,
     /// Recent chunks' provider land, for column queries (structures, far
     /// terrain) next to the chunks being generated.
     lands: HashMap<(i32, i32), Arc<super::provider::Runs>>,
@@ -2080,6 +2085,8 @@ pub trait StructureMobs: Send + Sync {
 
 trait SeededPipeline: Send + Sync {
     fn provider(&self) -> Option<Arc<dyn super::provider::TerrainProvider>>;
+    fn decorators(&self) -> &[Arc<dyn super::provider::Decorator>];
+    fn set_decorators(&mut self, decorators: Vec<Arc<dyn super::provider::Decorator>>);
     fn generate(
         &self,
         worker: &mut WorkerState,
@@ -2149,6 +2156,12 @@ where
 {
     fn provider(&self) -> Option<Arc<dyn super::provider::TerrainProvider>> {
         self.provider.clone()
+    }
+    fn decorators(&self) -> &[Arc<dyn super::provider::Decorator>] {
+        &self.decorators
+    }
+    fn set_decorators(&mut self, decorators: Vec<Arc<dyn super::provider::Decorator>>) {
+        self.decorators = decorators;
     }
     fn generate(
         &self,
@@ -2968,6 +2981,17 @@ impl OverworldGenerator {
         self.pipeline.spawn_position()
     }
     /// Create per-thread state. Workers are cheap; keep one per thread.
+    /// World-generation mods that decorate every chunk after vanilla's
+    /// features of each step (fork `afterwinter`, M3g). Before any worker.
+    pub fn with_decorators(
+        mut self,
+        decorators: Vec<Arc<dyn super::provider::Decorator>>,
+    ) -> Result<Self, GeneratorError> {
+        Arc::get_mut(&mut self.pipeline)
+            .ok_or_else(|| resource("decorators are set before the generator is shared"))?
+            .set_decorators(decorators);
+        Ok(self)
+    }
     pub fn worker(&self) -> GeneratorWorker {
         let data = self.pipeline.data();
         GeneratorWorker {
@@ -2987,6 +3011,12 @@ impl OverworldGenerator {
                 structure_mobs: None,
                 heights: HashMap::new(),
                 provider: self.pipeline.provider().map(|p| p.worker()),
+                decorators: self
+                    .pipeline
+                    .decorators()
+                    .iter()
+                    .map(|d| d.worker())
+                    .collect(),
                 lands: HashMap::new(),
             },
         }

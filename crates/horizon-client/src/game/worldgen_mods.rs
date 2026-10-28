@@ -3,12 +3,15 @@
 //! lists a world's preset becomes its generator's terrain provider. Its
 //! shared cells of the layers it saves are kept with the world, in
 //! `data/horizon/worldgen/`, and loaded back when the world opens.
-use horizon_client::{mod_list, vanillagen::ProviderRequest};
+use horizon_client::{
+    mod_list,
+    vanillagen::{ModParts, ProviderRequest},
+};
 use horizon_mods::{
     Capability, Manifest, Package,
     worldgen::{Candidate, Contributor, Decision, Place, Plan, Rules, Stage},
     worldgen_runtime::{WorldInfo, WorldgenMod},
-    worldgen_world::ModTerrain,
+    worldgen_world::{ModDecorator, ModTerrain},
 };
 use horizon_world::worldgen::{
     FeatureClaims, FeatureDecision,
@@ -62,26 +65,13 @@ impl Providers {
         }
     }
 
-    /// The provider of the request's preset, or none when no mod that is on
-    /// provides it (or it fails to load: the game says why).
-    pub(super) fn make(&self, request: &ProviderRequest<'_>) -> Option<Arc<dyn TerrainProvider>> {
+    /// What the mods that are on do in the request's world and dimension:
+    /// the preset's terrain, if a mod provides it, and the decoration of
+    /// every mod with the `features` stage (M3g). A mod that fails to load
+    /// takes no part (the game says why).
+    pub(super) fn make(&self, request: &ProviderRequest<'_>) -> ModParts {
         // Every generator of the world, provided or not, decorates by the claims.
         request.data.set_feature_claims(self.claims.clone());
-        let (path, manifest) = self.mods.iter().find(|(_, m)| {
-            m.worldgen
-                .as_ref()
-                .is_some_and(|w| w.presets.iter().any(|p| p == request.preset))
-        })?;
-        let m = match compiled(path) {
-            Ok(m) => m,
-            Err(e) => {
-                log::error!(
-                    "Horizon: world-generation mod {} did not load: {e}",
-                    manifest.id
-                );
-                return None;
-            }
-        };
         let level = &request.level;
         let info = WorldInfo {
             seed: request.seed,
@@ -92,34 +82,82 @@ impl Providers {
             sea_level: level.sea_level,
             settings: request.settings.to_owned(),
         };
-        let terrain = ModTerrain::new(&m, request.data.clone(), info);
-        let file = self.cells.join(format!(
-            "{}-{}.cells",
-            manifest.id,
-            request.dimension.replace([':', '/'], "_")
-        ));
-        if let Ok(bytes) = std::fs::read(&file) {
-            match decode(&bytes) {
-                Some(cells) => {
-                    let kept = terrain.world().preload(cells);
-                    log::info!(
-                        "Horizon: {kept} saved world-generation cells of {} loaded",
-                        manifest.id
-                    );
+        let load = |path: &Path, manifest: &Manifest| match compiled(path) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                log::error!(
+                    "Horizon: world-generation mod {} did not load: {e}",
+                    manifest.id
+                );
+                None
+            }
+        };
+        let decorates = |m: &Manifest| {
+            m.worldgen
+                .as_ref()
+                .is_some_and(|w| w.stages.contains(&Stage::Features))
+        };
+        let mut parts = ModParts::default();
+        let provider = self.mods.iter().find(|(_, m)| {
+            m.worldgen
+                .as_ref()
+                .is_some_and(|w| w.presets.iter().any(|p| p == request.preset))
+        });
+        if let Some((path, manifest)) = provider
+            && let Some(m) = load(path, manifest)
+        {
+            let terrain = ModTerrain::new(&m, request.data.clone(), info.clone());
+            let file = self.cells.join(format!(
+                "{}-{}.cells",
+                manifest.id,
+                request.dimension.replace([':', '/'], "_")
+            ));
+            if let Ok(bytes) = std::fs::read(&file) {
+                match decode(&bytes) {
+                    Some(cells) => {
+                        let kept = terrain.world().preload(cells);
+                        log::info!(
+                            "Horizon: {kept} saved world-generation cells of {} loaded",
+                            manifest.id
+                        );
+                    }
+                    None => log::warn!(
+                        "Horizon: {} is damaged; its cells are built again",
+                        file.display()
+                    ),
                 }
-                None => log::warn!(
-                    "Horizon: {} is damaged; its cells are built again",
-                    file.display()
-                ),
+            }
+            log::info!(
+                "Horizon: world-generation mod {} provides {} ({})",
+                manifest.id,
+                request.preset,
+                request.dimension
+            );
+            // Its decoration shares the terrain's cells.
+            if decorates(manifest) {
+                parts.decorators.push(Arc::new(terrain.decorator()));
+            }
+            parts.terrain = Some(Arc::new(SavedTerrain { terrain, file }));
+        }
+        for (path, manifest) in &self.mods {
+            let own = provider.is_some_and(|(p, _)| p == path);
+            if own || !decorates(manifest) {
+                continue;
+            }
+            if let Some(m) = load(path, manifest) {
+                log::info!(
+                    "Horizon: world-generation mod {} decorates {}",
+                    manifest.id,
+                    request.dimension
+                );
+                parts.decorators.push(Arc::new(ModDecorator::new(
+                    &m,
+                    request.data.clone(),
+                    info.clone(),
+                )));
             }
         }
-        log::info!(
-            "Horizon: world-generation mod {} provides {} ({})",
-            manifest.id,
-            request.preset,
-            request.dimension
-        );
-        Some(Arc::new(SavedTerrain { terrain, file }))
+        parts
     }
 }
 

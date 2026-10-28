@@ -487,6 +487,7 @@ impl Decoration {
         for chunk in region.iter_mut() {
             block_entities.append(&mut chunk.block_entities);
         }
+        let decorators = &mut worker.decorators;
         let mut world = World {
             block_entities,
             entities: Vec::new(),
@@ -516,12 +517,17 @@ impl Decoration {
             [center.x * 16 + 15, min_y + height - 1, center.z * 16 + 15],
         );
         let mut structure_errors = 0;
+        let mut stats_mods = 0;
         let result = self.plan.decorate(
             &mut world,
             center,
             seed,
             STEPS.len(),
             |world, random, decoration_seed, step| {
+                // The mods' part of the step before, after its vanilla features.
+                if step > 0 && !structures_only {
+                    stats_mods += run_decorators(decorators, world, center, step - 1);
+                }
                 let Some(structures) = structures else {
                     return Ok(());
                 };
@@ -584,6 +590,10 @@ impl Decoration {
                 Ok(placed.unwrap_or(false))
             },
         );
+        if result.is_ok() && !structures_only {
+            stats_mods += run_decorators(decorators, &mut world, center, STEPS.len() - 1);
+        }
+        stats.failed += stats_mods;
         for (pos, nbt) in std::mem::take(&mut world.block_entities) {
             let index = ((pos[2] >> 4).wrapping_sub(center.z) + 1) * 3
                 + (pos[0] >> 4).wrapping_sub(center.x)
@@ -617,6 +627,46 @@ impl Decoration {
         region[4].set_decorated();
         Ok(stats)
     }
+}
+
+/// The decorating mods' part of feature step `step` of `center` (fork
+/// `afterwinter`, M3g): each one's blocks, set as a feature sets them (within
+/// the write zone). How many failed.
+fn run_decorators(
+    decorators: &mut [Result<Box<dyn super::provider::DecoratorWorker>, String>],
+    world: &mut World<'_>,
+    center: ChunkPos,
+    step: usize,
+) -> usize {
+    struct View<'w, 'a>(&'w mut World<'a>);
+    impl super::provider::DecorationView for View<'_, '_> {
+        fn block(&mut self, x: i32, y: i32, z: i32) -> Option<BlockStateId> {
+            FeatureWorld::block(self.0, [x, y, z]).ok()
+        }
+        fn height(&mut self, x: i32, z: i32, surface: bool) -> Option<i32> {
+            let kind = match surface {
+                true => HeightmapType::WorldSurfaceWg,
+                false => HeightmapType::OceanFloorWg,
+            };
+            self.0.region.height(kind, x, z).ok()
+        }
+    }
+    let mut failed = 0;
+    for d in decorators.iter_mut() {
+        let Ok(d) = d else {
+            continue;
+        };
+        match d.decorate(center, step, &mut View(world)) {
+            Ok(edits) => {
+                for (at, state) in edits {
+                    // Flags 3, as a feature's setBlock: neighbours and clients.
+                    let _ = FeatureWorld::set_block(world, at, state, 3);
+                }
+            }
+            Err(_) => failed += 1,
+        }
+    }
+    failed
 }
 
 /// WorldGenRegion-style view: reads anywhere in the 3×3 region, writes within

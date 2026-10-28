@@ -9,7 +9,7 @@ use horizon_mods::{
     Manifest, Package,
     manifest::componentize,
     worldgen_runtime::{ColumnPos, WorldInfo, WorldgenMod},
-    worldgen_world::{GeneratorPalette, ModTerrain},
+    worldgen_world::{GeneratorPalette, ModDecorator, ModTerrain},
 };
 use horizon_world::{
     heightmap::HeightmapType,
@@ -125,4 +125,85 @@ fn the_mods_land_and_biomes_in_the_generators_chunks() {
         "vanilla's structures still start on the mod's land"
     );
     assert!(terrain.world().shared_stats().builds > 0);
+}
+
+/// A mod decorating a vanilla world (M3g): the stand-in mod sets a log on
+/// every 4th column of each chunk in vanilla's vegetal step, reading the
+/// ocean floor's height from the region, and vanilla's features still run.
+#[test]
+fn the_mods_decoration_in_a_vanilla_world() {
+    let Some(root) = resources() else {
+        eprintln!("skipping: no prepared 26.3 resources");
+        return;
+    };
+    let registry = Box::leak(Box::new(load_registry(&root).unwrap()));
+    let data = GeneratorData::load(&root.join("worldgen"), registry).unwrap();
+    let m = hills();
+    let info = WorldInfo {
+        seed: 42,
+        preset: "minecraft:normal".into(),
+        dimension: "minecraft:overworld".into(),
+        min_y: -64,
+        height: 384,
+        sea_level: 63,
+        settings: String::new(),
+    };
+    let decorated = OverworldGenerator::new(data.clone(), 42)
+        .unwrap()
+        .with_decorators(vec![Arc::new(ModDecorator::new(&m, data.clone(), info))])
+        .unwrap();
+    let plain = OverworldGenerator::new(data.clone(), 42).unwrap();
+    let region = |generator: &OverworldGenerator| {
+        let mut worker = generator.worker();
+        let mut chunks = Vec::new();
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                chunks.push(worker.generate_proto(ChunkPos::new(dx, dz)).unwrap());
+            }
+        }
+        let mut chunks: [_; 9] = chunks.try_into().ok().unwrap();
+        let stats = worker.decorate(&mut chunks).unwrap();
+        (chunks, stats)
+    };
+    let (before, _) = {
+        let mut worker = plain.worker();
+        let chunk = worker.generate_proto(ChunkPos::new(0, 0)).unwrap();
+        (chunk, ())
+    };
+    let (chunks, stats) = region(&decorated);
+    assert_eq!(stats.failed, 0, "{stats:?}");
+    let centre = &chunks[4];
+    let mut logs = 0;
+    for z in (0..16).step_by(4) {
+        for x in (0..16).step_by(4) {
+            // The floor as the mod read it: before vegetal decoration, which
+            // only adds above it here (or the mod's own logs).
+            let floor = before
+                .terrain
+                .heightmap(HeightmapType::OceanFloorWg)
+                .unwrap()
+                .first_available(x, z)
+                .unwrap();
+            let name = centre.block_name(x, floor, z);
+            logs += usize::from(name == "minecraft:oak_log");
+        }
+    }
+    // Features before the vegetal step (lakes, rocks) may raise a column's
+    // floor; most of the 16 still hold the mod's log where it read the floor.
+    assert!(logs >= 12, "{logs} of 16 columns hold the mod's log");
+    let (vanilla, _) = region(&plain);
+    let vanilla_logs = (0..16)
+        .flat_map(|z| (0..16).map(move |x| (x, z)))
+        .filter(|&(x, z)| x % 4 == 0 && z % 4 == 0)
+        .filter(|&(x, z)| {
+            let floor = before
+                .terrain
+                .heightmap(HeightmapType::OceanFloorWg)
+                .unwrap()
+                .first_available(x, z)
+                .unwrap();
+            vanilla[4].block_name(x, floor, z) == "minecraft:oak_log"
+        })
+        .count();
+    assert!(vanilla_logs < logs, "without the mod: {vanilla_logs}");
 }

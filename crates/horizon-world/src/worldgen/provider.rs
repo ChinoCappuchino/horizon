@@ -12,6 +12,34 @@ use horizon_core::position::ChunkPos;
 pub const KEEP_BIOME: u32 = u32::MAX;
 
 /// A provider for one world and dimension, shared by the generator's threads.
+/// A world-generation mod's part in decoration (fork `afterwinter`, M3g):
+/// after vanilla's features of each step, the blocks the mod sets around
+/// the chunk being decorated. Any world, not only a mod's own preset.
+pub trait Decorator: Send + Sync {
+    /// One worker per generator worker thread.
+    fn worker(&self) -> Result<Box<dyn DecoratorWorker>, String>;
+}
+/// What a decorator reads: the chunk being decorated and its eight
+/// neighbours as generated so far.
+pub trait DecorationView {
+    fn block(&mut self, x: i32, y: i32, z: i32) -> Option<BlockStateId>;
+    /// `surface`: vanilla's `WORLD_SURFACE`, else `OCEAN_FLOOR`; the y above
+    /// the highest such block.
+    fn height(&mut self, x: i32, z: i32, surface: bool) -> Option<i32>;
+}
+pub trait DecoratorWorker: Send {
+    /// The blocks to set in feature step `step` (vanilla's
+    /// `GenerationStep.Decoration` order, 0 to 10) of `chunk`: in the chunk
+    /// and up to 16 blocks into its neighbours. An error leaves the chunk
+    /// without the mod's part in this step.
+    fn decorate(
+        &mut self,
+        chunk: ChunkPos,
+        step: usize,
+        view: &mut dyn DecorationView,
+    ) -> Result<Vec<([i32; 3], BlockStateId)>, String>;
+}
+
 pub trait TerrainProvider: Send + Sync {
     /// A handle for one generation thread (the provider's own instance).
     fn worker(&self) -> Result<Box<dyn ProviderWorker>, String>;
