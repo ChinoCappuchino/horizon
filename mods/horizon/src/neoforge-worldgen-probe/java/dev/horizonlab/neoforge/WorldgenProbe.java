@@ -73,6 +73,17 @@ public final class WorldgenProbe {
                     writeClimate(server.overworld(), json, climateRadius, cx0, cz0);
                 }
             }
+            int oresRadius = Integer.getInteger("horizon.probe.ores_radius", 0);
+            if (oresRadius > 0) {
+                Path ores = Path.of(out.toString().replaceFirst("\\.json$", "") + ".ores.json");
+                String dimension = System.getProperty("horizon.probe.ores_dimension", "minecraft:overworld");
+                ServerLevel level = server.getLevel(net.minecraft.resources.ResourceKey.create(
+                        Registries.DIMENSION, ResourceLocation.parse(dimension)));
+                try (Writer w = Files.newBufferedWriter(ores, StandardCharsets.UTF_8);
+                        JsonWriter json = new JsonWriter(w)) {
+                    writeOres(level, json, oresRadius, cx0, cz0);
+                }
+            }
             if (startsRadius > 0) {
                 Path starts = Path.of(out.toString().replaceFirst("\\.json$", "") + ".starts.json");
                 try (Writer w = Files.newBufferedWriter(starts, StandardCharsets.UTF_8);
@@ -197,6 +208,53 @@ public final class WorldgenProbe {
                         .value(t.temperature()).value(t.humidity()).value(t.continentalness())
                         .value(t.erosion()).value(t.depth()).value(t.weirdness()).endArray();
             }
+        }
+        json.endArray();
+        json.endObject();
+    }
+
+    /**
+     * Every ore block (an id ending in {@code _ore}, and ancient debris) of fully generated chunks in
+     * a wide square: {@code {"palette": [names], "chunks": [[cx, cz, [x, y, z, index, ...]]]}}, x and z
+     * in the chunk. Large Ore Deposits' deposits stand out from vanilla's small veins by their size.
+     */
+    private static void writeOres(ServerLevel level, JsonWriter json, int radius, int cx0, int cz0)
+            throws IOException {
+        Map<String, Integer> palette = new java.util.LinkedHashMap<>();
+        json.beginObject();
+        json.name("dimension").value(String.valueOf(level.dimension().location()));
+        json.name("chunks").beginArray();
+        for (int cz = cz0 - radius; cz <= cz0 + radius; cz++) {
+            for (int cx = cx0 - radius; cx <= cx0 + radius; cx++) {
+                ChunkAccess chunk = level.getChunk(cx, cz, ChunkStatus.FULL, true);
+                json.beginArray().value(cx).value(cz).beginArray();
+                LevelChunkSection[] sections = chunk.getSections();
+                for (int i = 0; i < sections.length; i++) {
+                    LevelChunkSection section = sections[i];
+                    if (section.hasOnlyAir()) {
+                        continue;
+                    }
+                    int y0 = chunk.getSectionYFromSectionIndex(i) << 4;
+                    for (int y = 0; y < 16; y++) {
+                        for (int z = 0; z < 16; z++) {
+                            for (int x = 0; x < 16; x++) {
+                                BlockState state = section.getBlockState(x, y, z);
+                                String name = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
+                                if (name.endsWith("_ore") || name.equals("minecraft:ancient_debris")) {
+                                    int index = palette.computeIfAbsent(name, k -> palette.size());
+                                    json.value(x).value(y0 + y).value(z).value(index);
+                                }
+                            }
+                        }
+                    }
+                }
+                json.endArray().endArray();
+            }
+        }
+        json.endArray();
+        json.name("palette").beginArray();
+        for (String name : palette.keySet()) {
+            json.value(name);
         }
         json.endArray();
         json.endObject();

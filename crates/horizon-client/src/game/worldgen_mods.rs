@@ -163,41 +163,53 @@ impl Providers {
     }
 }
 
-/// Placed features in the fork's own tags (docs/research/worldgen-hooks.md):
-/// `horizon:ores` holds vanilla's real ores, every height variant and the
-/// Nether's, without the stone and soil blobs (dirt, gravel, granite,
-/// diorite, andesite, tuff, clay, infested stone, magma, soul sand,
-/// blackstone), for mods that place ores their own way.
-const HORIZON_FEATURE_TAGS: [(&str, &[&str]); 1] = [(
-    "horizon:ores",
-    &[
-        "minecraft:ore_ancient_debris_large",
-        "minecraft:ore_coal_lower",
-        "minecraft:ore_coal_upper",
-        "minecraft:ore_copper",
-        "minecraft:ore_copper_large",
-        "minecraft:ore_debris_small",
-        "minecraft:ore_diamond",
-        "minecraft:ore_diamond_buried",
-        "minecraft:ore_diamond_large",
-        "minecraft:ore_diamond_medium",
-        "minecraft:ore_emerald",
-        "minecraft:ore_gold",
-        "minecraft:ore_gold_deltas",
-        "minecraft:ore_gold_extra",
-        "minecraft:ore_gold_lower",
-        "minecraft:ore_gold_nether",
-        "minecraft:ore_iron_middle",
-        "minecraft:ore_iron_small",
-        "minecraft:ore_iron_upper",
-        "minecraft:ore_lapis",
-        "minecraft:ore_lapis_buried",
-        "minecraft:ore_quartz_deltas",
-        "minecraft:ore_quartz_nether",
-        "minecraft:ore_redstone",
-        "minecraft:ore_redstone_lower",
-    ],
-)];
+/// Vanilla's real ore features of the Overworld: every height variant,
+/// without the stone and soil blobs (dirt, gravel, granite, diorite,
+/// andesite, tuff, clay, infested stone).
+const OVERWORLD_ORES: [&str; 19] = [
+    "minecraft:ore_coal_lower",
+    "minecraft:ore_coal_upper",
+    "minecraft:ore_copper",
+    "minecraft:ore_copper_large",
+    "minecraft:ore_diamond",
+    "minecraft:ore_diamond_buried",
+    "minecraft:ore_diamond_large",
+    "minecraft:ore_diamond_medium",
+    "minecraft:ore_emerald",
+    "minecraft:ore_gold",
+    "minecraft:ore_gold_extra",
+    "minecraft:ore_gold_lower",
+    "minecraft:ore_iron_middle",
+    "minecraft:ore_iron_small",
+    "minecraft:ore_iron_upper",
+    "minecraft:ore_lapis",
+    "minecraft:ore_lapis_buried",
+    "minecraft:ore_redstone",
+    "minecraft:ore_redstone_lower",
+];
+/// The Nether's, without its blobs (magma, soul sand, blackstone, gravel).
+const NETHER_ORES: [&str; 6] = [
+    "minecraft:ore_ancient_debris_large",
+    "minecraft:ore_debris_small",
+    "minecraft:ore_gold_deltas",
+    "minecraft:ore_gold_nether",
+    "minecraft:ore_quartz_deltas",
+    "minecraft:ore_quartz_nether",
+];
+/// The fork's own feature tags (docs/research/worldgen-hooks.md), for mods
+/// that place ores their own way: `horizon:ores` is both dimensions',
+/// `horizon:overworld_ores` and `horizon:nether_ores` one each.
+fn horizon_feature_tags(feature: &str) -> impl Iterator<Item = &'static str> + use<> {
+    let overworld = OVERWORLD_ORES.contains(&feature);
+    let nether = NETHER_ORES.contains(&feature);
+    [
+        ("horizon:ores", overworld || nether),
+        ("horizon:overworld_ores", overworld),
+        ("horizon:nether_ores", nether),
+    ]
+    .into_iter()
+    .filter_map(|(tag, member)| member.then_some(tag))
+}
 
 /// The mods' claims on features (M3g): the first claim in the plan's order
 /// that applies decides; a feature belongs to the mod owning its namespace.
@@ -247,10 +259,8 @@ impl FeatureClaims for ModClaims {
         let ns = feature.split_once(':').map_or("minecraft", |(ns, _)| ns);
         let owner = self.owners.get(ns).map_or(ns, String::as_str);
         let mut tags = feature_tags.to_vec();
-        for (tag, members) in HORIZON_FEATURE_TAGS {
-            if members.contains(&feature) {
-                tags.push(tag);
-            }
+        for tag in horizon_feature_tags(feature) {
+            tags.push(tag);
         }
         let place = Place {
             preset,
@@ -394,6 +404,15 @@ mod tests {
             at("minecraft:normal", "minecraft:ore_iron_upper"),
             FeatureDecision::Keep
         );
+        assert!(
+            horizon_feature_tags("minecraft:ore_iron_upper")
+                .eq(["horizon:ores", "horizon:overworld_ores"])
+        );
+        assert!(
+            horizon_feature_tags("minecraft:ore_quartz_nether")
+                .eq(["horizon:ores", "horizon:nether_ores"])
+        );
+        assert_eq!(horizon_feature_tags("minecraft:ore_tuff").count(), 0);
         // The pack's last word.
         let rules = game.join(horizon_mods::worldgen::RULES);
         std::fs::create_dir_all(rules.parent().unwrap()).unwrap();

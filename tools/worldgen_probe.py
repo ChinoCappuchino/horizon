@@ -46,6 +46,7 @@ server-port=0
 spawn-protection=0
 view-distance=2
 simulation-distance=2
+max-tick-time=-1
 generate-structures=true
 spawn-monsters=false
 spawn-animals=false
@@ -190,7 +191,9 @@ def run(args):
             'horizon.probe.cx': args.cx, 'horizon.probe.cz': args.cz,
             'horizon.probe.starts_radius': getattr(args, 'starts_radius', 0),
             'horizon.probe.climate_radius': getattr(args, 'climate_radius', 0),
-            'horizon.probe.climate_step': getattr(args, 'climate_step', 16)}, timeout=args.timeout)
+            'horizon.probe.climate_step': getattr(args, 'climate_step', 16),
+            'horizon.probe.ores_radius': getattr(args, 'ores_radius', 0),
+            'horizon.probe.ores_dimension': getattr(args, 'ores_dimension', 'minecraft:overworld')}, timeout=args.timeout)
     except subprocess.TimeoutExpired:
         sys.exit(f'timed out after {args.timeout} s (server log: {run_dir / "server.log"})')
     if error.exists():
@@ -541,6 +544,9 @@ def main():
                    help='also sample climate and biome this far out (chunks), and dump TerraBlender regions')
     r.add_argument('--climate-step', type=int, default=16,
                    help='blocks between climate samples (default 16)')
+    r.add_argument('--ores-radius', type=int, default=0,
+                   help='also list every ore block of fully generated chunks this far out (chunks)')
+    r.add_argument('--ores-dimension', default='minecraft:overworld')
     r.add_argument('--starts-radius', type=int, default=0,
                    help='also list every structure start this far out (chunks), from STRUCTURE_STARTS only')
     r.add_argument('--timeout', type=int, default=1800)
