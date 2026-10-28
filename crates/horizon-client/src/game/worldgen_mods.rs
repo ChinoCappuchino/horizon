@@ -54,10 +54,12 @@ impl Providers {
             .map(|(_, m)| Contributor::of(m))
             .collect();
         let claims = ModClaims::new(&contributors, &here);
-        let mods = on
+        // By mod id: the order mods decorate in, never the folder's.
+        let mut mods: Vec<(PathBuf, Manifest)> = on
             .into_iter()
             .filter(|(_, m)| m.capabilities.contains(&Capability::Worldgen))
             .collect();
+        mods.sort_by(|a, b| a.1.id.cmp(&b.1.id));
         Providers {
             mods,
             cells: world_root.join("data/horizon/worldgen"),
