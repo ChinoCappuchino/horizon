@@ -179,6 +179,7 @@ mod spawner;
 mod spear;
 mod spectator;
 mod spill;
+mod splash_window;
 mod startup_menu;
 mod station_control;
 mod stations;
@@ -309,6 +310,9 @@ struct Options {
     /// Render into a texture instead of the window (`--offscreen`), so a
     /// GPU the display cannot present from can still be benchmarked.
     offscreen: bool,
+    /// `--no-splash`: no startup splash (fork `afterwinter`), whatever the
+    /// setting says.
+    no_splash: bool,
     /// `--width` and `--height` (vanilla's own arguments): the window's
     /// starting size, 1280x720 by default.
     window_size: [u32; 2],
@@ -371,6 +375,7 @@ impl Options {
             no_pause: false,
             control: None,
             offscreen: false,
+            no_splash: false,
             window_size: [1280, 720],
             spikes: std::env::var("HORIZON_SPIKES")
                 .ok()
@@ -391,7 +396,7 @@ impl Options {
             match arg.as_str() {
                 "--help" | "-h" => {
                     println!(
-                        "Horizon — Minecraft Java Edition {} in Rust\n\n  --resources PATH        Prepared resources (horizon-prepare)\n  --render-distance N     Chunks, 2..64 (default 12)\n  --world NAME            World folder under saves/ (default \"New World\")\n  --seed N                World seed for new worlds (default 0)\n  --width N, --height N   Window size (default 1280 x 720)\n  --creative              Creative mode (default survival)\n  --test-terrain          Simple test terrain instead of vanilla generation\n  --frames N              Exit after N frames (testing)\n  --world-frames N        Exit after N frames drawn in the world (testing)\n  --smoke-report PATH     Write a JSON report on exit\n  --benchmark SCENARIO    Run a benchmark (standard, village, forest, ocean, mountain), write its report to benchmarks/ and quit\n  --control               Accept horizon-ctl commands on a local socket\n  --control-socket PATH   Control socket path (default $XDG_RUNTIME_DIR/horizon-control.sock)\n  --server HOST[:PORT]    Join a multiplayer server (offline mode) at start\n  --quickPlaySingleplayer WORLD  Open this world of saves/ at start, only if it exists (vanilla's)\n  --quickPlayMultiplayer HOST[:PORT]  The same as --server (vanilla's name)\n  --name NAME             Player name for multiplayer (default: generated once, kept in horizon-player.txt)\n  --session-file PATH     Signed-in account from the launcher (read once, then deleted)\n  --dev-mod PATH          A Horizon mod (.hmod or folder) to develop: always on, reloaded when rebuilt\n  --in-frame              Run single player's world in the frame, not on its server thread\n  --pregen                Add Horizon's /pregen command (docs/pregeneration.md)\n\nControls: mouse look, WASD move, Space jump, Left Shift sneak, Left Ctrl sprint,\nleft click break, right click place/use, 1-9/scroll hotbar, E inventory,\nQ drop, F3 debug, Esc pause.",
+                        "Horizon — Minecraft Java Edition {} in Rust\n\n  --resources PATH        Prepared resources (horizon-prepare)\n  --render-distance N     Chunks, 2..64 (default 12)\n  --world NAME            World folder under saves/ (default \"New World\")\n  --seed N                World seed for new worlds (default 0)\n  --width N, --height N   Window size (default 1280 x 720)\n  --creative              Creative mode (default survival)\n  --test-terrain          Simple test terrain instead of vanilla generation\n  --frames N              Exit after N frames (testing)\n  --world-frames N        Exit after N frames drawn in the world (testing)\n  --smoke-report PATH     Write a JSON report on exit\n  --benchmark SCENARIO    Run a benchmark (standard, village, forest, ocean, mountain), write its report to benchmarks/ and quit\n  --control               Accept horizon-ctl commands on a local socket\n  --control-socket PATH   Control socket path (default $XDG_RUNTIME_DIR/horizon-control.sock)\n  --server HOST[:PORT]    Join a multiplayer server (offline mode) at start\n  --quickPlaySingleplayer WORLD  Open this world of saves/ at start, only if it exists (vanilla's)\n  --quickPlayMultiplayer HOST[:PORT]  The same as --server (vanilla's name)\n  --name NAME             Player name for multiplayer (default: generated once, kept in horizon-player.txt)\n  --session-file PATH     Signed-in account from the launcher (read once, then deleted)\n  --dev-mod PATH          A Horizon mod (.hmod or folder) to develop: always on, reloaded when rebuilt\n  --in-frame              Run single player's world in the frame, not on its server thread\n  --pregen                Add Horizon's /pregen command (docs/pregeneration.md)\n  --no-splash             No startup splash\n\nControls: mouse look, WASD move, Space jump, Left Shift sneak, Left Ctrl sprint,\nleft click break, right click place/use, 1-9/scroll hotbar, E inventory,\nQ drop, F3 debug, Esc pause.",
                         horizon_core::VANILLA_VERSION
                     );
                     return Ok(None);
@@ -410,6 +415,7 @@ impl Options {
                 "--in-frame" | "--no-server-thread" => o.server_thread = false,
                 // Horizon's own commands (/pregen), off by default as on vanilla.
                 "--pregen" => horizon_client::command::vanilla::set_horizon_commands(true),
+                "--no-splash" => o.no_splash = true,
                 _ => {
                     let value = args
                         .next()
@@ -14891,11 +14897,65 @@ struct Loading {
     shown: bool,
     menu: startup_menu::StartupMenu,
     error: Option<Box<dyn std::error::Error>>,
+    /// The startup splash, until the game window takes over (fork
+    /// `afterwinter`); whether it was tried; where the game window opens.
+    splash: Option<Box<splash_window::SplashRun>>,
+    splash_tried: bool,
+    open_at: Option<winit::dpi::PhysicalPosition<i32>>,
 }
 impl Loading {
+    /// The startup splash, when the setting and the platform allow it.
+    fn try_splash(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) -> Option<Box<splash_window::SplashRun>> {
+        let options = self.options.as_ref()?;
+        let mode = self.settings.extras.startup_splash.as_str();
+        if options.offscreen || options.no_splash || mode == "off" {
+            return None;
+        }
+        let mods = splash_window::mod_names(&self.settings.mods.enabled, &options.dev_mods);
+        let (names, are_mods) = if mods.is_empty() {
+            (
+                STAGE_LINES
+                    .iter()
+                    .skip(1)
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                false,
+            )
+        } else {
+            (mods, true)
+        };
+        let window = (!self.settings.fullscreen).then(|| {
+            let [w, h] = options.window_size;
+            (f64::from(w), f64::from(h))
+        });
+        match splash_window::SplashRun::open(
+            event_loop,
+            &self.vanilla_root,
+            names,
+            are_mods,
+            mode == "still",
+            window,
+        ) {
+            Ok(s) => Some(Box::new(s)),
+            Err(e) => {
+                log::info!("Horizon: no startup splash: {e}");
+                None
+            }
+        }
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.window.is_some() || self.splash.is_some() {
             return;
+        }
+        if !self.splash_tried {
+            self.splash_tried = true;
+            self.splash = self.try_splash(event_loop);
+            if self.splash.is_some() {
+                return;
+            }
         }
         // The Window constructor: created fullscreen when options.txt says so.
         let fullscreen = self.settings.fullscreen;
@@ -14913,6 +14973,11 @@ impl Loading {
         let attributes = winit::platform::wayland::WindowAttributesExtWayland::with_name(
             attributes, "horizon", "horizon",
         );
+        // Where the startup splash's pool turned into the window.
+        let attributes = match self.open_at.take() {
+            Some(at) => attributes.with_position(at),
+            None => attributes,
+        };
         let window = match event_loop.create_window(
             attributes
                 .with_inner_size(winit::dpi::LogicalSize::new(size[0], size[1]))
@@ -14945,6 +15010,15 @@ impl Loading {
         self.window = Some(window);
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some(splash) = self.splash.as_mut().filter(|s| s.id() == id) {
+            if matches!(
+                event,
+                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
+            ) {
+                splash.resized();
+            }
+            return;
+        }
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
             return;
         }
@@ -14994,6 +15068,26 @@ impl Loading {
         if let Err(error) = self.poll_menu_resources() {
             self.error = Some(error);
             event_loop.exit();
+            return;
+        }
+        // The splash, until the title is ready and its finale played: then
+        // the game window opens where the pool turned into it.
+        if let Some(splash) = self.splash.as_mut() {
+            if splash.step(self.progress.fraction(), self.gui.is_some()) {
+                let size = self
+                    .options
+                    .as_ref()
+                    .map_or([1280, 720], |o| o.window_size)
+                    .map(f64::from);
+                self.open_at = splash.game_position((size[0], size[1]));
+                self.splash = None;
+                log::info!(
+                    "Horizon: startup splash handed over after {} ms",
+                    self.started.elapsed().as_millis()
+                );
+                self.resumed(event_loop);
+            }
+            event_loop.set_control_flow(ControlFlow::Poll);
             return;
         }
         if let Some(w) = &self.window {
@@ -15153,7 +15247,8 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                     return;
                 }
-                match if loading.menu.reload_packs {
+                // The game needs its window: not while the splash shows.
+                match if loading.menu.reload_packs || loading.splash.is_some() {
                     None
                 } else {
                     loading.loaded.take()
@@ -15218,6 +15313,9 @@ fn run_loading(
         shown: false,
         menu,
         error: None,
+        splash: None,
+        splash_tried: false,
+        open_at: None,
     };
     let mut app = App::Loading(Box::new(loading));
     EventLoop::new()?.run_app(&mut app)?;
