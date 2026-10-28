@@ -14914,19 +14914,11 @@ impl Loading {
         if options.offscreen || options.no_splash || mode == "off" {
             return None;
         }
-        let mods = splash_window::mod_names(&self.settings.mods.enabled, &options.dev_mods);
-        let (names, are_mods) = if mods.is_empty() {
-            (
-                STAGE_LINES
-                    .iter()
-                    .skip(1)
-                    .map(|s| (*s).to_owned())
-                    .collect(),
-                false,
-            )
-        } else {
-            (mods, true)
-        };
+        // Without mods the game starts too quickly to need it (chino).
+        let names = splash_window::mod_names(&self.settings.mods.enabled, &options.dev_mods);
+        if names.is_empty() {
+            return None;
+        }
         let window = (!self.settings.fullscreen).then(|| {
             let [w, h] = options.window_size;
             (f64::from(w), f64::from(h))
@@ -14935,7 +14927,7 @@ impl Loading {
             event_loop,
             &self.vanilla_root,
             names,
-            are_mods,
+            true,
             mode == "still",
             window,
         ) {

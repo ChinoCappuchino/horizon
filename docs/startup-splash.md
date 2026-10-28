@@ -1,7 +1,6 @@
 # The startup splash (fork `afterwinter`)
 
-Before the game window opens, Horizon shows its loading as liquid: each mod that loads (or each
-loading stage, without mods) is a drop that flies in from a screen edge and merges into an ember
+Before the game window opens, Horizon shows its loading as liquid: each mod that loads is a drop that flies in from a screen edge and merges into an ember
 pool, vanilla's snow fox (the game's own model and the player's own texture) laps it, and when the
 game is ready the fox pounces and the pool springs into the game window's rectangle, where the
 game window then opens. Design: chino, 2026-10-28.
@@ -10,6 +9,7 @@ game window then opens. Design: chino, 2026-10-28.
 
 - `startupSplash` in Horizon's extras file (`horizon-extras.txt`): `full` (the default), `still`
   (no motion: the pool at its size, the stage line and the bar) or `off`.
+- Without mods there is no splash: the game starts too quickly to need one.
 - `--no-splash` turns it off for one launch. Benchmarks, harness runs, `--control` and dedicated
   servers never show it (they start synchronously).
 
