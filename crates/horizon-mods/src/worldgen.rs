@@ -427,6 +427,20 @@ pub struct PresetSetting {
     pub default: toml::Value,
 }
 
+impl PresetSetting {
+    /// The default as JSON: a choice's text, or a number.
+    pub fn default_json(&self) -> serde_json::Value {
+        match &self.default {
+            toml::Value::String(s) => s.clone().into(),
+            toml::Value::Integer(i) => (*i).into(),
+            toml::Value::Float(f) => {
+                serde_json::Number::from_f64(*f).map_or(serde_json::Value::Null, Into::into)
+            }
+            other => other.to_string().into(),
+        }
+    }
+}
+
 /// The pack author's rules (`config/horizon/worldgen-rules.toml`): the
 /// last word over every mod's claims.
 ///

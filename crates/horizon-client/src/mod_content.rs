@@ -699,6 +699,9 @@ const WORLDGEN_BUNDLES: [(&str, &str); 7] = [
     ("placed_feature", "worldgen/placed_features.json"),
     ("world_preset", "worldgen/world_presets.json"),
 ];
+/// The options of world-generation mods' presets, by preset id (a list of
+/// `{path, label, choices, range, step, default}` each).
+pub const PRESET_SETTINGS: &str = "worldgen/preset_settings.json";
 /// Mods' dimension types (`data/<ns>/dimension_type/`, outside `worldgen/`),
 /// for their presets' heights: a bundle the prepared resources don't have.
 const DIMENSION_TYPES: &str = "worldgen/dimension_types.json";
@@ -1204,6 +1207,37 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
             doc.set(&id, J::Str(merged));
         }
         overlay.write(BIOME_TAGS, &serde_json::to_vec(&doc)?)?;
+    }
+    // The options of world-generation mods' presets (`[[worldgen.settings]]`),
+    // by preset, for the create-world screen: `worldgen/preset_settings.json`.
+    let options: Vec<(&str, &horizon_mods::worldgen::PresetSetting)> = mods
+        .iter()
+        .flat_map(|m| {
+            m.content
+                .preset_settings
+                .iter()
+                .map(|o| (o.preset.as_str(), o))
+        })
+        .collect();
+    if !options.is_empty() {
+        let mut by_preset = serde_json::Map::new();
+        for (preset, o) in options {
+            let entry = serde_json::json!({
+                "path": o.path,
+                "label": o.label,
+                "choices": o.choices,
+                "range": o.range,
+                "step": o.step,
+                "default": o.default_json(),
+            });
+            by_preset
+                .entry(preset)
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("an array")
+                .push(entry);
+        }
+        overlay.write(PRESET_SETTINGS, &serde_json::to_vec(&by_preset)?)?;
     }
     // Structures and the pools, sets, processors and features they use, then
     // what mods add to sets and pools, in mod and file order.

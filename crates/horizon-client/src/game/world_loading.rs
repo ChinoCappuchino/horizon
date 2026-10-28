@@ -332,10 +332,23 @@ pub(super) fn make_streaming(
         )
     } else {
         // WorldOptions.generateStructures, from the world's settings.
-        let generation = horizon_client::save::WorldGen::read(world_root);
-        let structures = generation.as_ref().is_none_or(|w| w.structures);
-        let preset = generation.map_or_else(|| "minecraft:normal".to_owned(), |w| w.preset);
-        let inner = Arc::new(VanillaTerrain::for_world(&options.resources.join("worldgen"), pack.assets.registry, res.biomes(), seed, &preset, dim.id(), structures).map_err(|e| {
+        let generation = horizon_client::save::WorldGen::read(world_root).unwrap_or_default();
+        let structures = generation.structures;
+        // A world-generation mod that is on provides its presets' terrain (M3c).
+        #[cfg(feature = "mods")]
+        let providers = super::worldgen_mods::Providers::new(
+            &settings.mods.enabled,
+            &options.dev_mods,
+            world_root,
+        );
+        #[cfg(feature = "mods")]
+        let make =
+            |request: &horizon_client::vanillagen::ProviderRequest<'_>| providers.make(request);
+        #[cfg(feature = "mods")]
+        let factory: Option<horizon_client::vanillagen::ProviderFactory<'_>> = Some(&make);
+        #[cfg(not(feature = "mods"))]
+        let factory: Option<horizon_client::vanillagen::ProviderFactory<'_>> = None;
+        let inner = Arc::new(VanillaTerrain::for_world_with(&options.resources.join("worldgen"), pack.assets.registry, res.biomes(), seed, &generation.preset, dim.id(), structures, factory, &generation.settings).map_err(|e| {
                 format!("{e}\nPrepare the worldgen bundle with the launcher, or: horizon-prepare --prepare")
             })?);
         if dim == Dim::Overworld && structures {

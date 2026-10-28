@@ -162,6 +162,9 @@ pub struct Content {
     pub items: Vec<Item>,
     /// The namespaces it owns: the mod id, then the manifest's `namespaces`.
     pub namespaces: Vec<String>,
+    /// The options of the world presets it provides (`[[worldgen.settings]]`),
+    /// for the create-world screen.
+    pub preset_settings: Vec<crate::worldgen::PresetSetting>,
 }
 
 /// Reads a mod's content files ([`Content::reader`]).
@@ -247,6 +250,11 @@ impl Content {
             blocks: Vec::new(),
             items: Vec::new(),
             namespaces: manifest.owned_namespaces().map(str::to_owned).collect(),
+            preset_settings: manifest
+                .worldgen
+                .as_ref()
+                .map(|w| w.settings.clone())
+                .unwrap_or_default(),
         };
         content.check(manifest)?;
         Ok(content)

@@ -556,6 +556,36 @@ impl GeneratorData {
             && min_y + height <= 2032;
         fits.then_some((min_y, height))
     }
+    /// A preset's dimension as the generator builds it: the dimension
+    /// type's build range and the noise settings' sea level, the settings
+    /// resolved as for a provider's preset (named, or vanilla overworld's).
+    /// None for a preset or dimension the data doesn't have.
+    pub fn preset_level(&self, preset: &str, dimension: &str) -> Option<PresetLevel> {
+        let dim = self.preset_dimension(preset, dimension)?;
+        let generator = &dim["generator"];
+        let named = generator["settings"]
+            .as_str()
+            .filter(|s| self.settings.contains_key(*s));
+        let settings: Value = match (named, &generator["settings"]) {
+            (Some(name), _) => serde_json::from_str(self.settings.get(name)?).ok()?,
+            (None, inline @ Value::Object(_)) => inline.clone(),
+            (None, _) => serde_json::from_str(self.settings.get("minecraft:overworld")?).ok()?,
+        };
+        let noise = (
+            settings["noise"]["min_y"].as_i64()? as i32,
+            settings["noise"]["height"].as_i64()? as i32,
+        );
+        let (min_y, height) = dim["type"]
+            .as_str()
+            .and_then(|t| self.dimension_height(t))
+            .unwrap_or(noise);
+        Some(PresetLevel {
+            min_y,
+            height,
+            sea_level: settings["sea_level"].as_i64()? as i32,
+            generator_type: generator["type"].as_str().unwrap_or("").to_owned(),
+        })
+    }
     /// The world presets the data has (vanilla's and mods'), by id.
     pub fn world_preset_ids(&self) -> impl Iterator<Item = &str> {
         self.world_presets.keys().map(String::as_str)
@@ -668,6 +698,16 @@ impl ProtoChunk {
             .and_then(|map| map.first_available(x & 15, z & 15).ok())
             .unwrap_or(self.terrain.min_y())
     }
+}
+
+/// A preset's dimension as the generator builds it ([`GeneratorData::preset_level`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetLevel {
+    pub min_y: i32,
+    pub height: i32,
+    pub sea_level: i32,
+    /// The generator's `type`: `minecraft:noise`, or a provider's own.
+    pub generator_type: String,
 }
 
 /// Build range (minimum Y, height) of the vanilla dimension types.
@@ -2231,6 +2271,16 @@ where
         let (height, state) = top?;
         let y = height - 1;
         let position = BlockPos::new(x, y, z);
+        if self.provider.is_some() {
+            // A provider's land is final: its top block, no surface rules.
+            let biome = self.provided_biome(worker, self.zoom.quart_at_block(position))?;
+            return Some(SurfaceSample {
+                height,
+                state,
+                water,
+                biome,
+            });
+        }
         let mut resolver = self.source.resolver(
             &self.climate,
             self.router.get(RouterField::Erosion).as_ref(),
@@ -2292,6 +2342,24 @@ where
     ) -> Result<Vec<LodColumn>, GeneratorError> {
         if width <= 0 || side == 0 || side > 64 {
             return Err(resource("far sample dimensions"));
+        }
+        if self.provider.is_some() {
+            // A provider's land, column by column (its chunks' land, cached
+            // per worker): far terrain shows what the chunks will hold.
+            let mut out = Vec::with_capacity(side * side);
+            for dz in 0..side as i32 {
+                for dx in 0..side as i32 {
+                    let mut spans = Vec::new();
+                    let sample = self.surface_sample(
+                        worker,
+                        x + dx * width,
+                        z + dz * width,
+                        Some(&mut spans),
+                    );
+                    out.push((sample, spans));
+                }
+            }
+            return Ok(out);
         }
         let mut geometry = Vec::with_capacity(side * side);
         let mut context = SamplerContext::sparse();

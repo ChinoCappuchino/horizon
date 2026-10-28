@@ -19,6 +19,7 @@ use horizon_world::{
         generator::{
             GeneratorData, GeneratorWorker, OverworldGenerator, ProtoChunk, SurfaceSample,
         },
+        provider::TerrainProvider,
         terrain::PreLightChunkStage,
     },
 };
@@ -48,11 +49,27 @@ pub struct VanillaTerrain {
     dimension: String,
     /// The world's preset (`horizon:preset`), for far decoration's generator.
     preset: String,
+    /// A world-generation mod's terrain and biomes, for a preset it provides.
+    provider: Option<Arc<dyn TerrainProvider>>,
     /// When the last proto chunk was generated, in milliseconds since
     /// `created`: the ring search waits for a pause in generation.
     last_proto: std::sync::atomic::AtomicU64,
     created: std::time::Instant,
 }
+/// What a world-generation mod's terrain provider is made for.
+pub struct ProviderRequest<'a> {
+    pub data: &'a Arc<GeneratorData>,
+    pub seed: i64,
+    pub preset: &'a str,
+    pub dimension: &'a str,
+    pub level: horizon_world::worldgen::generator::PresetLevel,
+    /// The world's preset settings (JSON text, "" for the defaults).
+    pub settings: &'a str,
+}
+/// Makes the provider of a preset from the mods that are on; none when no
+/// mod provides it.
+pub type ProviderFactory<'a> = &'a dyn Fn(&ProviderRequest<'_>) -> Option<Arc<dyn TerrainProvider>>;
+
 /// A proto chunk, or the position of one whose generation failed.
 enum VanillaProto {
     Ready(Box<ProtoChunk>),
@@ -153,6 +170,25 @@ impl VanillaTerrain {
         dimension: &str,
         structures: bool,
     ) -> crate::Result<Self> {
+        Self::for_world_with(
+            dir, registry, biomes, seed, preset, dimension, structures, None, "",
+        )
+    }
+    /// [`VanillaTerrain::for_world`] where `providers` may supply a
+    /// world-generation mod's terrain for the preset (fork `afterwinter`,
+    /// M3c), opened with the world's `settings` (its `horizon:preset_settings`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_world_with(
+        dir: &Path,
+        registry: &'static BlockRegistry,
+        biomes: &Biomes,
+        seed: i64,
+        preset: &str,
+        dimension: &str,
+        structures: bool,
+        providers: Option<ProviderFactory<'_>>,
+        settings: &str,
+    ) -> crate::Result<Self> {
         let data: Arc<GeneratorData> = shared_data(dir, registry)?;
         // A preset without this dimension (a mod's overworld-only preset)
         // keeps vanilla's for it.
@@ -165,7 +201,39 @@ impl VanillaTerrain {
             .iter()
             .map(|name| biomes.id(name))
             .collect();
-        let generator = OverworldGenerator::for_world(data, seed, preset, dimension, structures)?;
+        let level = data.preset_level(preset, dimension);
+        let provider = match (&level, providers) {
+            (Some(level), Some(make)) => make(&ProviderRequest {
+                data: &data,
+                seed,
+                preset,
+                dimension,
+                level: level.clone(),
+                settings,
+            }),
+            _ => None,
+        };
+        if provider.is_none()
+            && level
+                .as_ref()
+                .is_some_and(|l| l.generator_type != "minecraft:noise")
+        {
+            return Err(format!(
+                "the world preset {preset} comes from a world-generation mod that isn't on: turn it on in Options > Mods"
+            )
+            .into());
+        }
+        let generator = match &provider {
+            Some(p) => OverworldGenerator::with_provider(
+                data,
+                seed,
+                preset,
+                dimension,
+                structures,
+                p.clone(),
+            )?,
+            None => OverworldGenerator::for_world(data, seed, preset, dimension, structures)?,
+        };
         let unsupported = generator.unsupported_features();
         if !unsupported.is_empty() {
             log::warn!(
@@ -217,6 +285,7 @@ impl VanillaTerrain {
             seed,
             dimension: dimension.to_owned(),
             preset: preset.to_owned(),
+            provider,
             last_proto: std::sync::atomic::AtomicU64::new(0),
             created: std::time::Instant::now(),
         })

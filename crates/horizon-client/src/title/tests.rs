@@ -769,6 +769,7 @@ fn create_world_tabs_follow_vanilla_and_their_choices_reach_the_action() {
             structures: true,
             bonus_chest: true,
             preset: "minecraft:flat".into(),
+            settings: String::new(),
         }
     );
     // The More tab's Experiments and Data Packs screens don't exist yet.
@@ -788,6 +789,7 @@ fn new_world_generation_settings_round_trip() {
         structures: false,
         bonus_chest: true,
         preset: "minecraft:flat".into(),
+        settings: String::new(),
     };
     crate::save::write_world_gen_settings(&dir, 42, options.clone()).unwrap();
     assert_eq!(crate::save::WorldGen::read(&dir), Some(options));
@@ -894,6 +896,7 @@ fn world_presets_round_trip() {
         let dir = f.root.join(preset.replace(':', "_"));
         let options = crate::save::WorldGen {
             preset: preset.into(),
+            settings: r#"{"climate":{"mode":"planet"}}"#.into(),
             ..crate::save::WorldGen::default()
         };
         crate::save::write_world_gen_settings_for(&dir, 7, options.clone(), None, Some(&overworld))

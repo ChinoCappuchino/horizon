@@ -302,6 +302,22 @@ decoration, and taken by the dedicated server's `level-type` (any noise preset o
 This also gives Horizon vanilla's amplified, large biomes and single biome presets. The
 create-world screen's world type button comes with M3c's settings page.
 
+**M3c, done (2026-10-28).** The game loads world-generation mods for the world being opened
+(`game/worldgen_mods.rs`): the enabled mod (or `--dev-mod`) whose manifest lists the world's
+preset becomes its generator's provider (`VanillaTerrain::for_world_with`), compiled once per
+process, opened with the world's settings (`horizon:preset_settings`). A preset of a mod that
+isn't on refuses to open, saying so. Its saved layers' cells are written to the world's
+`data/horizon/worldgen/<mod>-<dimension>.cells` when the world closes and loaded back when it
+opens. Far terrain and far decoration in a provider world read the provider's land and biomes
+(per chunk, so slower than vanilla's coarse noise grid: a follow-up). Create New World's World
+Type cycles vanilla's four presets and then mods' presets; Customize opens a page drawn from the
+mod's `[[worldgen.settings]]` (cycling buttons, sliders), carried to the screen through the
+resources' `worldgen/preset_settings.json`; the dedicated server takes `level-type` and, for a
+mod's preset, `generator-settings` as its settings JSON. Proof: a dedicated server with
+`level-type=test_worldgen:hills` and the stand-in mod: its saved chunks' 739 grass columns are
+all at the mod's own heights for seed 42; the world keeps `horizon:preset` and its settings, and
+a second start loads the cells the first saved. FarView needs M3d: its land is above y 320.
+
 2048 sections per column is about five times the memory and light work of vanilla's 384; M3d is
 measured against vanilla worlds so they don't get slower.
 

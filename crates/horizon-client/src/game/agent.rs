@@ -568,6 +568,14 @@ impl Game<'_> {
                 "generate_structures": options.structures,
                 "bonus_chest": options.bonus_chest(),
             }),
+            Mode::CreatePreset {
+                name, seed, preset, ..
+            } => json!({
+                "mode": "customize-preset",
+                "fields": { "name": name, "seed": seed },
+                "preset": preset.preset,
+                "settings": preset.json(),
+            }),
             Mode::CreateFlat {
                 name,
                 seed,

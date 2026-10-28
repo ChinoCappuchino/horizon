@@ -64,12 +64,24 @@ impl Builder {
             .spawn(move || {
                 // Structure pieces have mutable one-shot placement flags. Sharing
                 // gameplay's seeded pipeline would consume its chests/spawners.
-                let generator = match OverworldGenerator::for_dimension(
-                    terrain.generator.data().clone(),
-                    terrain.seed,
-                    &terrain.preset,
-                    &terrain.dimension,
-                ) {
+                let data = terrain.generator.data().clone();
+                let built = match &terrain.provider {
+                    Some(p) => OverworldGenerator::with_provider(
+                        data,
+                        terrain.seed,
+                        &terrain.preset,
+                        &terrain.dimension,
+                        true,
+                        p.clone(),
+                    ),
+                    None => OverworldGenerator::for_dimension(
+                        data,
+                        terrain.seed,
+                        &terrain.preset,
+                        &terrain.dimension,
+                    ),
+                };
+                let generator = match built {
                     Ok(generator) => generator,
                     Err(error) => {
                         log::warn!("Horizon: far decoration unavailable: {error}");

@@ -2469,6 +2469,9 @@ pub struct WorldGen {
     /// world-generation mod's): Horizon keeps it as `horizon:preset`, since
     /// vanilla's save keeps only the dimensions it made.
     pub preset: String,
+    /// The preset's settings (JSON text, "" for its defaults), chosen when the
+    /// world was made and never changed: `horizon:preset_settings`.
+    pub settings: String,
 }
 impl WorldGen {
     /// A saved world's choices, from its `world_gen_settings`.
@@ -2495,6 +2498,7 @@ impl WorldGen {
             structures: flag("generate_structures", true),
             bonus_chest: flag("bonus_chest", false),
             preset,
+            settings: text(settings.get("horizon:preset_settings")).unwrap_or_default(),
         })
     }
 }
@@ -2505,6 +2509,7 @@ impl Default for WorldGen {
             structures: true,
             bonus_chest: false,
             preset: "minecraft:normal".into(),
+            settings: String::new(),
         }
     }
 }
@@ -2613,6 +2618,7 @@ pub fn write_world_gen_settings_for(
             ),
             ("bonus_chest", Tag::Byte(i8::from(options.bonus_chest))),
             ("horizon:preset", string(&options.preset)),
+            ("horizon:preset_settings", string(&options.settings)),
             (
                 "dimensions",
                 Tag::compound([

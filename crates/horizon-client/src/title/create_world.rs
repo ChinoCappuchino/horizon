@@ -39,6 +39,9 @@ pub struct WorldOptions {
     /// The world preset when not flat (`minecraft:normal`, `minecraft:amplified`,
     /// a world-generation mod's).
     pub preset: String,
+    /// The preset's settings (JSON text) from its settings page, "" for its
+    /// defaults: fixed once the world exists.
+    pub preset_settings: String,
     /// `getGameRules`: the Game Rules screen's values, saved with the world.
     pub rules: crate::gamerules::GameRules,
 }
@@ -54,6 +57,7 @@ impl Default for WorldOptions {
             structures: true,
             bonus_chest: false,
             preset: "minecraft:normal".into(),
+            preset_settings: String::new(),
             rules: crate::gamerules::GameRules::default(),
         }
     }
@@ -84,6 +88,7 @@ impl WorldOptions {
                 true => "minecraft:normal".into(),
                 false => generation.preset,
             },
+            preset_settings: generation.settings,
             rules: crate::gamerules::GameRules::load(dir),
             ..Self::default()
         }
@@ -109,6 +114,10 @@ impl WorldOptions {
                 true => "minecraft:flat".into(),
                 false => self.preset.clone(),
             },
+            settings: match self.flat {
+                true => String::new(),
+                false => self.preset_settings.clone(),
+            },
         }
     }
     /// The custom layers, as `write_world_gen_settings_with` takes them.
@@ -116,6 +125,28 @@ impl WorldOptions {
         self.flat_settings
             .as_ref()
             .map(super::flat::FlatSettings::to_tag)
+    }
+    /// The next world type after this one in `types`; a preset's options
+    /// start from its defaults.
+    pub(super) fn next_world_type(&mut self, types: &[String]) {
+        let now = if self.flat {
+            "minecraft:flat"
+        } else {
+            self.preset.as_str()
+        };
+        let at = types
+            .iter()
+            .position(|t| t == now)
+            .map_or(0, |i| (i + 1) % types.len());
+        let next = types[at].clone();
+        self.flat = next == "minecraft:flat";
+        if self.flat {
+            // setWorldType starts the generator from the flat preset.
+            self.flat_settings = Some(super::flat::FlatSettings::default());
+        } else {
+            self.preset = next;
+        }
+        self.preset_settings.clear();
     }
     /// A press on one of the open tab's cycle buttons or switches.
     pub(super) fn press(&mut self, id: u8, creative: &mut bool) {
@@ -142,6 +173,38 @@ impl WorldOptions {
             _ => {}
         }
     }
+}
+
+/// The world types Create New World cycles through: vanilla's (as its World
+/// Type button lists them), then the world presets mods' content adds.
+pub(super) fn world_types(resources: &std::path::Path) -> Vec<String> {
+    let mut types: Vec<String> = [
+        "minecraft:normal",
+        "minecraft:flat",
+        "minecraft:large_biomes",
+        "minecraft:amplified",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let presets: serde_json::Map<String, serde_json::Value> =
+        std::fs::read(resources.join("worldgen/world_presets.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+    types.extend(
+        presets
+            .keys()
+            .filter(|id| !id.starts_with("minecraft:"))
+            .cloned(),
+    );
+    types
+}
+/// A world preset's name: `generator.<namespace>.<path>`'s translation, or
+/// its id.
+pub(super) fn preset_label(preset: &str) -> String {
+    let (ns, path) = preset.split_once(':').unwrap_or(("minecraft", preset));
+    let key = format!("generator.{ns}.{}", path.replace('/', "."));
+    crate::lang::get_or(&key, preset)
 }
 
 /// `Mth.roundToward`: up to a multiple of `step`.
@@ -218,7 +281,13 @@ fn game_mode(creative: bool, hardcore: bool) -> &'static str {
 }
 
 /// The open tab's buttons and the footer's.
-pub(super) fn buttons(w: f32, h: f32, creative: bool, o: &WorldOptions) -> Vec<Button> {
+pub(super) fn buttons(
+    w: f32,
+    h: f32,
+    creative: bool,
+    o: &WorldOptions,
+    customizable: bool,
+) -> Vec<Button> {
     let b = |x: f32, y: f32, w: f32, label: String, enabled: bool, id: u8| Button {
         x,
         y,
@@ -269,22 +338,19 @@ pub(super) fn buttons(w: f32, h: f32, creative: bool, o: &WorldOptions) -> Vec<B
                 150.0,
                 labelled(
                     "selectWorld.mapType",
-                    tr(if o.flat {
-                        "generator.minecraft.flat"
-                    } else {
-                        "generator.minecraft.normal"
-                    }),
+                    preset_label(if o.flat { "minecraft:flat" } else { &o.preset }),
                 ),
                 true,
                 25,
             ),
-            // CreateFlatWorldScreen: only a flat generator has a preset editor.
+            // CreateFlatWorldScreen for a flat generator; a world-generation
+            // mod's preset with options has its own page.
             b(
                 gx + 160.0,
                 gy,
                 150.0,
                 tr("selectWorld.customizeType"),
-                o.flat,
+                customizable,
                 26,
             ),
             // SwitchGrid: 44-wide value-only buttons at the grid's right.

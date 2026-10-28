@@ -15,6 +15,7 @@ use std::{
 
 mod create_world;
 mod flat;
+mod preset_settings;
 #[cfg(test)]
 mod tests;
 pub mod world_management;
@@ -113,6 +114,16 @@ pub enum Mode {
         focus: u8,
         options: WorldOptions,
         flat: flat::State,
+    },
+    /// A world-generation mod's preset options over Create New World (fork
+    /// `afterwinter`), as the superflat editor is.
+    CreatePreset {
+        name: String,
+        seed: String,
+        creative: bool,
+        focus: u8,
+        options: WorldOptions,
+        preset: preset_settings::State,
     },
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -366,6 +377,30 @@ impl Title {
                 }
             }
             _ => {}
+        }
+    }
+    /// Return to Create New World, keeping (`apply`) or dropping the preset's options.
+    fn close_preset(&mut self, apply: bool) {
+        let mode = std::mem::replace(&mut self.mode, Mode::Main);
+        if let Mode::CreatePreset {
+            name,
+            seed,
+            creative,
+            focus,
+            mut options,
+            preset,
+        } = mode
+        {
+            if apply {
+                options.preset_settings = preset.json();
+            }
+            self.mode = Mode::Create {
+                name,
+                seed,
+                creative,
+                focus,
+                options,
+            };
         }
     }
     /// Return to Create New World, keeping (`apply`) or dropping the layers.
@@ -803,8 +838,15 @@ impl Title {
             ],
             Mode::Create {
                 creative, options, ..
-            } => create_world::buttons(w, h, *creative, options),
+            } => create_world::buttons(
+                w,
+                h,
+                *creative,
+                options,
+                options.flat || preset_settings::has(&self.resources, &options.preset),
+            ),
             Mode::CreateFlat { flat, .. } => flat::buttons(w, h, flat),
+            Mode::CreatePreset { preset, .. } => preset_settings::buttons(w, h, preset),
             Mode::Edit { world, name, .. } => {
                 let x = (w / 2.0).floor() - 100.0;
                 let top = edit_top(h);
@@ -1133,6 +1175,9 @@ impl Title {
                 ..
             } => self.draw_create(atlas, batch, cursor, name, seed, *focus, options),
             Mode::CreateFlat { flat, .. } => flat::draw(self, atlas, batch, cursor, flat),
+            Mode::CreatePreset { preset, .. } => {
+                preset_settings::draw(self, atlas, batch, cursor, preset)
+            }
             Mode::Edit { name, focused, .. } => {
                 crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
                 centered(
@@ -1343,6 +1388,15 @@ impl Title {
             self.flat_click(x, y, (w, h), hit);
             return (Action::None, hit.is_some());
         }
+        if let Mode::CreatePreset { preset, .. } = &mut self.mode {
+            match hit {
+                Some(preset_settings::DONE) => self.close_preset(true),
+                Some(preset_settings::CANCEL) => self.close_preset(false),
+                Some(id) => preset.press(id),
+                None => return (Action::None, preset.click((x, y), w)),
+            }
+            return (Action::None, true);
+        }
         let action = self.click_action(x, y, (w, h), hit);
         // World list selection is silent; launching its selected entry sounds.
         let sound = hit.is_some() || matches!(action, Action::Play { .. });
@@ -1521,6 +1575,24 @@ impl Title {
                 },
                 Some(26),
             ) => {
+                if !options.flat {
+                    // A world-generation mod's preset: its options page.
+                    if let Some(preset) = preset_settings::State::load(
+                        &self.resources,
+                        &options.preset,
+                        &options.preset_settings,
+                    ) {
+                        self.mode = Mode::CreatePreset {
+                            name: name.clone(),
+                            seed: seed.clone(),
+                            creative: *creative,
+                            focus: *focus,
+                            options: options.clone(),
+                            preset,
+                        };
+                    }
+                    return Action::None;
+                }
                 let flat = flat::State::new(&self.resources, options.flat_settings.clone());
                 self.mode = Mode::CreateFlat {
                     name: name.clone(),
@@ -1530,6 +1602,11 @@ impl Title {
                     options: options.clone(),
                     flat,
                 };
+                Action::None
+            }
+            // The world type: vanilla's presets, then world-generation mods'.
+            (Mode::Create { options, .. }, Some(25)) => {
+                options.next_world_type(&create_world::world_types(&self.resources));
                 Action::None
             }
             (
@@ -1795,6 +1872,7 @@ impl Title {
                     self.close_flat(false);
                 }
             }
+            Mode::CreatePreset { .. } => self.close_preset(false),
             Mode::Create { .. } => self.cancel_create(),
             _ => self.mode = Mode::Main,
         }

@@ -205,6 +205,8 @@ mod win;
 mod wind;
 mod wither;
 mod world_loading;
+#[cfg(feature = "mods")]
+mod worldgen_mods;
 mod zombie_reinforcements;
 mod zombie_villagers;
 use horizon_client::{

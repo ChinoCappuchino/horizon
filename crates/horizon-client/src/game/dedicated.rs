@@ -374,11 +374,18 @@ impl Game<'_> {
         } else {
             None
         };
+        // `generator-settings` is a flat world's layers in vanilla; for a
+        // world-generation mod's preset, its settings (JSON).
+        let settings_text = match flat || preset == "minecraft:normal" {
+            true => String::new(),
+            false => props.generator_settings.compact(),
+        };
         let options = horizon_client::save::WorldGen {
             flat,
             structures: props.generate_structures,
             bonus_chest: false,
             preset,
+            settings: settings_text,
         };
         horizon_client::save::write_world_gen_settings_for(
             dir,
