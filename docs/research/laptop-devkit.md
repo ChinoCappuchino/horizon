@@ -97,6 +97,25 @@ threads (the sandbox's ceiling there); Horizon's vanilla generation (`chunkgen_b
 --size 32`) 457.8 proto chunks/s, decoration 2,349.5 chunks/s; FarView's Java fill bench
 ~1,445 to 1,628 chunks/s; the whole pack's dedicated server ~103 to 169 chunks/s.
 
+FarView's Earth terrain as a world-generation mod (the laptop's port, built with simd128),
+`worldgen_bench`-style runs back to back with FarView's Java fill bench, chunks/s, first / hot
+pass (2026-10-28; numbers from the laptop):
+
+| Case | Java | Horizon, fuel limits | Horizon, epoch limits |
+|---|---|---|---|
+| seed 42, mountain, 1 thread | 117 / 161 | - / 205 | - / 225 |
+| seed 42, 8 threads | 603 / 891 | 589 / 1,176 | 619 / 1,270 |
+| seed 7036569954403863715, lowland, 1 thread | 263 / 362 | - / 399 | - / 432 |
+| same seed, coast, 1 thread | 288 / 367 | 296 / 496 | 311 / 531 |
+| same seed, 8 threads | 548 / 1,656 | 654 / 1,640 | 693 / 1,720 |
+
+Prefetch adds 23 to 28 % to first passes (seed 42: 763; the other: 889). With saved layers
+preloaded, a reopened world's first pass on 1 thread: 197 chunks/s (14.6 fully cold) on seed 42,
+343 (160) on the other. Open question: with prefetch on, the 8-thread hot pass on the second
+seed was about 10 % lower (1,551 against 1,720), possibly idle-class prefetch builds on the SMT
+siblings of busy cores. The laptop's sustained power limit costs about 18 % after an hour of
+load, so every comparison runs Java and Horizon back to back.
+
 ## 4. Splitting the work (clean room)
 
 The Horizon side never reads FarView's code. FarView's own author (the laptop's session) ports
