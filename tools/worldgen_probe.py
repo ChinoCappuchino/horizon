@@ -4,6 +4,12 @@
     worldgen_probe.py build                                   compile the probe mod only
     worldgen_probe.py run ROW [--seed N] [--order K] [--radius R] --accept-eula
     worldgen_probe.py list                                    the rows of tools/worldgen_matrix.toml
+    worldgen_probe.py horizon [ROWS] [--tag T]                Horizon's generator on the same rows, compared
+
+`horizon` runs crates/horizon-world/examples/worldgen_probe.rs on the 26.3 resources, plus each row's
+mods as horizon-port-pack carried them (HORIZON_PORT_WORK: a port work folder with mods/<id>/carry/),
+and compares with the NeoForge runs: base heights and structure starts exactly, biomes and decoration
+within the tolerances of docs/research/worldgen-tolerance.md.
 
 Each row of tools/worldgen_matrix.toml names mod ids and a world preset. The jars come from the
 player's own pack folder (HORIZON_PACK_MODS: an installed instance's mods/), with their required
@@ -179,7 +185,8 @@ def run(args):
     try:
         seconds, log = oracle.start(home, run_dir, {
             'horizon.probe.out': out, 'horizon.probe.radius': args.radius,
-            'horizon.probe.cx': args.cx, 'horizon.probe.cz': args.cz}, timeout=args.timeout)
+            'horizon.probe.cx': args.cx, 'horizon.probe.cz': args.cz,
+            'horizon.probe.starts_radius': getattr(args, 'starts_radius', 0)}, timeout=args.timeout)
     except subprocess.TimeoutExpired:
         sys.exit(f'timed out after {args.timeout} s (server log: {run_dir / "server.log"})')
     if error.exists():
@@ -286,6 +293,125 @@ def matrix(args):
         sys.exit('generation crashed in at least one run (see FAILED and partial rows)')
 
 
+# Horizon (26.3) against NeoForge (1.21.1): what docs/research/worldgen-tolerance.md accepts.
+BIOME_TOLERANCE = 0.005      # share of sampled columns whose biome may differ (boundaries)
+DECORATION_TOLERANCE = 20.0  # % a decoration total may differ from the NeoForge runs' nearest
+
+
+def compare_starts(name, seed, theirs, mine, mods, work):
+    """One row of the wide comparison: every start in the square, NeoForge's against Horizon's, by
+    namespace. The row's mods' namespaces must match exactly; vanilla's are listed (1.21.1 and 26.3 may
+    differ there, docs/research/worldgen-tolerance.md)."""
+    key = lambda t: (tuple(t['chunk']), t['id'], tuple(t['box']))
+    a, b = {key(t) for t in theirs}, {key(t) for t in mine}
+    owned = set()
+    for mod in mods:
+        manifest = work / 'mods' / mod / 'carry' / 'horizon-mod.toml'
+        if manifest.exists():
+            m = tomllib.loads(manifest.read_text())
+            owned |= {m['id'], *m.get('namespaces', [])}
+    spaces = sorted({k[1].split(':')[0] for k in a | b})
+    parts, ok = [], True
+    for ns in spaces:
+        both = sum(1 for k in a & b if k[1].startswith(ns + ':'))
+        only_n = sorted(k for k in a - b if k[1].startswith(ns + ':'))
+        only_h = sorted(k for k in b - a if k[1].startswith(ns + ':'))
+        if ns in owned and (only_n or only_h):
+            ok = False
+        part = f'{ns} {both} / {len(only_n)} / {len(only_h)}'
+        if ns in owned and (only_n or only_h):
+            part += f' (e.g. {(only_n or only_h)[0][1]} at chunk {(only_n or only_h)[0][0]})'
+        parts.append(part)
+    mine_owned = sum(1 for k in b if k[1].split(':')[0] in owned)
+    verdict = 'yes' if ok else 'NO'
+    if ok and owned and not mine_owned:
+        verdict = 'none to compare'
+    return f'| {name} | {seed} | {verdict} | {"; ".join(parts)} |'
+
+
+def horizon(args):
+    """Horizon's generator on the rows, against the NeoForge runs already in .local/worldgen-probe/."""
+    import lab
+    import test_structure_layout_parity as layout
+    m = tomllib.loads(MATRIX.read_text())
+    wanted = [r for r in m['row'] if not args.rows or r['name'] in args.rows]
+    work = Path(os.environ.get('HORIZON_PORT_WORK', ROOT.parent / 'ports' / 'afterwinter'))
+    subprocess.run(['cargo', 'build', '--release', '-q', '-p', 'horizon-world', '--example', 'worldgen_probe'],
+                   check=True, cwd=ROOT)
+    binary = lab.cargo_target() / 'release' / 'examples' / 'worldgen_probe'
+    lines, wide_lines, failed = [], [], False
+    for row in wanted:
+        name, mods = row['name'], row.get('mods', [])
+        if row.get('preset', 'minecraft:normal') != 'minecraft:normal':
+            lines.append(f'| {name} | - | not yet: Horizon has no world presets from mods (M3) | | | |')
+            continue
+        data = [work / 'mods' / mod / 'carry' / 'data' for mod in mods]
+        if missing := [mod for mod, d in zip(mods, data) if not d.is_dir()]:
+            lines.append(f'| {name} | - | not carried: {", ".join(missing)} (horizon-port-pack carry) | | | |')
+            continue
+        resources = layout.overlay(f'worldgen-{name}', data) if mods else lab.RESOURCES
+        for seed in m.get('seeds', [1]):
+            out = OUT / 'horizon' / name / f'seed-{seed}.json'
+            out.parent.mkdir(parents=True, exist_ok=True)
+            done = subprocess.run([str(binary), str(resources), str(out), '--seed', str(seed), '--radius', '4'],
+                                  cwd=ROOT, capture_output=True, text=True)
+            if done.returncode:
+                failed = True
+                why = (done.stderr.strip().splitlines() or ['?'])[-1][:160].replace('|', '/')
+                lines.append(f'| {name} | {seed} | FAILED: {why} | | | |')
+                continue
+            refs = sorted((OUT / name).glob(f'seed-{seed}-order-*.json'))
+            if not refs:
+                lines.append(f'| {name} | {seed} | no NeoForge run to compare with | | | |')
+                continue
+            wide = refs[0].with_name(refs[0].name.replace('.json', '.starts.json'))
+            if wide.exists():
+                theirs = json.loads(wide.read_text())
+                reach = max((max(abs(t['chunk'][0]), abs(t['chunk'][1])) for t in theirs), default=0)
+                reach = max(reach, int(os.environ.get('HORIZON_STARTS_RADIUS', '48')))
+                subprocess.run([str(binary), str(resources), str(out), '--seed', str(seed), '--radius', '4',
+                                '--starts-radius', str(reach)], check=True, cwd=ROOT, capture_output=True)
+                wide_lines.append(compare_starts(name, seed, theirs, json.loads(
+                    out.with_name(out.name.replace('.json', '.starts.json')).read_text()), mods, work))
+                failed |= wide_lines[-1].startswith(f'| {name} | {seed} | NO')
+            h = json.loads(out.read_text())
+            n = json.loads(refs[0].read_text())
+            hc = {(c['x'], c['z']): c for c in h['chunks']}
+            cols = base = biomes = 0
+            starts = []
+            for a_ in n['chunks']:
+                b_ = hc[(a_['x'], a_['z'])]
+                cols += len(a_['base'])
+                base += sum(x == y for x, y in zip(a_['base'], b_['base']))
+                biomes += sum(x == y for x, y in zip(a_['biomes'], b_['biomes']))
+                if a_['starts'] != b_['starts']:
+                    starts.append((a_['x'], a_['z']))
+            # Decoration: Horizon's total against the nearest of the NeoForge runs (their own spread).
+            worst = 0.0
+            for key in DECORATION:
+                mine = summarise(out)[key]
+                theirs = [summarise(r)[key] for r in refs]
+                near = min(theirs, key=lambda t: abs(t - mine))
+                if max(mine, near):
+                    worst = max(worst, 100 * abs(mine - near) / max(mine, near))
+            ok = (base == cols and not starts and cols - biomes <= BIOME_TOLERANCE * cols
+                  and worst <= DECORATION_TOLERANCE)
+            failed |= not ok
+            where = f'; starts differ in {starts[:4]}' if starts else ''
+            lines.append(f'| {name} | {seed} | {"yes" if ok else "NO"} | {base}/{cols} | {biomes}/{cols} | '
+                         f'{len(n["chunks"]) - len(starts)}/{len(n["chunks"])}{where} | {worst:.1f} % |')
+    table = ['| row | seed | matches NeoForge 1.21.1 | base equal | biomes equal | chunks, same starts | decoration |',
+             '|---|---:|---|---:|---:|---|---:|', *lines]
+    if wide_lines:
+        table += ['', '| row | seed | mod starts match | per namespace: both / NeoForge only / Horizon only |',
+                  '|---|---:|---|---|', *wide_lines]
+    tag = args.tag or 'horizon'
+    (OUT / f'{tag}.md').write_text('\n'.join(table) + '\n')
+    print('\n'.join(table))
+    if failed:
+        sys.exit('Horizon differs from NeoForge beyond the tolerances in at least one row')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -298,8 +424,13 @@ def main():
     r.add_argument('--radius', type=int, default=4)
     r.add_argument('--cx', type=int, default=0)
     r.add_argument('--cz', type=int, default=0)
+    r.add_argument('--starts-radius', type=int, default=0,
+                   help='also list every structure start this far out (chunks), from STRUCTURE_STARTS only')
     r.add_argument('--timeout', type=int, default=1800)
     r.add_argument('--accept-eula', action='store_true')
+    hz = sub.add_parser('horizon', help="Horizon's generator on the rows, against the NeoForge runs")
+    hz.add_argument('rows', nargs='*')
+    hz.add_argument('--tag')
     mx = sub.add_parser('matrix', help='every row x seed x load order, then the determinism check')
     mx.add_argument('rows', nargs='*', help='only these rows (default: all)')
     mx.add_argument('--tag', default='', help='name of the summary files (default: summary)')
@@ -318,6 +449,8 @@ def main():
             sys.exit('Starting a Minecraft server means accepting the Minecraft EULA (https://aka.ms/MinecraftEULA).\n'
                      'Only the person who owns the game decides that: rerun with --accept-eula.')
         matrix(a)
+    elif a.cmd == 'horizon':
+        horizon(a)
     else:
         run(a)
 

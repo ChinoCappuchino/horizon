@@ -59,9 +59,19 @@ public final class WorldgenProbe {
         int radius = Integer.getInteger("horizon.probe.radius", 4);
         int cx0 = Integer.getInteger("horizon.probe.cx", 0);
         int cz0 = Integer.getInteger("horizon.probe.cz", 0);
-        try (Writer w = Files.newBufferedWriter(out, StandardCharsets.UTF_8);
-                JsonWriter json = new JsonWriter(w)) {
-            write(server.overworld(), json, radius, cx0, cz0);
+        int startsRadius = Integer.getInteger("horizon.probe.starts_radius", 0);
+        try {
+            try (Writer w = Files.newBufferedWriter(out, StandardCharsets.UTF_8);
+                    JsonWriter json = new JsonWriter(w)) {
+                write(server.overworld(), json, radius, cx0, cz0);
+            }
+            if (startsRadius > 0) {
+                Path starts = Path.of(out.toString().replaceFirst("\\.json$", "") + ".starts.json");
+                try (Writer w = Files.newBufferedWriter(starts, StandardCharsets.UTF_8);
+                        JsonWriter json = new JsonWriter(w)) {
+                    writeStarts(server.overworld(), json, startsRadius, cx0, cz0);
+                }
+            }
         } catch (Throwable e) {
             // A mod that fails while generating is a result, not a probe failure: record it next to the
             // output, then stop at once. System.exit would wait for the server's own shutdown hook,
@@ -108,6 +118,36 @@ public final class WorldgenProbe {
         }
         json.endArray();
         json.endObject();
+    }
+
+    /**
+     * Every structure start in a wide square, from chunks generated only to STRUCTURE_STARTS (no
+     * terrain fill, no features): {@code [{"chunk": [x, z], "id": ..., "box": [...]}]}, by chunk.
+     */
+    private static void writeStarts(ServerLevel level, JsonWriter json, int radius, int cx0, int cz0)
+            throws IOException {
+        Registry<Structure> structures = level.registryAccess().registryOrThrow(Registries.STRUCTURE);
+        json.beginArray();
+        for (int cz = cz0 - radius; cz <= cz0 + radius; cz++) {
+            for (int cx = cx0 - radius; cx <= cx0 + radius; cx++) {
+                ChunkAccess chunk = level.getChunk(cx, cz, ChunkStatus.STRUCTURE_STARTS, true);
+                Map<String, BoundingBox> starts = new TreeMap<>();
+                for (Map.Entry<Structure, StructureStart> e : chunk.getAllStarts().entrySet()) {
+                    if (e.getValue().isValid()) {
+                        ResourceLocation id = structures.getKey(e.getKey());
+                        starts.put(id == null ? "?" : id.toString(), e.getValue().getBoundingBox());
+                    }
+                }
+                for (Map.Entry<String, BoundingBox> s : starts.entrySet()) {
+                    BoundingBox b = s.getValue();
+                    json.beginObject().name("chunk").beginArray().value(cx).value(cz).endArray()
+                            .name("id").value(s.getKey()).name("box").beginArray()
+                            .value(b.minX()).value(b.minY()).value(b.minZ())
+                            .value(b.maxX()).value(b.maxY()).value(b.maxZ()).endArray().endObject();
+                }
+            }
+        }
+        json.endArray();
     }
 
     private static void chunk(ServerLevel level, Registry<Structure> structures, ChunkAccess chunk,
