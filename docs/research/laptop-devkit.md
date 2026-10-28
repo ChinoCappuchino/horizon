@@ -54,6 +54,10 @@ Things that matter for a FarView port:
   what `region-block` reads.
 - **Terrain as columns.** `terrain` may answer exact columns of runs (state, top), bottom up,
   each top above the one before. A column that doesn't ascend is refused, with the column named.
+- **Shared regional maps.** `shared(layer, key)` / `build-shared(layer, key)`: each cell built
+  once per world by whichever instance first needs it, kept (LRU, 512 MiB by default) and read
+  by all; a build reads only coarser layers. See [worldgen-hooks.md](worldgen-hooks.md). The
+  stand-in mod uses two layers with `--settings cells`.
 - **Height.** Pass the dimension type's floor and height: the `highlands` presets are
   `--min-y -64 --height 2048`.
 - **Limits:** 256 MiB of memory per instance, a fuel budget per call (about 10⁹ instructions;
@@ -68,7 +72,7 @@ Things that matter for a FarView port:
 | A server under bots | `python3 tools/server_bench.py --servers horizon,vanilla --bots 1,10 --behaviour explore` | the pack's dedicated server |
 
 `worldgen_bench` options: `--preset ID --seed S --settings JSON --center CX CZ --min-y Y --height H
---sea-level Y`. `--verify` regenerates every chunk on one thread in reverse and fails if any differs.
+--sea-level Y --shared-mib M`. It prints how the shared cells were used (built, found, waited for, dropped). `--verify` regenerates every chunk on one thread in reverse and fails if any differs.
 On the Nobara VM (20 threads) the stand-in mod's trivial hills give 13,050 chunks/s on 8 threads:
 the sandbox's ceiling, not a prediction for FarView, whose own work will dominate.
 

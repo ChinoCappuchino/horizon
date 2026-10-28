@@ -2,12 +2,17 @@
 //! docs/research/worldgen-hooks.md). Such a mod runs apart from the game's
 //! and the server's hooks: the generator makes a [`Worker`] per generation
 //! thread from a [`WorldgenMod`], each its own instance opened for one world
-//! and dimension, and checks every answer before it uses one.
+//! and dimension, and checks every answer before it uses one. The
+//! instances of one [`World`] share the mod's regional cells
+//! (`worldgen.shared`), each built once by a builder instance.
 use crate::{
     Capability, Package,
     worldgen::{KEEP_BIOME, Section, Stage, is_id},
 };
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Condvar, Mutex},
+};
 use wasmtime::{
     Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
     component::{Component, HasSelf, Linker},
@@ -45,6 +50,14 @@ pub const STARTS: usize = 64;
 pub const PIECES: usize = 1024;
 /// Log lines one call may write: a mod runs on every worker.
 const LOG_LINES: u32 = 4;
+/// Fuel for one `build-shared`: a coarse cell may take seconds.
+const FUEL_BUILD: u64 = 50_000_000_000;
+/// The bytes of shared cells a world keeps, one cell's most, a key's
+/// length, and how deep builds may nest (one level per coarser layer).
+const SHARED_CAP: u64 = 512 << 20;
+pub const CELL_MAX: usize = 64 << 20;
+const SHARED_KEY: usize = 256;
+const MAX_DEPTH: usize = 32;
 
 /// The game's numbers for block states and biomes, shared by the workers.
 pub trait Palette: Send + Sync {
@@ -84,6 +97,10 @@ fn stage(s: WitStage) -> Stage {
 
 /// A world-generation mod, compiled once and shared by the workers.
 pub struct WorldgenMod {
+    compiled: Arc<Compiled>,
+}
+
+struct Compiled {
     id: String,
     namespaces: Vec<String>,
     section: Section,
@@ -135,48 +152,58 @@ impl WorldgenMod {
         HorizonWorldgenMod::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s)
             .map_err(|e| e.to_string())?;
         Ok(WorldgenMod {
-            id: m.id.clone(),
-            namespaces: m.owned_namespaces().map(str::to_owned).collect(),
-            section: m.worldgen.clone().unwrap_or_default(),
-            engine,
-            linker,
-            component,
+            compiled: Arc::new(Compiled {
+                id: m.id.clone(),
+                namespaces: m.owned_namespaces().map(str::to_owned).collect(),
+                section: m.worldgen.clone().unwrap_or_default(),
+                engine,
+                linker,
+                component,
+            }),
         })
     }
 
     pub fn id(&self) -> &str {
-        &self.id
+        &self.compiled.id
     }
 
-    /// A new instance, opened for the world `info` describes.
-    pub fn worker(&self, info: WorldInfo, palette: Arc<dyn Palette>) -> Result<Worker, Failure> {
-        let state = State {
-            id: self.id.clone(),
+    /// The mod in the world `info` describes: the workers made from it
+    /// share its cells (`worldgen.shared`).
+    pub fn world(&self, info: WorldInfo, palette: Arc<dyn Palette>) -> World {
+        World(Arc::new(WorldShared {
+            compiled: self.compiled.clone(),
+            info,
             palette,
-            region: None,
-            logged: 0,
-            limits: StoreLimitsBuilder::new()
-                .memory_size(MEMORY)
-                .instances(16)
-                .build(),
-        };
-        let stopped = |e: wasmtime::Error| Failure::Stopped(crate::runtime::reason(&e));
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|s| &mut s.limits);
-        store.set_fuel(FUEL_OPEN).map_err(stopped)?;
-        let instance = self
-            .linker
-            .instantiate(&mut store, &self.component)
-            .map_err(stopped)?;
-        let exports = HorizonWorldgenMod::new(&mut store, &instance).map_err(stopped)?;
-        let contribution = exports
-            .horizon_mods_worldgen_events()
-            .call_open(&mut store, &info)
-            .map_err(stopped)?
-            .map_err(Failure::Refused)?;
+            cells: Cells::new(SHARED_CAP),
+        }))
+    }
+
+    /// A new instance in a world of its own (no cells shared with any
+    /// other worker).
+    pub fn worker(&self, info: WorldInfo, palette: Arc<dyn Palette>) -> Result<Worker, Failure> {
+        self.world(info, palette).worker()
+    }
+}
+
+/// A world-generation mod in one world and dimension.
+#[derive(Clone)]
+pub struct World(Arc<WorldShared>);
+
+struct WorldShared {
+    compiled: Arc<Compiled>,
+    info: WorldInfo,
+    palette: Arc<dyn Palette>,
+    cells: Cells,
+}
+
+impl World {
+    /// A new instance, opened for the world.
+    pub fn worker(&self) -> Result<Worker, Failure> {
+        let (store, exports, opened) = instance(&self.0, 0)?;
+        let section = &self.0.compiled.section;
         let mut stages = Vec::new();
-        for s in contribution.stages.into_iter().map(stage) {
-            if !self.section.stages.contains(&s) {
+        for s in opened.into_iter().map(stage) {
+            if !section.stages.contains(&s) {
                 return Err(Failure::Refused(format!(
                     "open names stage {}, missing from the manifest's worldgen.stages",
                     s.name()
@@ -186,7 +213,8 @@ impl WorldgenMod {
                 stages.push(s);
             }
         }
-        if stages.contains(&Stage::Terrain) && !self.section.presets.contains(&info.preset) {
+        let info = &self.0.info;
+        if stages.contains(&Stage::Terrain) && !section.presets.contains(&info.preset) {
             return Err(Failure::Refused(format!(
                 "open names stage terrain for preset {}, not one of the manifest's worldgen.presets",
                 info.preset
@@ -195,13 +223,216 @@ impl WorldgenMod {
         Ok(Worker {
             store,
             exports,
-            info,
+            info: info.clone(),
             stages,
-            regions: self.section.regions.clone(),
-            namespaces: self.namespaces.clone(),
+            regions: section.regions.clone(),
+            namespaces: self.0.compiled.namespaces.clone(),
             stopped: None,
         })
     }
+    /// The bytes of cells the world keeps before it drops the least
+    /// recently used (512 MiB unless set).
+    pub fn set_shared_cap(&self, bytes: u64) {
+        self.0.cells.lock().cap = bytes;
+    }
+    pub fn shared_stats(&self) -> SharedStats {
+        let cells = self.0.cells.lock();
+        SharedStats {
+            cells: cells.map.len(),
+            bytes: cells.bytes,
+            ..cells.stats
+        }
+    }
+}
+
+/// An instance opened for `world`, `depth` builders down from a worker,
+/// with the stages its `open` named.
+fn instance(
+    world: &Arc<WorldShared>,
+    depth: usize,
+) -> Result<(Store<State>, HorizonWorldgenMod, Vec<WitStage>), Failure> {
+    let compiled = &world.compiled;
+    let state = State {
+        id: compiled.id.clone(),
+        palette: world.palette.clone(),
+        region: None,
+        logged: 0,
+        limits: StoreLimitsBuilder::new()
+            .memory_size(MEMORY)
+            .instances(16)
+            .build(),
+        world: world.clone(),
+        depth,
+        building: None,
+        builder: None,
+    };
+    let stopped = |e: wasmtime::Error| Failure::Stopped(crate::runtime::reason(&e));
+    let mut store = Store::new(&compiled.engine, state);
+    store.limiter(|s| &mut s.limits);
+    store.set_fuel(FUEL_OPEN).map_err(stopped)?;
+    let instance = compiled
+        .linker
+        .instantiate(&mut store, &compiled.component)
+        .map_err(stopped)?;
+    let exports = HorizonWorldgenMod::new(&mut store, &instance).map_err(stopped)?;
+    let contribution = exports
+        .horizon_mods_worldgen_events()
+        .call_open(&mut store, &world.info)
+        .map_err(stopped)?
+        .map_err(Failure::Refused)?;
+    Ok((store, exports, contribution.stages))
+}
+
+/// How a world's shared cells have been used.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SharedStats {
+    /// Cells built, found built, and waited for while another thread built.
+    pub builds: u64,
+    pub hits: u64,
+    pub waits: u64,
+    /// Cells dropped to stay under the cap.
+    pub evictions: u64,
+    /// What is kept now.
+    pub cells: usize,
+    pub bytes: u64,
+}
+
+/// A world's shared cells, by (layer, key): built once, then kept until
+/// the least recently used go to make room.
+struct Cells {
+    map: Mutex<CellMap>,
+    built: Condvar,
+}
+struct CellMap {
+    map: HashMap<(u8, String), Cell>,
+    bytes: u64,
+    cap: u64,
+    clock: u64,
+    stats: SharedStats,
+}
+enum Cell {
+    /// A thread is building it; the others wait.
+    Building,
+    Ready {
+        data: Arc<[u8]>,
+        used: u64,
+    },
+}
+enum Claim<'a> {
+    Ready(Arc<[u8]>),
+    /// The caller builds it, then hands it over with [`Ticket::finish`].
+    Build(Ticket<'a>),
+}
+
+impl Cells {
+    fn new(cap: u64) -> Cells {
+        Cells {
+            map: Mutex::new(CellMap {
+                map: HashMap::new(),
+                bytes: 0,
+                cap,
+                clock: 0,
+                stats: SharedStats::default(),
+            }),
+            built: Condvar::new(),
+        }
+    }
+    fn lock(&self) -> std::sync::MutexGuard<'_, CellMap> {
+        self.map.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// The cell, or the right to build it; waits while another thread does.
+    fn claim(&self, layer: u8, key: &str) -> Claim<'_> {
+        let key = (layer, key.to_string());
+        let mut cells = self.lock();
+        let mut waited = false;
+        loop {
+            cells.clock += 1;
+            let now = cells.clock;
+            match cells.map.get_mut(&key) {
+                Some(Cell::Ready { data, used }) => {
+                    *used = now;
+                    let data = data.clone();
+                    if !waited {
+                        cells.stats.hits += 1;
+                    }
+                    return Claim::Ready(data);
+                }
+                Some(Cell::Building) => {
+                    if !waited {
+                        cells.stats.waits += 1;
+                        waited = true;
+                    }
+                    cells = self.built.wait(cells).unwrap_or_else(|e| e.into_inner());
+                }
+                None => {
+                    cells.map.insert(key.clone(), Cell::Building);
+                    cells.stats.builds += 1;
+                    return Claim::Build(Ticket {
+                        cells: self,
+                        key: Some(key),
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// The right to build one cell. Dropped unfinished (the build failed), it
+/// lets a waiting thread try.
+struct Ticket<'a> {
+    cells: &'a Cells,
+    key: Option<(u8, String)>,
+}
+impl Ticket<'_> {
+    fn finish(mut self, data: Option<Arc<[u8]>>) {
+        let Some(key) = self.key.take() else { return };
+        let mut cells = self.cells.lock();
+        match data {
+            None => {
+                cells.map.remove(&key);
+            }
+            Some(data) => {
+                cells.clock += 1;
+                let used = cells.clock;
+                cells.bytes += data.len() as u64;
+                cells.map.insert(key, Cell::Ready { data, used });
+                while cells.bytes > cells.cap {
+                    let oldest = cells
+                        .map
+                        .iter()
+                        .filter_map(|(k, c)| match c {
+                            Cell::Ready { used, .. } => Some((*used, k.clone())),
+                            Cell::Building => None,
+                        })
+                        .min();
+                    let Some((_, k)) = oldest else { break };
+                    if let Some(Cell::Ready { data, .. }) = cells.map.remove(&k) {
+                        cells.bytes -= data.len() as u64;
+                        cells.stats.evictions += 1;
+                    }
+                }
+            }
+        }
+        drop(cells);
+        self.cells.built.notify_all();
+    }
+}
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        if self.key.is_some() {
+            let ticket = Ticket {
+                cells: self.cells,
+                key: self.key.take(),
+            };
+            ticket.finish(None);
+        }
+    }
+}
+
+/// An instance that builds cells for the instance above it.
+struct Builder {
+    store: Store<State>,
+    exports: HorizonWorldgenMod,
 }
 
 /// One instance of a world-generation mod, for one generation thread.
@@ -545,6 +776,52 @@ struct State {
     region: Option<Arc<dyn Region>>,
     logged: u32,
     limits: StoreLimits,
+    world: Arc<WorldShared>,
+    /// Builders between this instance and a worker.
+    depth: usize,
+    /// The layer this builder instance is building now.
+    building: Option<u8>,
+    /// The instance that builds the cells this one asks for, made on the
+    /// first one it lacks.
+    builder: Option<Box<Builder>>,
+}
+
+impl State {
+    /// Builds a cell on this instance's builder, with the build budget.
+    fn build(&mut self, layer: u8, key: &str) -> Result<Vec<u8>, String> {
+        let at = format!("building cell {layer}/{key}");
+        if self.depth >= MAX_DEPTH {
+            return Err(format!("{at}: cells nest more than {MAX_DEPTH} deep"));
+        }
+        if self.builder.is_none() {
+            let (store, exports, _) =
+                instance(&self.world, self.depth + 1).map_err(|e| match e {
+                    Failure::Refused(why) | Failure::Stopped(why) => format!("{at}: {why}"),
+                })?;
+            self.builder = Some(Box::new(Builder { store, exports }));
+        }
+        let b = self.builder.as_mut().expect("made above");
+        b.store.data_mut().building = Some(layer);
+        b.store.data_mut().logged = 0;
+        let result = b.store.set_fuel(FUEL_BUILD).and_then(|()| {
+            b.exports
+                .horizon_mods_worldgen_events()
+                .call_build_shared(&mut b.store, layer, key)
+        });
+        b.store.data_mut().building = None;
+        match result {
+            Ok(Ok(bytes)) if bytes.len() > CELL_MAX => {
+                Err(format!("{at}: {} bytes, at most {CELL_MAX}", bytes.len()))
+            }
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(e)) => Err(format!("{at}: {e}")),
+            Err(e) => {
+                // A builder that trapped is not reused.
+                self.builder = None;
+                Err(format!("{at}: {}", crate::runtime::reason(&e)))
+            }
+        }
+    }
 }
 
 impl mod_log::Host for State {
@@ -576,5 +853,26 @@ impl worldgen::Host for State {
     }
     fn region_height(&mut self, x: i32, z: i32, surface: bool) -> Option<i32> {
         self.region.as_ref()?.height(x, z, surface)
+    }
+    fn shared(&mut self, layer: u8, key: String) -> Result<Vec<u8>, String> {
+        if key.len() > SHARED_KEY {
+            return Err(format!("shared: a key is at most {SHARED_KEY} bytes"));
+        }
+        if let Some(building) = self.building
+            && layer <= building
+        {
+            return Err(format!(
+                "shared: a build of layer {building} may read only coarser layers, not {layer}"
+            ));
+        }
+        let world = self.world.clone();
+        match world.cells.claim(layer, &key) {
+            Claim::Ready(data) => Ok(data.to_vec()),
+            Claim::Build(ticket) => {
+                let built = self.build(layer, &key);
+                ticket.finish(built.as_ref().ok().map(|b| Arc::from(b.as_slice())));
+                built
+            }
+        }
     }
 }

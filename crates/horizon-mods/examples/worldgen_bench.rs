@@ -6,10 +6,12 @@
 //!
 //! worldgen_bench <mod.hmod or folder> [--preset ID] [--seed S] [--settings JSON]
 //!     [--threads T] [--size N] [--center CX CZ] [--min-y Y] [--height H]
-//!     [--sea-level Y] [--verify]
+//!     [--sea-level Y] [--shared-mib M] [--verify]
 //!
-//! `--verify` generates the square again on one thread and checks that every
-//! chunk's land is the same: the determinism contract.
+//! `--verify` generates the square again on one thread, in a world of its
+//! own (its shared cells built again), and checks that every chunk's land
+//! is the same: the determinism contract. `--shared-mib` caps the world's
+//! shared cells (512 MiB by default).
 use horizon_mods::{
     Package,
     worldgen_runtime::{Failure, Land, Palette, WorldInfo, WorldgenMod},
@@ -108,10 +110,15 @@ fn main() -> Result<(), Error> {
         .map(|i| (cx - size / 2 + i % size, cz - size / 2 + i / size))
         .collect();
 
-    // Open every worker first: `open` is per world, not per chunk.
+    // One world, whose workers share the mod's cells; every worker opened
+    // first: `open` is per world, not per chunk.
+    let world = m.world(info.clone(), palette.clone());
+    if let Some(mib) = opt("--shared-mib") {
+        world.set_shared_cap(mib.parse::<u64>()? << 20);
+    }
     let opened = Instant::now();
     let workers = (0..threads)
-        .map(|_| m.worker(info.clone(), palette.clone()))
+        .map(|_| world.worker())
         .collect::<Result<Vec<_>, Failure>>()
         .map_err(|e| format!("open: {e:?}"))?;
     println!("{threads} workers opened in {:.2?}", opened.elapsed());
@@ -149,8 +156,21 @@ fn main() -> Result<(), Error> {
     if failures.len() > 5 {
         println!("  ... {} failures in all", failures.len());
     }
+    let cells = world.shared_stats();
+    if cells.builds > 0 {
+        println!(
+            "shared cells: {} built, {} found built, {} waited for, {} dropped; {} kept, {:.1} MiB",
+            cells.builds,
+            cells.hits,
+            cells.waits,
+            cells.evictions,
+            cells.cells,
+            cells.bytes as f64 / (1 << 20) as f64
+        );
+    }
 
     if args.iter().any(|a| a == "--verify") {
+        // A world of its own: its cells are built again, from nothing.
         let mut w = m
             .worker(info.clone(), palette.clone())
             .map_err(|e| format!("open: {e:?}"))?;

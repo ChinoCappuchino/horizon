@@ -471,7 +471,7 @@ pub mod worldgen {
         BiomeRequest, BlockEdit, Climate, Column, ColumnPos, Contribution, Guest as __Guest, Land,
         Piece, Rotation, Run, Stage, Step, StructureStart, TemplatePiece, WorldInfo,
     };
-    pub use horizon::mods::worldgen::{biome_id, region_block, region_height, state_id};
+    pub use horizon::mods::worldgen::{biome_id, region_block, region_height, shared, state_id};
 
     /// The biome number that keeps what the next mod or vanilla puts there.
     pub const KEEP_BIOME: u32 = u32::MAX;
@@ -512,6 +512,12 @@ pub mod worldgen {
         /// The manifest's regions the chunk lies in.
         fn regions(&mut self, _chunk_x: i32, _chunk_z: i32) -> Result<Vec<String>, String> {
             Ok(Vec::new())
+        }
+        /// A shared cell [`shared`] asked for and the game lacks: its bytes,
+        /// from the world and coarser cells alone (called on a builder
+        /// instance, opened like the others).
+        fn build_shared(&mut self, _layer: u8, _key: &str) -> Result<Vec<u8>, String> {
+            Err("no shared cells".into())
         }
     }
 }
@@ -564,6 +570,9 @@ macro_rules! export_worldgen_mod {
                 }
                 fn regions(chunk_x: i32, chunk_z: i32) -> Result<Vec<String>, String> {
                     with(|m| m.regions(chunk_x, chunk_z))
+                }
+                fn build_shared(layer: u8, key: String) -> Result<Vec<u8>, String> {
+                    with(|m| m.build_shared(layer, &key))
                 }
             }
             #[cfg(target_arch = "wasm32")]

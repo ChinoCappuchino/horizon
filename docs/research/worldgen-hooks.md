@@ -125,7 +125,7 @@ the contract, the code that holds mods to it, and the tests.
 
 **Version.** An experimental capability on the server-mod line (`api = "0.3"`, `side =
 "server"`, `experimental = ["worldgen"]`): additive, so nothing upstream changes meaning. Its
-four imported functions are API level 8, a number upstream may later give to something else;
+first four imported functions are API level 8 and `shared` level 9, numbers upstream may later give to something else;
 the fork renumbers if it ever merges upstream's level 8.
 
 **The stages as calls.** `open(world-info)` once per instance, then per chunk:
@@ -152,6 +152,20 @@ call of the same instance: the re-entrancy behind Farview's "Runs must ascend" c
 [farview-spec.md](farview-spec.md)) can't happen in this model, and if a port still sends
 runs that don't ascend, the game refuses that chunk's answer with the column named, instead of
 crashing.
+
+**Shared cells** (API level 9, asked for by FarView's port: its regional maps are per region,
+built on demand, unbounded, 10 to 15 layers from about 128 blocks to 16 km). `shared(layer, key)`
+returns a cell's bytes, the same for every instance of the world (`WorldgenMod::world`, then
+`World::worker` per thread). A cell the world lacks is built once by the mod's
+`build-shared(layer, key)` on a builder instance, with its own budget (5 × 10¹⁰ fuel; a coarse
+drainage cell takes about 2 s in Java). Another thread that asks for it meanwhile waits for that
+build rather than starting its own. Inside a build of layer L only layers above L may be read, so
+builds have no cycles and can't deadlock (FarView's halos are recomputed from coarser layers,
+never read from finished neighbours). A world keeps up to 512 MiB of cells and drops the least
+recently used past that; a dropped cell is rebuilt, identical by determinism. A cell is at most
+64 MiB, a key 256 bytes. A failed or crashing build refuses the chunk that needed it; the
+instance goes on (a crashed builder is replaced). Instances keep their own copies of the cells
+they fetched, as FarView keeps whole cells and interpolates inside them.
 
 **Failures.** An `err`, or an answer that breaks the rules above, is *refused*: that chunk goes
 without the mod's part, and the report will count it (M4). A trap or a call over its budget

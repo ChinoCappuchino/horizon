@@ -9,7 +9,7 @@ use horizon_mods::{
     worldgen::{Candidate, Contributor, Decision, Place, Plan, Rules, Stage},
     worldgen_runtime::{
         BiomeRequest, BlockEdit, Climate, ColumnPos, Failure, Land, Palette, Piece, Region, Step,
-        WorldInfo, WorldgenMod,
+        World, WorldInfo, WorldgenMod,
     },
 };
 use std::{
@@ -424,4 +424,116 @@ fn its_regions_decide_its_claims() {
             "| test_worldgen/camp_sites | structures | reserve | region:camps | * | 10 |"
         )
     );
+}
+
+fn cells_world(m: &WorldgenMod, settings: &str) -> World {
+    m.world(
+        info("test_worldgen:hills", settings, 42),
+        Arc::new(TestPalette),
+    )
+}
+
+/// The chunks of a square, `size` across from (0, 0).
+fn square(size: i32) -> Vec<(i32, i32)> {
+    (0..size * size).map(|i| (i % size, i / size)).collect()
+}
+
+/// Every worker of a world reads the same cells, each built once even
+/// when eight threads ask for it at the same moment.
+#[test]
+fn shared_cells_are_built_once_for_every_worker() {
+    let m = hills();
+    let world = cells_world(&m, "cells");
+    // 8 x 8 chunks: 2 x 2 regions of 64 blocks (layer 0) in one super-region (layer 1).
+    let chunks = square(8);
+    let lands: Vec<Vec<Land>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let world = world.clone();
+                let chunks = &chunks;
+                s.spawn(move || {
+                    let mut w = world.worker().unwrap();
+                    chunks
+                        .iter()
+                        .map(|&(x, z)| w.terrain(x, z).unwrap())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(lands.iter().all(|l| *l == lands[0]));
+    let stats = world.shared_stats();
+    assert_eq!(
+        (stats.builds, stats.cells, stats.evictions),
+        (5, 5, 0),
+        "{stats:?}"
+    );
+    assert_eq!(stats.bytes, 4 * 1024 + 8);
+    // A world of its own builds the same cells, and the same land.
+    let mut alone = m
+        .worker(
+            info("test_worldgen:hills", "cells", 42),
+            Arc::new(TestPalette),
+        )
+        .unwrap();
+    let again: Vec<Land> = chunks
+        .iter()
+        .map(|&(x, z)| alone.terrain(x, z).unwrap())
+        .collect();
+    assert_eq!(again, lands[0]);
+    // The heights read the same cells.
+    let Land::Columns(columns) = &lands[0][0] else {
+        panic!("columns")
+    };
+    let h = alone.heights(&[ColumnPos { x: 0, z: 0 }]).unwrap();
+    assert_eq!(h[0], columns[0].runs.last().unwrap().top + 1);
+}
+
+/// Over its cap a world drops the cells used longest ago; one asked for
+/// again is built again, the same.
+#[test]
+fn cells_over_the_cap_are_dropped_and_built_again_the_same() {
+    let m = hills();
+    let world = cells_world(&m, "cells");
+    world.set_shared_cap(3 * 1024);
+    let mut w = world.worker().unwrap();
+    let first = w.terrain(0, 0).unwrap();
+    // 8 regions along x: far more than three 1 KiB cells.
+    for x in 0..32 {
+        w.terrain(x * 4, 0).unwrap();
+    }
+    let stats = world.shared_stats();
+    assert!(stats.evictions > 0 && stats.bytes <= 3 * 1024, "{stats:?}");
+    // A fresh worker has no copy of its own: it asks the world again.
+    let mut fresh = world.worker().unwrap();
+    assert_eq!(fresh.terrain(0, 0).unwrap(), first);
+}
+
+/// A build reads only coarser layers; a failed or panicking build costs
+/// the chunk, not the mod.
+#[test]
+fn a_bad_build_costs_the_chunk_only() {
+    let m = hills();
+    for (settings, why) in [
+        (
+            "cells samelayer",
+            "a build of layer 0 may read only coarser layers, not 0",
+        ),
+        ("cells badcell", "building cell 0/0,0: asked to fail"),
+        (
+            "cells cellcrash",
+            "building cell 0/0,0: it crashed (a panic)",
+        ),
+    ] {
+        let world = cells_world(&m, settings);
+        let mut w = world.worker().unwrap();
+        for _ in 0..2 {
+            let got = refused(w.terrain(0, 0));
+            assert!(got.contains(why), "{settings}: {got}");
+        }
+        assert_eq!(w.stopped(), None, "{settings}");
+        // Each fails before it reads layer 1; a failed cell is never kept.
+        assert_eq!(world.shared_stats().cells, 0, "{settings}");
+    }
 }
