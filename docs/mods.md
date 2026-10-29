@@ -466,6 +466,38 @@ none.
     "top": "carve", "bottom": "none", "rigid_junctions": true, "inflate": true } }
 ```
 
+#### Blocks with their own states (fork `afterwinter`)
+
+A block can declare its own states instead of copying its template's: the
+template then gives every state's other facts (behaviour, sounds, hardness,
+drops) from its default state, and `properties` still apply.
+
+```json
+{ "template": "minecraft:stone",
+  "states": {
+    "properties": { "facing": ["north", "south", "west", "east"],
+                    "support": ["none", "tray", "handle"],
+                    "servings": { "integer": [0, 4] } },
+    "default": { "facing": "north" },
+    "shapes": [
+      { "when": { "support": "tray" },
+        "outline": [[2, 0, 2, 14, 10, 14], [0, -1, 0, 16, 0, 16]] },
+      { "outline": [[2, 0, 2, 14, 10, 14]], "occludes": false } ] } }
+```
+
+States go as Minecraft's `StateDefinition` makes them: properties by name,
+the last one changing fastest, values in their listed order; a property the
+`default` does not name has its first value. A state takes the first shape
+rule whose `when` it matches (`{"facing": ["north", "south"]}` matches
+either); a state no rule matches keeps the template's shapes. Boxes are in
+sixteenths, as `Block.box`: `outline` is what the cursor shows, `collision`
+(the outline if not given) what entities hit, and `occludes` (by default
+only for a full cube) whether it hides touching faces and blocks light.
+Rotating and mirroring a structure turn `north`/`east`/`south`/`west`
+values and swap `axis` `x`/`z`. Give the block its own
+`assets/<ns>/blockstates/<path>.json` for these properties; without one
+every state uses the template's model. At most 4096 states a block.
+
 #### Villager professions (fork `afterwinter`)
 
 Professions and their job sites are registries, not a fixed list: the
