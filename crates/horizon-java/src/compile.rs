@@ -43,7 +43,8 @@
 //! fields).
 //!
 //! Each method is exported as `<class>.<name><descriptor>`, each lambda as
-//! `lambda <n>` and each class's allocator as `new <class>`.
+//! `lambda <n>`, each class's allocator as `new <class>`, and each static
+//! field's getter and setter as `get <class>.<field>` and `set ...`.
 use crate::{
     ClassFile, Constant,
     bytecode::{Instruction, Operand, decode},
@@ -831,6 +832,31 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
             }
             Err(_) => functions.push((alloc_ty, Vec::new(), vec![W::Unreachable, W::End])),
         }
+    }
+    // Each static field's getter and setter (`get <class>.<field>`, `set
+    // ...`), for other jars: their class is initialized first.
+    let statics: Vec<((String, String), (u32, Kind))> =
+        plan.statics.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    for ((owner, field), (g, kind)) in statics {
+        let getter = plan.type_index(Vec::new(), vec![val(kind)]);
+        exports.push((format!("get {owner}.{field}"), functions.len() as u32));
+        functions.push((
+            getter,
+            Vec::new(),
+            vec![W::Call(plan.ensure[&owner]), W::GlobalGet(g), W::End],
+        ));
+        let setter = plan.type_index(vec![val(kind)], Vec::new());
+        exports.push((format!("set {owner}.{field}"), functions.len() as u32));
+        functions.push((
+            setter,
+            Vec::new(),
+            vec![
+                W::Call(plan.ensure[&owner]),
+                W::LocalGet(0),
+                W::GlobalSet(g),
+                W::End,
+            ],
+        ));
     }
     // The lambdas: closure and arguments in, the target method called.
     let sites = plan.sites.borrow().len();

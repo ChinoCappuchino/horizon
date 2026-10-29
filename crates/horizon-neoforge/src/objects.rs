@@ -46,8 +46,57 @@ pub enum Obj {
     Iter(Mutex<(Vec<Value>, usize)>),
     /// A map entry.
     Entry(Value, Value),
+    /// An event bus (`mod`, `game`).
+    Bus(String),
+    /// `ModConfigSpec.Builder`.
+    ConfigBuilder,
+    /// A config value: its default (the config files are not read here).
+    ConfigValue(Value),
+    /// `Pair.of(a, b)`.
+    Pair(Value, Value),
+    /// A sound event, by id.
+    Sound(String),
+    /// A villager profession: the game's by id, or one a mod makes.
+    Profession(Arc<Profession>),
+    /// A POI type a mod makes: its states, tickets and range.
+    Poi {
+        states: Value,
+        tickets: i32,
+        range: i32,
+    },
+    /// `ItemCost` and `ItemStack`: an item (by id) and a count.
+    Stack(String, i32),
+    /// `MerchantOffer`.
+    Offer(Offer),
+    /// An event the layer fires: its class (simple name) and what it holds.
+    Event(String, Vec<Value>),
+    /// A template pool, by id: what mods add to its elements.
+    Pool(String, Value),
+    /// SinglePoolElement.single's `Function<Projection, element>`.
+    PoolFn(String, String, bool),
+    /// A pool element: location, processors, legacy.
+    PoolElement(String, String, bool),
     /// What the layer does not model: a placeholder, named for the log.
     Opaque(String),
+}
+
+pub struct Profession {
+    pub id: Mutex<Option<String>>,
+    pub name: String,
+    /// `heldJobSite`: a predicate on POI type holders.
+    pub held: Value,
+    pub requested: Value,
+    pub sound: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Offer {
+    pub wants: (String, i32),
+    pub also_wants: Option<(String, i32)>,
+    pub gives: (String, i32),
+    pub max_uses: i32,
+    pub xp: i32,
+    pub price_multiplier: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

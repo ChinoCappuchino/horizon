@@ -34,7 +34,7 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "usage: horizon-port-pack import <pack> <work> | inventory <work> [--offline] | fetch <work> [--from <folder>] [<mod id>...] | carry <work> [--resources <prepared>] [<mod id>...] | report <work> | check <jar> <out> | port <pack> <work> [--from <folder>] [--resources <prepared>]";
+const USAGE: &str = "usage: horizon-port-pack import <pack> <work> | inventory <work> [--offline] | fetch <work> [--from <folder>] [<mod id>...] | carry <work> [--resources <prepared>] [<mod id>...] | translate <work> --resources <prepared> [<mod id>...] | report <work> | check <jar> <out> | port <pack> <work> [--from <folder>] [--resources <prepared>]";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,6 +63,10 @@ fn main() -> ExitCode {
             }
             Some("carry") => {
                 pipeline::carry(path(1)?, resources.as_deref(), &rest(), log).map(drop)
+            }
+            Some("translate") => {
+                let resources = resources.ok_or("translate needs --resources PREPARED")?;
+                pipeline::translate(path(1)?, &resources, &rest(), log).map(drop)
             }
             Some("report") => {
                 let work = path(1)?;

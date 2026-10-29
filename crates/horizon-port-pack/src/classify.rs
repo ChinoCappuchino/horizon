@@ -137,7 +137,11 @@ pub fn rules(f: &Facts) -> (&'static str, &'static str, &'static str) {
     // No categories (a mod not on Modrinth, or not found by hash): the jar itself still says
     // whether it adds content. Code that patches the game with Mixins needs new hooks: deep.
     if f.classes.is_some_and(|n| n > 0) && (f.has_content || f.has_worldgen) {
-        return ("content", if f.has_mixins { "deep" } else { "logic" }, "jar");
+        return (
+            "content",
+            if f.has_mixins { "deep" } else { "logic" },
+            "jar",
+        );
     }
     ("unknown", "none", "unknown")
 }

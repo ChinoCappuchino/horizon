@@ -10,7 +10,7 @@ pub mod objects;
 pub mod translate;
 
 pub use game::GameData;
-pub use translate::{Translation, translate, write};
+pub use translate::{Translation, translate, translate_all, write};
 
 /// The classes of a jar.
 pub fn read_jar(path: &std::path::Path) -> Result<Vec<horizon_java::ClassFile>, String> {

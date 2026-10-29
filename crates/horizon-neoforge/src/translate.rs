@@ -1,13 +1,14 @@
-//! A NeoForge mod's content, from its own jar: the layer runs the mod's
-//! constructor and its registers as NeoForge would, then asks each block
-//! for its states, shapes and light, and writes what it registered as a
-//! Horizon content mod's declarations (docs/mods.md, "Blocks with their own
-//! states").
+//! NeoForge mods' content, from their own jars: the layer runs the mods'
+//! constructors and registers as NeoForge would, asks each block for its
+//! states, shapes and light, fires the events that make content when the
+//! game loads (config, setup, villager trades, server start), and writes it
+//! all as Horizon content mods (docs/mods.md): block and item declarations,
+//! POI types and professions, trades, and template pool additions.
 use crate::{game::GameData, host::NeoForge, objects::*};
 use horizon_java::{
     ClassFile,
     classfile::ElementValue,
-    compile::compile,
+    compile::{Object, compile},
     descriptor::Method,
     runtime::{Context, Runtime, Value},
 };
@@ -20,13 +21,15 @@ use std::{
 };
 use wasmtime::Result;
 
-/// What a mod registered, as content declarations.
+/// What a mod registered, as content.
 #[derive(Default)]
 pub struct Translation {
     pub mod_id: String,
     /// Block id and its `data/<ns>/horizon/block/<path>.json`.
     pub blocks: Vec<(String, Json)>,
     pub items: Vec<(String, Json)>,
+    /// Other data files, by path in the content mod (`data/...`).
+    pub files: Vec<(String, Json)>,
     /// Calls the layer does not model, and how often.
     pub unknown: BTreeMap<String, usize>,
     /// Entries that failed to register, with why.
@@ -37,53 +40,109 @@ pub struct Translation {
 
 const SHAPE: &str = "(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/phys/shapes/CollisionContext;)Lnet/minecraft/world/phys/shapes/VoxelShape;";
 
+const GAME_PROFESSIONS: [&str; 15] = [
+    "none",
+    "armorer",
+    "butcher",
+    "cartographer",
+    "cleric",
+    "farmer",
+    "fisherman",
+    "fletcher",
+    "leatherworker",
+    "librarian",
+    "mason",
+    "nitwit",
+    "shepherd",
+    "toolsmith",
+    "weaponsmith",
+];
+
 /// Translates a mod's classes against the game data of a prepared root.
 pub fn translate(classes: &[ClassFile], game: Arc<GameData>) -> Result<Translation> {
-    let compiled = compile(classes).map_err(wasmtime::Error::msg)?;
-    let skipped = compiled.skipped.len();
-    let host = Rc::new(NeoForge::new(game.clone()));
-    let mut rt = Runtime::new(compiled, host.clone())?;
-    let mut cx = rt.context();
-    let mut t = Translation {
-        skipped,
-        ..Translation::default()
-    };
+    let mut all = translate_all(&[classes.to_vec()], game)?;
+    Ok(all.remove(0))
+}
 
-    // 1. The @Mod classes that run on a server, constructed.
-    for class in classes {
-        let name = class.name()?.to_owned();
-        for a in class.annotations() {
-            if a.type_descriptor != "Lnet/neoforged/fml/common/Mod;" {
-                continue;
-            }
-            let client_only = a.values.iter().any(|(k, v)| {
-                k == "dist"
-                    && matches!(v, ElementValue::Array(vs) if vs.iter().all(|x| matches!(x, ElementValue::Enum { name, .. } if name == "CLIENT")))
-            });
-            if client_only {
-                continue;
-            }
-            for (k, v) in &a.values {
-                if k == "value"
-                    && let ElementValue::Const(_, i) = v
-                    && let Ok(id) = class.utf8(*i)
-                {
-                    t.mod_id = id.to_owned();
+/// A static method that subscribes to an event, or an object's.
+struct Subscriber {
+    jar: usize,
+    class: String,
+    method: String,
+    desc: String,
+    is_static: bool,
+}
+
+/// Translates mods that run together (a mod after the mods it needs), one
+/// translation each, in order.
+pub fn translate_all(jars: &[Vec<ClassFile>], game: Arc<GameData>) -> Result<Vec<Translation>> {
+    let mut compiled = Vec::new();
+    let mut out = Vec::new();
+    for classes in jars {
+        let c = compile(classes).map_err(wasmtime::Error::msg)?;
+        out.push(Translation {
+            skipped: c.skipped.len(),
+            ..Translation::default()
+        });
+        compiled.push(c);
+    }
+    let host = Rc::new(NeoForge::new(game.clone()));
+    let mut rt = Runtime::link(compiled, host.clone())?;
+    let mut cx = rt.context();
+    let mod_bus = obj(Obj::Bus("mod".into()));
+    let mut errors: Vec<String> = Vec::new();
+
+    // 1. The @Mod classes that run on a server, constructed; the event
+    // subscribers' static methods.
+    let mut subscribers = Vec::new();
+    for (jar, classes) in jars.iter().enumerate() {
+        for class in classes {
+            let name = class.name()?.to_owned();
+            for a in class.annotations() {
+                match a.type_descriptor.as_str() {
+                    "Lnet/neoforged/fml/common/EventBusSubscriber;" => {
+                        subscribers.extend(subscribed(jar, class, true));
+                    }
+                    "Lnet/neoforged/fml/common/Mod;" => {
+                        let client_only = a.values.iter().any(|(k, v)| {
+                            k == "dist"
+                                && matches!(v, ElementValue::Array(vs) if vs.iter().all(|x| matches!(x, ElementValue::Enum { name, .. } if name == "CLIENT")))
+                        });
+                        if client_only {
+                            continue;
+                        }
+                        for (k, v) in &a.values {
+                            if k == "value"
+                                && let ElementValue::Const(_, i) = v
+                                && let Ok(id) = class.utf8(*i)
+                            {
+                                out[jar].mod_id = id.to_owned();
+                            }
+                        }
+                        let Some(init) = class.methods.iter().find(|m| m.name == "<init>") else {
+                            continue;
+                        };
+                        let made = cx.in_jar(jar, |cx| -> Result<()> {
+                            let object = cx.call(&format!("new {name}"), &[])?;
+                            let mut args = vec![object];
+                            for p in Method::parse(&init.descriptor)
+                                .map(|m| m.params)
+                                .unwrap_or_default()
+                            {
+                                args.push(match p.as_str() {
+                                    "Lnet/neoforged/bus/api/IEventBus;" => mod_bus.clone(),
+                                    _ => opaque(p),
+                                });
+                            }
+                            cx.call(&format!("{name}.<init>{}", init.descriptor), &args)?;
+                            Ok(())
+                        });
+                        if let Err(e) = made {
+                            errors.push(format!("{name}: constructor: {e:#}"));
+                        }
+                    }
+                    _ => {}
                 }
-            }
-            let Some(init) = class.methods.iter().find(|m| m.name == "<init>") else {
-                continue;
-            };
-            let object = cx.call(&format!("new {name}"), &[])?;
-            let mut args = vec![object];
-            for p in Method::parse(&init.descriptor)
-                .map(|m| m.params)
-                .unwrap_or_default()
-            {
-                args.push(opaque(p));
-            }
-            if let Err(e) = cx.call(&format!("{name}.<init>{}", init.descriptor), &args) {
-                t.errors.push(format!("{name}: constructor: {e:#}"));
             }
         }
     }
@@ -102,6 +161,8 @@ pub fn translate(classes: &[ClassFile], game: Arc<GameData>) -> Result<Translati
     sorted.sort_by_key(|r| order(&r.registry));
     let mut blocks = Vec::new();
     let mut items = Vec::new();
+    let mut pois = Vec::new();
+    let mut professions = Vec::new();
     for r in sorted {
         let entries = r.entries.lock().unwrap().clone();
         for h in entries {
@@ -109,9 +170,11 @@ pub fn translate(classes: &[ClassFile], game: Arc<GameData>) -> Result<Translati
                 Ok(v) => match r.registry.as_str() {
                     "block" => blocks.push((h.id.clone(), v)),
                     "item" => items.push((h.id.clone(), v)),
+                    "point_of_interest_type" => pois.push((h.clone(), v)),
+                    "villager_profession" => professions.push((h.id.clone(), v)),
                     _ => {}
                 },
-                Err(e) => t.errors.push(format!("{}: {e:#}", h.id)),
+                Err(e) => errors.push(format!("{}: {e:#}", h.id)),
             }
         }
     }
@@ -131,10 +194,15 @@ pub fn translate(classes: &[ClassFile], game: Arc<GameData>) -> Result<Translati
             }
         }
     }
+    let by_ns = |id: &str| -> usize {
+        let ns = id.split_once(':').map_or("", |x| x.0);
+        out.iter().position(|t| t.mod_id == ns).unwrap_or(0)
+    };
+    let mut decls: Vec<(usize, &str, String, Json)> = Vec::new();
     for (id, v) in &blocks {
         let peer = peer_of(&mut cx, v);
         let Some(Obj::Block(b)) = get(&peer) else {
-            t.errors.push(format!("{id}: not a block"));
+            errors.push(format!("{id}: not a block"));
             continue;
         };
         let has_item = item_blocks.get(id) == Some(id);
@@ -150,9 +218,9 @@ pub fn translate(classes: &[ClassFile], game: Arc<GameData>) -> Result<Translati
                         decl["item_components"] = comps;
                     }
                 }
-                t.blocks.push((id.clone(), decl))
+                decls.push((by_ns(id), "block", id.clone(), decl));
             }
-            Err(e) => t.errors.push(format!("{id}: {e:#}")),
+            Err(e) => errors.push(format!("{id}: {e:#}")),
         }
     }
     // 4. Items that are not their block's item.
@@ -162,17 +230,403 @@ pub fn translate(classes: &[ClassFile], game: Arc<GameData>) -> Result<Translati
         }
         let peer = peer_of(&mut cx, v);
         let Some(Obj::Item(i)) = get(&peer) else {
-            t.errors.push(format!("{id}: not an item"));
+            errors.push(format!("{id}: not an item"));
             continue;
         };
         let mut decl = item(i);
         if let Some(block) = item_blocks.get(id) {
             decl["places"] = json!(block);
         }
-        t.items.push((id.clone(), decl));
+        decls.push((by_ns(id), "item", id.clone(), decl));
     }
-    t.unknown = host.state.borrow().unknown.clone();
-    Ok(t)
+    for (jar, kind, id, decl) in decls {
+        match kind {
+            "block" => out[jar].blocks.push((id, decl)),
+            _ => out[jar].items.push((id, decl)),
+        }
+    }
+
+    // 5. The events that make content as the game loads.
+    let mut files: Vec<(String, Json)> = Vec::new();
+    let fire = |cx: &mut Context<'_>, events: &[&str], event: &Value, errors: &mut Vec<String>| {
+        fire_event(&host, cx, jars, &subscribers, events, event, errors)
+    };
+    let loading = opaque("ModConfigEvent.Loading");
+    fire(
+        &mut cx,
+        &[
+            "Lnet/neoforged/fml/event/config/ModConfigEvent$Loading;",
+            "Lnet/neoforged/fml/event/config/ModConfigEvent;",
+        ],
+        &loading,
+        &mut errors,
+    );
+    let setup = opaque("FMLCommonSetupEvent");
+    fire(
+        &mut cx,
+        &["Lnet/neoforged/fml/event/lifecycle/FMLCommonSetupEvent;"],
+        &setup,
+        &mut errors,
+    );
+
+    // POI types and professions, to the game's registries.
+    for (h, v) in &pois {
+        if let Some(Obj::Poi {
+            states,
+            tickets,
+            range,
+        }) = get(v)
+        {
+            let mut blocks: Vec<String> = Vec::new();
+            let list = match get(states) {
+                Some(Obj::List(l)) => l.lock().unwrap().clone(),
+                _ => Vec::new(),
+            };
+            for st in list {
+                if let Some(Obj::State(d, _)) = get(&st) {
+                    let blk = d.block.lock().unwrap().clone().unwrap_or(Value::Null);
+                    if let Ok(id) = host.item_id(&mut cx, &blk)
+                        && !id.is_empty()
+                        && !blocks.contains(&id)
+                    {
+                        blocks.push(id);
+                    }
+                }
+            }
+            let (ns, path) = h.id.split_once(':').unwrap_or(("minecraft", &h.id));
+            files.push((
+                format!("data/{ns}/horizon/poi_type/{path}.json"),
+                json!({"blocks": blocks, "max_tickets": tickets, "valid_range": range}),
+            ));
+        }
+    }
+    let mut trade_professions: Vec<(String, Value)> = GAME_PROFESSIONS
+        .iter()
+        .map(|p| {
+            let id = format!("minecraft:{p}");
+            (id.clone(), host.game_profession(&id))
+        })
+        .collect();
+    for (id, v) in &professions {
+        let Some(Obj::Profession(p)) = get(v) else {
+            continue;
+        };
+        *p.id.lock().unwrap() = Some(id.clone());
+        trade_professions.push((id.clone(), v.clone()));
+        // Its job site: the POI type its heldJobSite accepts.
+        let mut job_site = None;
+        for (h, _) in &pois {
+            let holder = obj(Obj::Holder(h.clone()));
+            if let Ok(r) = host.invoke(&mut cx, &p.held, "test", "(Ljava/lang/Object;)Z", &[holder])
+                && int(&r).unwrap_or(0) != 0
+            {
+                job_site = Some(h.id.clone());
+                break;
+            }
+        }
+        let sound = match get(&p.sound) {
+            Some(Obj::Sound(s)) => Some(s.clone()),
+            Some(Obj::Holder(h)) => Some(h.id.clone()),
+            _ => None,
+        };
+        let requested: Vec<String> = match get(&p.requested) {
+            Some(Obj::List(l)) => {
+                let l = l.lock().unwrap().clone();
+                l.iter()
+                    .filter_map(|i| host.item_id(&mut cx, i).ok())
+                    .filter(|i| !i.is_empty())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
+        files.push((
+            format!("data/{ns}/horizon/villager_profession/{path}.json"),
+            json!({"job_site": job_site, "work_sound": sound, "requested_items": requested}),
+        ));
+    }
+
+    // VillagerTradesEvent for every profession: the offers each level gets.
+    for (pid, prof) in &trade_professions {
+        let levels: Vec<(i32, Value)> = (1..=5)
+            .map(|l| (l, obj(Obj::List(Mutex::new(Vec::new())))))
+            .collect();
+        let map = obj(Obj::Map(Mutex::new(
+            levels
+                .iter()
+                .map(|(l, v)| (obj(Obj::Boxed(Prim::Int(*l))), v.clone()))
+                .collect(),
+        )));
+        let event = obj(Obj::Event(
+            "VillagerTradesEvent".into(),
+            vec![prof.clone(), map],
+        ));
+        fire(
+            &mut cx,
+            &["Lnet/neoforged/neoforge/event/village/VillagerTradesEvent;"],
+            &event,
+            &mut errors,
+        );
+        let (pns, ppath) = pid.split_once(':').unwrap_or(("minecraft", pid));
+        for (level, list) in &levels {
+            let listings = match get(list) {
+                Some(Obj::List(l)) => l.lock().unwrap().clone(),
+                _ => Vec::new(),
+            };
+            if listings.is_empty() {
+                continue;
+            }
+            let mut tag = Vec::new();
+            for (n, listing) in listings.iter().enumerate() {
+                let made = host.invoke(
+                    &mut cx,
+                    listing,
+                    "getOffer",
+                    "(Lnet/minecraft/world/entity/Entity;Lnet/minecraft/util/RandomSource;)Lnet/minecraft/world/item/trading/MerchantOffer;",
+                    &[Value::Null, opaque("random")],
+                );
+                let offer = match made {
+                    Ok(v) => match get(&v) {
+                        Some(Obj::Offer(o)) => o.clone(),
+                        _ => continue,
+                    },
+                    Err(e) => {
+                        errors.push(format!("{pid} level {level} trade {n}: {e:#}"));
+                        continue;
+                    }
+                };
+                // A mod's profession's trades are its; one the mod adds to a
+                // game profession, in the namespace of the mod whose item it
+                // trades.
+                let ns = if pns != "minecraft" {
+                    pns.to_owned()
+                } else {
+                    [&offer.gives.0, &offer.wants.0]
+                        .iter()
+                        .filter_map(|i| i.split_once(':').map(|x| x.0))
+                        .find(|n| *n != "minecraft")
+                        .unwrap_or(pns)
+                        .to_owned()
+                };
+                let name = format!("{ppath}/{level}/{n}");
+                let stack = |(id, count): &(String, i32)| json!({"id": id, "count": count});
+                let mut trade = json!({
+                    "wants": stack(&offer.wants),
+                    "gives": stack(&offer.gives),
+                    "max_uses": offer.max_uses,
+                    "xp": offer.xp,
+                    "reputation_discount": offer.price_multiplier,
+                });
+                if let Some(b) = &offer.also_wants {
+                    trade["additional_wants"] = stack(b);
+                }
+                files.push((format!("data/{ns}/villager_trade/{name}.json"), trade));
+                tag.push(json!(format!("{ns}:{name}")));
+            }
+            if tag.is_empty() {
+                continue;
+            }
+            // The level's trade tag (the game's professions' own tags gain
+            // the mod's trades); a mod's profession gets its trade sets.
+            files.push((
+                format!("data/{pns}/tags/villager_trade/{ppath}/level_{level}.json"),
+                json!({"values": tag}),
+            ));
+            if pns != "minecraft" {
+                files.push((
+                    format!("data/{pns}/trade_set/{ppath}/level_{level}.json"),
+                    json!({
+                        "amount": 2,
+                        "random_sequence": format!("{pns}:trade_set/{ppath}/level_{level}"),
+                        "trades": format!("#{pns}:{ppath}/level_{level}"),
+                    }),
+                ));
+            }
+        }
+    }
+
+    // ServerAboutToStartEvent: what mods add to template pools.
+    let start = obj(Obj::Event("ServerAboutToStartEvent".into(), Vec::new()));
+    fire(
+        &mut cx,
+        &["Lnet/neoforged/neoforge/event/server/ServerAboutToStartEvent;"],
+        &start,
+        &mut errors,
+    );
+    for (pool, templates) in host.pools() {
+        let mut weights: BTreeMap<(String, String, bool), i64> = BTreeMap::new();
+        if let Some(Obj::List(l)) = get(&templates) {
+            for e in l.lock().unwrap().iter() {
+                if let Some(Obj::PoolElement(loc, proc_, legacy)) = get(e) {
+                    *weights
+                        .entry((loc.clone(), proc_.clone(), *legacy))
+                        .or_default() += 1;
+                }
+            }
+        }
+        let raw = host.state.borrow().raw_pools.get(&pool).cloned();
+        if let Some(Obj::List(l)) = raw.as_ref().and_then(get) {
+            for p in l.lock().unwrap().iter() {
+                if let Some(Obj::Pair(e, w)) = get(p)
+                    && let Some(Obj::PoolElement(loc, proc_, legacy)) = get(e)
+                {
+                    weights
+                        .entry((loc.clone(), proc_.clone(), *legacy))
+                        .or_insert(int(w).unwrap_or(1));
+                }
+            }
+        }
+        for ((loc, proc_, legacy), weight) in weights {
+            let (ns, path) = loc.split_once(':').unwrap_or(("minecraft", &loc));
+            let file = format!(
+                "data/{ns}/worldgen/template_pool/horizon_add_to/{}/{}.json",
+                pool.replace(':', "/"),
+                path
+            );
+            files.push((
+                file,
+                json!({
+                    "horizon:add_to": pool,
+                    "elements": [{
+                        "weight": weight,
+                        "element": {
+                            "element_type": if legacy { "minecraft:legacy_single_pool_element" } else { "minecraft:single_pool_element" },
+                            "location": loc,
+                            "processors": proc_,
+                            "projection": "rigid",
+                        }
+                    }],
+                }),
+            ));
+        }
+    }
+    // Each file to the mod whose namespace it is in.
+    for (path, json) in files {
+        let ns = path.split('/').nth(1).unwrap_or("");
+        let jar = out.iter().position(|t| t.mod_id == ns).unwrap_or(0);
+        out[jar].files.push((path, json));
+    }
+    let unknown = host.state.borrow().unknown.clone();
+    for t in &mut out {
+        t.unknown = unknown.clone();
+    }
+    out[0].errors = errors;
+    Ok(out)
+}
+
+/// The methods of a class that subscribe to events (`@SubscribeEvent`).
+fn subscribed(jar: usize, class: &ClassFile, statics: bool) -> Vec<Subscriber> {
+    let Ok(name) = class.name() else {
+        return Vec::new();
+    };
+    class
+        .methods
+        .iter()
+        .filter(|m| (m.access & 0x0008 != 0) == statics)
+        .filter(|m| {
+            m.annotations()
+                .any(|a| a.type_descriptor == "Lnet/neoforged/bus/api/SubscribeEvent;")
+        })
+        .map(|m| Subscriber {
+            jar,
+            class: name.to_owned(),
+            method: m.name.clone(),
+            desc: m.descriptor.clone(),
+            is_static: statics,
+        })
+        .collect()
+}
+
+/// Fires an event: to the subscribers whose parameter is one of `events`
+/// (the event's class, then its superclasses), the objects and classes
+/// given to a bus, and the listeners whose lambda takes it.
+fn fire_event(
+    host: &NeoForge,
+    cx: &mut Context<'_>,
+    jars: &[Vec<ClassFile>],
+    statics: &[Subscriber],
+    events: &[&str],
+    event: &Value,
+    errors: &mut Vec<String>,
+) {
+    let takes = |desc: &str| {
+        Method::parse(desc)
+            .and_then(|m| m.params.first().cloned())
+            .is_some_and(|p| events.contains(&p.as_str()))
+    };
+    let mut calls: Vec<(usize, String, Vec<Value>)> = Vec::new();
+    for s in statics {
+        if takes(&s.desc) {
+            calls.push((
+                s.jar,
+                format!("{}.{}{}", s.class, s.method, s.desc),
+                vec![event.clone()],
+            ));
+        }
+    }
+    let registered = host.state.borrow().registered.clone();
+    for (_, target) in &registered {
+        match (get(target), target) {
+            (Some(Obj::Class(c)), _) => {
+                if let Some(jar) = cx.jar_of_class(c)
+                    && let Some(class) = jars[jar].iter().find(|k| k.name().is_ok_and(|n| n == c))
+                {
+                    for s in subscribed(jar, class, true) {
+                        if takes(&s.desc) {
+                            calls.push((
+                                jar,
+                                format!("{}.{}{}", s.class, s.method, s.desc),
+                                vec![event.clone()],
+                            ));
+                        }
+                    }
+                }
+            }
+            (_, Value::Mod(m)) => {
+                let Ok(Some(c)) = cx.class(target) else {
+                    continue;
+                };
+                if let Some(class) = jars[m.jar].iter().find(|k| k.name().is_ok_and(|n| n == c)) {
+                    for s in subscribed(m.jar, class, false) {
+                        if takes(&s.desc) && !s.is_static {
+                            calls.push((
+                                m.jar,
+                                format!("{}.{}{}", s.class, s.method, s.desc),
+                                vec![target.clone(), event.clone()],
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for (jar, export, args) in calls {
+        if let Err(e) = cx.in_jar(jar, |cx| cx.call(&export, &args)) {
+            errors.push(format!("{export}: {e:#}"));
+        }
+    }
+    let listeners = host.state.borrow().listeners.clone();
+    for (_, l) in &listeners {
+        let Value::Mod(m) = l else { continue };
+        let Ok(Some(id)) = cx.id(l) else { continue };
+        let target = match cx.compiled_of(m.jar).and_then(|c| match c.object(id) {
+            Some(Object::Lambda(_, lambda)) => Some(lambda.target.clone()),
+            _ => None,
+        }) {
+            Some(t) => t,
+            None => continue,
+        };
+        let desc = target.rsplit(' ').next().unwrap_or("");
+        let last = Method::parse(desc)
+            .and_then(|m| m.params.last().cloned())
+            .unwrap_or_default();
+        if events.contains(&last.as_str())
+            && let Err(e) = cx.call_lambda(l, std::slice::from_ref(event))
+        {
+            errors.push(format!("listener {target}: {e:#}"));
+        }
+    }
 }
 
 fn peer_of(cx: &mut Context<'_>, v: &Value) -> Value {
@@ -436,6 +890,13 @@ pub fn write(t: &Translation, dir: &Path) -> std::io::Result<()> {
             }
             std::fs::write(file, serde_json::to_vec_pretty(decl)?)?;
         }
+    }
+    for (path, json) in &t.files {
+        let file = dir.join(path);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(file, serde_json::to_vec_pretty(json)?)?;
     }
     Ok(())
 }

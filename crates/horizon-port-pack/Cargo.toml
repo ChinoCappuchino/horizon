@@ -9,6 +9,8 @@ description = "Port a Java modpack to Horizon: import, inventory, classification
 [dependencies]
 # Content path rules only (no runtime): what the game's content loader accepts.
 horizon-mods = { path = "../horizon-mods", default-features = false }
+# The Java compatibility layer: what a mod's code registers (stage translate).
+horizon-neoforge = { path = "../horizon-neoforge" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"

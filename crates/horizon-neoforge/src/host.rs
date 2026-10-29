@@ -108,6 +108,12 @@ pub struct State {
     /// Calls not modelled, and how often.
     pub unknown: BTreeMap<String, usize>,
     pub mod_bus_listeners: Vec<Value>,
+    /// Listeners given to a bus (`addListener`), by bus.
+    pub listeners: Vec<(String, Value)>,
+    /// Objects and classes given to a bus (`register`), by bus.
+    pub registered: Vec<(String, Value)>,
+    /// What mods add to template pools' raw lists (`rawTemplates`).
+    pub raw_pools: BTreeMap<String, Value>,
 }
 
 pub struct NeoForge {
@@ -230,6 +236,181 @@ impl NeoForge {
         })
     }
 
+    /// A game profession (`VillagerProfession.FARMER`), one object each.
+    pub fn game_profession(&self, id: &str) -> Value {
+        self.interned(&format!("profession:{id}"), || {
+            obj(Obj::Profession(Arc::new(Profession {
+                id: Mutex::new(Some(id.to_owned())),
+                name: id.trim_start_matches("minecraft:").to_owned(),
+                held: Value::Null,
+                requested: Value::Null,
+                sound: Value::Null,
+            })))
+        })
+    }
+
+    /// The template pools mods looked up, with what they added.
+    pub fn pools(&self) -> Vec<(String, Value)> {
+        let st = self.state.borrow();
+        let mut out: Vec<(String, Value)> = st
+            .statics
+            .iter()
+            .filter_map(|(k, v)| {
+                let id = k.strip_prefix("pool:")?;
+                match get(v) {
+                    Some(Obj::Pool(_, templates)) => Some((id.to_owned(), templates.clone())),
+                    _ => None,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// A template pool, one object for an id.
+    pub fn pool(&self, id: &str) -> Value {
+        self.interned(&format!("pool:{id}"), || {
+            obj(Obj::Pool(
+                id.to_owned(),
+                obj(Obj::List(Mutex::new(Vec::new()))),
+            ))
+        })
+    }
+
+    /// The id of an item (or a block, or a holder of one).
+    pub fn item_id(&self, cx: &mut Context<'_>, v: &Value) -> Result<String> {
+        let v = match get(v) {
+            Some(Obj::Holder(h)) => {
+                let h = h.clone();
+                self.bind(cx, &h)?
+            }
+            _ => v.clone(),
+        };
+        let peer = self.peer(cx, &v)?;
+        Ok(match get(&peer) {
+            Some(Obj::Item(i)) => i.id.lock().unwrap().clone().unwrap_or_default(),
+            Some(Obj::Block(b)) => b.id.lock().unwrap().clone().unwrap_or_default(),
+            Some(Obj::Stack(id, _)) => id.clone(),
+            Some(Obj::Loc(id)) | Some(Obj::Str(id)) => id.clone(),
+            _ => String::new(),
+        })
+    }
+
+    /// A call to a class of another jar running with this one: its export
+    /// there (statics through the class's superclasses).
+    fn foreign(
+        &self,
+        cx: &mut Context<'_>,
+        import: &Import,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let op = import.op.as_str();
+        if !matches!(
+            op,
+            "getstatic"
+                | "putstatic"
+                | "invokestatic"
+                | "new"
+                | "extend"
+                | "instanceof"
+                | "getfield"
+        ) {
+            return Ok(None);
+        }
+        let owner = import.owner.as_str();
+        let Some(jar) = cx.jar_of_class(owner) else {
+            return Ok(None);
+        };
+        if jar == cx.jar() {
+            return Ok(None);
+        }
+        let compiled = cx.compiled_of(jar).expect("a jar");
+        let supers = |mut c: String| {
+            let mut out = Vec::new();
+            loop {
+                out.push(c.clone());
+                match compiled
+                    .info
+                    .iter()
+                    .find(|i| i.name == c)
+                    .and_then(|i| i.superclass.clone())
+                {
+                    Some(s) if compiled.classes.contains(&s) => c = s,
+                    _ => break,
+                }
+            }
+            out
+        };
+        let name = &import.name;
+        let desc = &import.descriptor;
+        let v = match op {
+            "getstatic" | "putstatic" | "invokestatic" => {
+                let mut found = None;
+                for c in supers(owner.to_owned()) {
+                    let export = match op {
+                        "getstatic" => format!("get {c}.{name}"),
+                        "putstatic" => format!("set {c}.{name}"),
+                        _ => format!("{c}.{name}{desc}"),
+                    };
+                    if cx.in_jar(jar, |cx| cx.has(&export)) {
+                        found = Some(export);
+                        break;
+                    }
+                }
+                let Some(export) = found else {
+                    return Ok(None);
+                };
+                cx.in_jar(jar, |cx| cx.call(&export, args))?
+            }
+            "new" | "extend" => {
+                let args = if op == "extend" { &args[1..] } else { args };
+                cx.in_jar(jar, |cx| -> Result<Value> {
+                    let object = cx.call(&format!("new {owner}"), &[])?;
+                    let mut all = vec![object.clone()];
+                    all.extend_from_slice(args);
+                    cx.call(&format!("{owner}.<init>{desc}"), &all)?;
+                    Ok(object)
+                })?
+            }
+            "instanceof" => {
+                let yes = match &args[0] {
+                    Value::Mod(m) if m.jar == jar => {
+                        let class = cx.class(&args[0])?;
+                        let mut todo: Vec<String> = class.into_iter().collect();
+                        let mut found = false;
+                        while let Some(c) = todo.pop() {
+                            if c == owner {
+                                found = true;
+                                break;
+                            }
+                            if let Some(i) = compiled.info.iter().find(|i| i.name == c) {
+                                todo.extend(i.superclass.clone());
+                                todo.extend(i.interfaces.clone());
+                            }
+                        }
+                        found
+                    }
+                    _ => false,
+                };
+                Value::Int(yes as i32)
+            }
+            _ => {
+                // getfield: the field of an object of that jar.
+                let class = cx.class(&args[0])?.unwrap_or_default();
+                let Some(index) = compiled
+                    .info
+                    .iter()
+                    .find(|i| i.name == class)
+                    .and_then(|i| i.fields.iter().rposition(|f| f == name))
+                else {
+                    return Ok(None);
+                };
+                cx.field(&args[0], index + 2)?
+            }
+        };
+        Ok(Some(v))
+    }
+
     fn game_item(&self, id: &str) -> Value {
         self.interned(&format!("item:{id}"), || {
             obj(Obj::Item(Arc::new(ItemData {
@@ -294,6 +475,17 @@ impl NeoForge {
                     obj(Obj::Registry(name.to_lowercase()))
                 }),
             "net/minecraft/world/level/material/MapColor" => self.constant(owner, name),
+            "net/neoforged/neoforge/common/NeoForge" if name == "EVENT_BUS" => {
+                self.interned("bus:game", || obj(Obj::Bus("game".into())))
+            }
+            "net/neoforged/fml/loading/FMLEnvironment" if name == "dist" => {
+                self.constant("net/neoforged/api/distmarker/Dist", "DEDICATED_SERVER")
+            }
+            "net/minecraft/world/entity/npc/VillagerProfession" => self.game_profession(&id()),
+            "net/minecraft/sounds/SoundEvents" => {
+                let sound = self.game.sound_for_field(name);
+                self.interned(&format!("sound:{sound}"), || obj(Obj::Sound(sound.clone())))
+            }
             _ if import.descriptor.ends_with("Property;") => {
                 let p = self.static_property(owner, name);
                 match p {
@@ -380,9 +572,15 @@ impl NeoForge {
     }
 
     /// Java's `equals` for the values registration compares.
-    fn equal(&self, cx: &mut Context<'_>, a: &Value, b: &Value) -> Result<bool> {
+    pub fn equal(&self, cx: &mut Context<'_>, a: &Value, b: &Value) -> Result<bool> {
         if cx.same(a, b)? {
             return Ok(true);
+        }
+        if let (Some(x), Some(y)) = (int(a), int(b))
+            && (matches!(a, Value::Int(_) | Value::Long(_))
+                || matches!(b, Value::Int(_) | Value::Long(_)))
+        {
+            return Ok(x == y);
         }
         Ok(match (get(a), get(b)) {
             (Some(Obj::Str(x)), Some(Obj::Str(y))) | (Some(Obj::Loc(x)), Some(Obj::Loc(y))) => {
@@ -786,6 +984,9 @@ fn full() -> Vec<[f64; 6]> {
 impl Host for NeoForge {
     fn call(&self, cx: &mut Context<'_>, import: &Import, args: &[Value]) -> Result<Value> {
         let op = import.op.as_str();
+        if let Some(v) = self.foreign(cx, import, args)? {
+            return Ok(v);
+        }
         match op {
             "constant" => {
                 let i = int(&args[0]).unwrap_or(-1) as i32;
@@ -815,6 +1016,16 @@ impl Host for NeoForge {
             "record" => return Ok(Value::Int(0)),
             "getstatic" => return self.get_static(cx, import),
             "putstatic" => return Ok(Value::Void),
+            "putfield" if import.name == "rawTemplates" => {
+                let target = self.peer(cx, &args[0])?;
+                if let Some(Obj::Pool(id, _)) = get(&target) {
+                    self.state
+                        .borrow_mut()
+                        .raw_pools
+                        .insert(id.clone(), args[1].clone());
+                }
+                return Ok(Value::Void);
+            }
             "extend" => return self.extend(cx, import, args),
             "new" => return self.construct(cx, import, args),
             "invokestatic" => return self.static_call(cx, import, args),
@@ -823,11 +1034,15 @@ impl Host for NeoForge {
         // A method on an object: a mod object's own first.
         let this = args.first().cloned().unwrap_or(Value::Null);
         if matches!(op, "invokevirtual" | "invokeinterface") && matches!(this, Value::Mod(_)) {
+            // Of the jar the object is in, not the calling jar.
+            let jar = match &this {
+                Value::Mod(m) => m.jar,
+                _ => cx.jar(),
+            };
             let is_lambda = matches!(
                 cx.id(&this)?.and_then(|id| cx
-                    .compiled()
-                    .object(id)
-                    .map(|o| matches!(o, Object::Lambda(..)))),
+                    .compiled_of(jar)
+                    .and_then(|c| c.object(id).map(|o| matches!(o, Object::Lambda(..))))),
                 Some(true)
             );
             if let Some(v) = cx.call_virtual(&this, &import.name, &import.descriptor, &args[1..])? {
@@ -911,6 +1126,107 @@ impl NeoForge {
             | "java/util/EnumMap"
             | "java/util/IdentityHashMap" => obj(Obj::Map(Mutex::new(Vec::new()))),
             "java/lang/StringBuilder" => obj(Obj::List(Mutex::new(Vec::new()))),
+            "net/neoforged/neoforge/common/ModConfigSpec$Builder" => obj(Obj::ConfigBuilder),
+            "net/minecraft/world/entity/npc/VillagerProfession" => {
+                let a = |i: usize| args.get(i).cloned().unwrap_or(Value::Null);
+                obj(Obj::Profession(Arc::new(Profession {
+                    id: Mutex::new(None),
+                    name: string(&a(0)).unwrap_or_default(),
+                    held: a(1),
+                    requested: a(3),
+                    sound: a(5),
+                })))
+            }
+            "net/minecraft/world/entity/ai/village/poi/PoiType" => obj(Obj::Poi {
+                states: args.first().cloned().unwrap_or(Value::Null),
+                tickets: args.get(1).and_then(int).unwrap_or(1) as i32,
+                range: args.get(2).and_then(int).unwrap_or(1) as i32,
+            }),
+            "net/minecraft/world/item/trading/ItemCost" | "net/minecraft/world/item/ItemStack" => {
+                let id = self.item_id(cx, args.first().unwrap_or(&Value::Null))?;
+                let count = args.get(1).and_then(int).unwrap_or(1) as i32;
+                obj(Obj::Stack(id, count))
+            }
+            "net/minecraft/world/item/trading/MerchantOffer" => {
+                let stacks: Vec<(String, i32)> = args
+                    .iter()
+                    .filter_map(|a| match get(a) {
+                        Some(Obj::Stack(i, n)) => Some((i.clone(), *n)),
+                        Some(Obj::Optional(Some(v))) => match get(v) {
+                            Some(Obj::Stack(i, n)) => Some((i.clone(), *n)),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect();
+                let ints: Vec<i32> = args
+                    .iter()
+                    .filter_map(|a| match a {
+                        Value::Int(i) => Some(*i),
+                        _ => None,
+                    })
+                    .collect();
+                let mult = args
+                    .iter()
+                    .find_map(|a| match a {
+                        Value::Float(f) => Some(*f),
+                        _ => None,
+                    })
+                    .unwrap_or(0.0);
+                let n = stacks.len();
+                if n < 2 {
+                    return Ok(self.unknown(import));
+                }
+                // (cost[, cost B], result, [uses,] max uses, xp, multiplier)
+                let (max_uses, xp) = match ints.len() {
+                    3.. => (ints[ints.len() - 2], ints[ints.len() - 1]),
+                    2 => (ints[0], ints[1]),
+                    _ => (12, 0),
+                };
+                obj(Obj::Offer(Offer {
+                    wants: stacks[0].clone(),
+                    also_wants: (n > 2).then(|| stacks[1].clone()),
+                    gives: stacks[n - 1].clone(),
+                    max_uses,
+                    xp,
+                    price_multiplier: mult,
+                }))
+            }
+            "net/neoforged/neoforge/common/BasicItemListing" => {
+                // (price, [price B,] for sale, max trades, xp[, multiplier]),
+                // or (emeralds, for sale, max trades, xp[, multiplier]).
+                let mut stacks: Vec<(String, i32)> = Vec::new();
+                let mut ints: Vec<i32> = Vec::new();
+                for a in args {
+                    match (get(a), a) {
+                        (Some(Obj::Stack(i, n)), _) => stacks.push((i.clone(), *n)),
+                        (_, Value::Int(i)) => ints.push(*i),
+                        _ => {}
+                    }
+                }
+                let mult = args
+                    .iter()
+                    .find_map(|a| match a {
+                        Value::Float(f) => Some(*f),
+                        _ => None,
+                    })
+                    .unwrap_or(0.05);
+                if stacks.len() == 1 && ints.len() >= 3 {
+                    stacks.insert(0, ("minecraft:emerald".into(), ints.remove(0)));
+                }
+                if stacks.len() < 2 || ints.len() < 2 {
+                    return Ok(self.unknown(import));
+                }
+                let n = stacks.len();
+                obj(Obj::Offer(Offer {
+                    wants: stacks[0].clone(),
+                    also_wants: (n > 2).then(|| stacks[1].clone()),
+                    gives: stacks[n - 1].clone(),
+                    max_uses: ints[0],
+                    xp: ints[1],
+                    price_multiplier: mult,
+                }))
+            }
             "com/google/common/collect/ImmutableMap$Builder" => {
                 obj(Obj::Map(Mutex::new(Vec::new())))
             }
@@ -974,6 +1290,21 @@ impl NeoForge {
         let member = format!("{}.{}", simple(&import.owner), import.name);
         let f = |i: usize| args.get(i).and_then(float).unwrap_or(0.0);
         Ok(match member.as_str() {
+            "Pair.of" => obj(Obj::Pair(args[0].clone(), args[1].clone())),
+            "SoundEvent.createVariableRangeEvent" | "SoundEvent.createFixedRangeEvent" => {
+                obj(Obj::Sound(string(&args[0]).unwrap_or_default()))
+            }
+            "SinglePoolElement.single"
+            | "SinglePoolElement.legacy"
+            | "StructurePoolElement.single"
+            | "StructurePoolElement.legacy" => {
+                let location = string(&args[0]).unwrap_or_default();
+                let processors = match args.get(1).and_then(get) {
+                    Some(Obj::Key(_, id)) | Some(Obj::Loc(id)) | Some(Obj::Str(id)) => id.clone(),
+                    _ => "minecraft:empty".into(),
+                };
+                obj(Obj::PoolFn(location, processors, import.name == "legacy"))
+            }
             "Integer.valueOf" => obj(Obj::Boxed(Prim::Int(int(&args[0]).unwrap_or(0) as i32))),
             "Boolean.valueOf" => obj(Obj::Boxed(Prim::Bool(int(&args[0]).unwrap_or(0) != 0))),
             "Float.valueOf" => obj(Obj::Boxed(Prim::Float(f(0) as f32))),
@@ -1696,6 +2027,8 @@ impl NeoForge {
                 _ => self.unknown(import),
             },
             Obj::Const(_, n) => match name {
+                "isClient" => Value::Int((n == "CLIENT") as i32),
+                "isDedicatedServer" => Value::Int((n == "DEDICATED_SERVER") as i32),
                 "name" | "toString" | "getSerializedName" | "getName" => {
                     self.string(&n.to_lowercase())
                 }
@@ -2013,6 +2346,155 @@ impl NeoForge {
                 "orElse" => v.clone().unwrap_or_else(|| a(0)),
                 _ => self.unknown(import),
             },
+            Obj::Bus(bus) => match name {
+                "addListener" => {
+                    let listener = args.last().cloned().unwrap_or(Value::Null);
+                    self.state
+                        .borrow_mut()
+                        .listeners
+                        .push((bus.clone(), listener));
+                    Value::Void
+                }
+                "register" => {
+                    self.state
+                        .borrow_mut()
+                        .registered
+                        .push((bus.clone(), a0.clone()));
+                    Value::Void
+                }
+                _ => self.unknown(import),
+            },
+            Obj::ConfigBuilder => match name {
+                n if n.starts_with("define") => {
+                    // (name, default, ...): the default, boxed.
+                    let default = match a(1) {
+                        Value::Int(i) => obj(Obj::Boxed(Prim::Int(i))),
+                        Value::Long(i) => obj(Obj::Boxed(Prim::Long(i))),
+                        Value::Double(f) => obj(Obj::Boxed(Prim::Double(f))),
+                        Value::Float(f) => obj(Obj::Boxed(Prim::Float(f))),
+                        v => v,
+                    };
+                    let default = if import.descriptor.contains(";Z)")
+                        || import.descriptor.ends_with(
+                            "ZLnet/neoforged/neoforge/common/ModConfigSpec$BooleanValue;",
+                        ) {
+                        match a(1) {
+                            Value::Int(i) => obj(Obj::Boxed(Prim::Bool(i != 0))),
+                            _ => default,
+                        }
+                    } else {
+                        default
+                    };
+                    obj(Obj::ConfigValue(default))
+                }
+                "build" | "configure" => opaque("ModConfigSpec"),
+                _ => target.clone(),
+            },
+            Obj::ConfigValue(v) => match name {
+                "get" | "getDefault" | "getRaw" => v.clone(),
+                "getAsInt" | "getAsLong" => Value::Int(int(v).unwrap_or(0) as i32),
+                "getAsBoolean" => Value::Int(match get(v) {
+                    Some(Obj::Boxed(Prim::Bool(b))) => *b as i32,
+                    _ => int(v).unwrap_or(0) as i32,
+                }),
+                "getAsDouble" => Value::Double(float(v).unwrap_or(0.0)),
+                _ => Value::Void,
+            },
+            Obj::Pair(x, y) => match name {
+                "getFirst" | "left" => x.clone(),
+                "getSecond" | "right" => y.clone(),
+                _ => self.unknown(import),
+            },
+            Obj::Sound(id) => match name {
+                "getLocation" | "location" => obj(Obj::Loc(id.clone())),
+                _ => self.unknown(import),
+            },
+            Obj::Profession(p) => match name {
+                "name" => self.string(&p.name),
+                "heldJobSite" => p.held.clone(),
+                "workSound" => p.sound.clone(),
+                "equals" => Value::Int(cx.same(target, &a0)? as i32),
+                _ => self.unknown(import),
+            },
+            Obj::Offer(_) => match name {
+                // An ItemListing that is its offer (BasicItemListing).
+                "getOffer" => target.clone(),
+                _ => self.unknown(import),
+            },
+            Obj::Event(kind, data) => match (kind.as_str(), name) {
+                ("VillagerTradesEvent", "getType") => data[0].clone(),
+                ("VillagerTradesEvent", "getTrades") => data[1].clone(),
+                ("ServerAboutToStartEvent", "getServer") => opaque("server"),
+                _ => self.unknown(import),
+            },
+            Obj::Registry(r) => match name {
+                "get" | "getValue" | "getOptional" | "getHolder" | "getHolderOrThrow"
+                | "getOrThrow" => {
+                    let id = match get(&a0) {
+                        Some(Obj::Loc(id)) | Some(Obj::Key(_, id)) | Some(Obj::Str(id)) => {
+                            id.clone()
+                        }
+                        _ => return Ok(self.unknown(import)),
+                    };
+                    let v = match r.as_str() {
+                        "template_pool" => self.pool(&id),
+                        "item" => self.game_item(&id),
+                        "block" => self.game_block(&id),
+                        _ => obj(Obj::Key(r.clone(), id)),
+                    };
+                    if import.descriptor.ends_with(")Ljava/util/Optional;") {
+                        obj(Obj::Optional(Some(v)))
+                    } else {
+                        v
+                    }
+                }
+                "getKey" => {
+                    let id = self.item_id(cx, &a0)?;
+                    obj(Obj::Loc(id))
+                }
+                "key" => obj(Obj::Key("root".into(), r.clone())),
+                _ => self.unknown(import),
+            },
+            Obj::Pool(id, templates) => match name {
+                "templates" => templates.clone(),
+                "rawTemplates" => {
+                    let raw = self.state.borrow().raw_pools.get(id).cloned();
+                    raw.unwrap_or_else(|| obj(Obj::List(Mutex::new(Vec::new()))))
+                }
+                _ => self.unknown(import),
+            },
+            Obj::PoolFn(location, processors, legacy) => match name {
+                "apply" => obj(Obj::PoolElement(
+                    location.clone(),
+                    processors.clone(),
+                    *legacy,
+                )),
+                _ => self.unknown(import),
+            },
+            Obj::Stack(id, n) => match name {
+                "getCount" => Value::Int(*n),
+                "getItem" | "item" => self.game_item(id),
+                "copy" => target.clone(),
+                _ => self.unknown(import),
+            },
+            // The server's registries, at ServerAboutToStartEvent.
+            Obj::Opaque(_) if name == "registryAccess" => opaque("registry access"),
+            Obj::Opaque(_)
+                if matches!(
+                    name,
+                    "registryOrThrow" | "registry" | "lookupOrThrow" | "lookup"
+                ) =>
+            {
+                let reg = match get(&a0) {
+                    Some(Obj::Registry(r)) => obj(Obj::Registry(r.clone())),
+                    _ => return Ok(self.unknown(import)),
+                };
+                if import.descriptor.ends_with(")Ljava/util/Optional;") {
+                    obj(Obj::Optional(Some(reg)))
+                } else {
+                    reg
+                }
+            }
             Obj::Opaque(_) if returns_self => target.clone(),
             other => {
                 if std::env::var_os("HORIZON_NEOFORGE_DEBUG").is_some() {

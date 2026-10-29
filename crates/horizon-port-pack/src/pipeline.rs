@@ -228,6 +228,81 @@ pub fn carry(
     Ok(done)
 }
 
+/// Translates carried-over mods' code (docs/java-compat/README.md): each
+/// mod runs from its jar, with the mods it requires, through the Java
+/// compatibility layer, and what it registers (blocks with their states
+/// and shapes, items, villager professions, trades, pool additions) goes
+/// into its `carry/` as content declarations and data. Needs the prepared
+/// resources. Returns how many mods were translated.
+pub fn translate(
+    work: &Path,
+    resources: &Path,
+    only: &[String],
+    log: Log,
+) -> Result<usize, String> {
+    let records: Vec<inventory::Record> = read_json(&work.join("inventory.json"))?;
+    let carried = |key: &str| work.join("mods").join(key).join("carry");
+    let chosen: Vec<&inventory::Record> = records
+        .iter()
+        .filter(|r| r.jar.is_some() && carried(&r.key).is_dir())
+        .filter(|r| only.is_empty() || only.contains(&r.key))
+        .collect();
+    let game = std::sync::Arc::new(
+        horizon_neoforge::GameData::load(resources)
+            .map_err(|e| format!("{}: {e}", resources.display()))?,
+    );
+    let by_key: BTreeMap<&str, &inventory::Record> =
+        records.iter().map(|r| (r.key.as_str(), r)).collect();
+    let mut done = 0;
+    for r in chosen {
+        // The mod after what it requires, by dependency layer.
+        let mut group: Vec<&inventory::Record> = Vec::new();
+        let mut todo = vec![r.key.as_str()];
+        while let Some(k) = todo.pop() {
+            let Some(rec) = by_key.get(k) else { continue };
+            if group.iter().any(|g| g.key == rec.key) || rec.jar.is_none() {
+                continue;
+            }
+            group.push(rec);
+            todo.extend(rec.depends.iter().map(String::as_str));
+        }
+        group.sort_by_key(|g| (g.layer, g.key.clone()));
+        let mut jars = Vec::new();
+        for g in &group {
+            let jar = work.join(g.jar.as_ref().expect("a jar"));
+            jars.push(
+                horizon_neoforge::read_jar(&jar).map_err(|e| format!("{}: {e}", jar.display()))?,
+            );
+        }
+        let started = std::time::Instant::now();
+        match horizon_neoforge::translate_all(&jars, game.clone()) {
+            Ok(translations) => {
+                for (g, t) in group.iter().zip(&translations) {
+                    if g.key != r.key {
+                        continue;
+                    }
+                    horizon_neoforge::write(t, &carried(&g.key))
+                        .map_err(|e| format!("{}: {e}", g.key))?;
+                    log(format!(
+                        "{}: {} blocks, {} items, {} data files from its code ({} mods run, {:.1} s; {} kinds of calls not modelled, {} errors)",
+                        g.key,
+                        t.blocks.len(),
+                        t.items.len(),
+                        t.files.len(),
+                        group.len(),
+                        started.elapsed().as_secs_f64(),
+                        t.unknown.len(),
+                        translations[0].errors.len(),
+                    ));
+                    done += 1;
+                }
+            }
+            Err(e) => log(format!("{}: {e:#}", r.key)),
+        }
+    }
+    Ok(done)
+}
+
 /// Which carried-over mods (`mods/<key>/carry` folders) the game loads together, in the order
 /// given: as the game does, the first of two owning one namespace stays on. Returns the ones on,
 /// and a line for each one left off.

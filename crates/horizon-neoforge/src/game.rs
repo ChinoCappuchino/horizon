@@ -54,6 +54,8 @@ pub struct GameData {
     /// Each state's outline and collision boxes, in blocks.
     outlines: Vec<Vec<[f64; 6]>>,
     collisions: Vec<Vec<[f64; 6]>>,
+    /// The game's sound events, without `minecraft:` (`block.stone.break`).
+    sounds: Vec<String>,
 }
 
 fn state_key(name: &str, props: &BTreeMap<String, String>) -> String {
@@ -163,12 +165,23 @@ impl GameData {
         }
         let outlines = rows.iter().map(|r| boxes(&r["outline"])).collect();
         let collisions = Self::collisions(root, states.len()).unwrap_or_default();
+        let sounds = read(root, "registries.json")
+            .ok()
+            .and_then(|v| {
+                v["minecraft:sound_event"]["entries"].as_object().map(|o| {
+                    o.keys()
+                        .map(|k| k.trim_start_matches("minecraft:").to_owned())
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
         Ok(GameData {
             blocks,
             items,
             states: index,
             outlines,
             collisions,
+            sounds,
         })
     }
 
@@ -200,6 +213,23 @@ impl GameData {
             out.push(boxes);
         }
         Ok(out)
+    }
+
+    /// The sound event a `SoundEvents` field names: the event whose id, its
+    /// dots as underscores, is the field's name or ends with it
+    /// (`BUBBLE_COLUMN_UPWARDS_AMBIENT` is `block.bubble_column.upwards_ambient`).
+    pub fn sound_for_field(&self, field: &str) -> String {
+        let want = field.to_lowercase();
+        let flat = |s: &str| s.replace('.', "_");
+        let found = self.sounds.iter().find(|s| flat(s) == want).or_else(|| {
+            self.sounds
+                .iter()
+                .find(|s| flat(s).ends_with(&format!("_{want}")))
+        });
+        format!(
+            "minecraft:{}",
+            found.cloned().unwrap_or_else(|| want.replace('_', "."))
+        )
     }
 
     /// A game block's outline and collision in the state with these values

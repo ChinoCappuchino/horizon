@@ -154,6 +154,17 @@ To do it again: `cargo run --release -p horizon-neoforge --example translate
 `HORIZON_CLIENT_FEATURES="--no-default-features --features mods"
 tools/mod_port_harness.py --work <work> --jars <jar folder> farmersdelight`.
 
+In the game, Farmer's Delight and Chef's Delight (2026-10-29): several jars
+now run together (a mod and the mods it needs), and the layer fires the
+events that make content as the game loads (config, setup, villager
+trades, server start). `horizon-port-pack translate WORK --resources
+PREPARED [MOD...]` writes what each mod registers into its carried content
+mod. For Chef's Delight it writes its POI types and professions (Horizon's
+profession registry), its 52 trades (as the game's trade data) and its
+houses in the 5 village pools: all equal to NeoForge. On a Horizon dedicated
+server with the two mods, a cooking pot is placed, a villager next to it
+becomes `chefsdelight:chef`, and the chef house template loads.
+
 A compiled method is not a working method. It runs only if the
 compatibility layer gives the members that it uses. Farmer's Delight uses
 about 2,200 members of Minecraft and NeoForge.

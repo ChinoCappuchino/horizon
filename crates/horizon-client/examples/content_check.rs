@@ -54,6 +54,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         started.elapsed(),
         registry.len()
     );
+    // Villager professions, their job sites and trades; village pools.
+    horizon_client::professions::load(root);
+    let trades = horizon_client::merchant::Trades::load(root);
+    for p in 15..horizon_client::professions::count() as u8 {
+        let job = horizon_client::professions::job_site(p);
+        let sets = (1..=5)
+            .filter(|l| {
+                trades
+                    .sets
+                    .contains_key(&horizon_client::merchant::Trades::set_for(
+                        &horizon_client::professions::name(p),
+                        *l,
+                    ))
+            })
+            .count();
+        println!(
+            "profession {}: job site {:?} on {:?}, {sets} trade sets",
+            horizon_client::professions::id(p),
+            job.as_ref().map(|j| &j.id),
+            job.as_ref().map(|j| &j.blocks),
+        );
+    }
+    if let Ok(text) = std::fs::read_to_string(root.join("worldgen/template_pools.json"))
+        && let Ok(pools) = serde_json::from_str::<serde_json::Value>(&text)
+    {
+        for (id, pool) in pools.as_object().into_iter().flatten() {
+            let pool: serde_json::Value = match pool {
+                serde_json::Value::String(s) => serde_json::from_str(s).unwrap_or_default(),
+                v => v.clone(),
+            };
+            let added: Vec<String> = pool["elements"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e["element"]["location"].as_str())
+                .filter(|l| mods.iter().any(|m| l.starts_with(&format!("{}:", m.id))))
+                .map(str::to_owned)
+                .collect();
+            if !added.is_empty() {
+                println!("pool {id}: {}", added.join(", "));
+            }
+        }
+    }
     for m in &mods {
         let mut states = 0;
         for b in &m.content.blocks {

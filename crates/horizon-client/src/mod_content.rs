@@ -1732,7 +1732,12 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                 let shared = !m.content.namespaces.iter().any(|n| n == ns);
                 let merge = tags.entry(file.clone()).or_default();
                 warnings.extend(merge.add(&m.id, file, replace, shared, values));
-            } else if !file.starts_with(&declarations) {
+            } else if !file
+                .strip_prefix(&declarations)
+                .is_some_and(|rest| rest.starts_with("block/") || rest.starts_with("item/"))
+            {
+                // Block and item declarations become the tables' rows; the
+                // rest of horizon/ (villager professions) is read from here.
                 overlay.write(file, &bytes)?;
                 if let Some((bundle, id)) = worldgen_entry(file) {
                     let text = String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?;
