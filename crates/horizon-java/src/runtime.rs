@@ -411,6 +411,41 @@ fn from_val(mut cx: impl AsContextMut<Data = State>, v: &Val, jar: usize) -> Res
 }
 
 /// Compiled jars, running.
+/// The engine compiled jars run in: WASM GC with exceptions, the copying
+/// collector, inlining (env overrides to compare: see below).
+pub fn engine() -> Result<Engine> {
+    let mut config = Config::new();
+    config
+        .wasm_gc(true)
+        .wasm_function_references(true)
+        .wasm_exceptions(true);
+    // A perf map (/tmp/perf-<pid>.map) names the compiled methods for a
+    // profiler (perf, samply).
+    if std::env::var_os("HORIZON_JAVA_PERFMAP").is_some() {
+        config.profiler(wasmtime::ProfilingStrategy::PerfMap);
+    }
+    // The copying collector allocates by bumping a pointer: 3.5 times
+    // the reference-counting one on allocation (SimplexNoise bench). The
+    // other stays to compare: HORIZON_JAVA_COLLECTOR=drc.
+    config.collector(match std::env::var("HORIZON_JAVA_COLLECTOR").as_deref() {
+        Ok("drc") => wasmtime::Collector::DeferredReferenceCounting,
+        _ => wasmtime::Collector::Copying,
+    });
+    // Small methods inlined into their callers (static calls 3 times
+    // faster); HORIZON_JAVA_INLINE=0 to compare.
+    if std::env::var("HORIZON_JAVA_INLINE").as_deref() != Ok("0") {
+        config.compiler_inlining(wasmtime::Inlining::Yes);
+    }
+    Engine::new(&config)
+}
+
+/// A compiled jar as native code for this machine (an ELF file), ready to
+/// load without compiling: the install-time cache (docs/java-compat/
+/// compiler.md, step 8), and a way to read the machine code (`objdump`).
+pub fn precompile(compiled: &Compiled) -> Result<Vec<u8>> {
+    engine()?.precompile_module(&compiled.wasm)
+}
+
 pub struct Runtime {
     store: Store<State>,
 }
@@ -423,29 +458,7 @@ impl Runtime {
 
     /// Jars that run together (a mod and the mods it needs), as jars 0, 1...
     pub fn link(jars: Vec<Compiled>, host: Rc<dyn Host>) -> Result<Runtime> {
-        let mut config = Config::new();
-        config
-            .wasm_gc(true)
-            .wasm_function_references(true)
-            .wasm_exceptions(true);
-        // A perf map (/tmp/perf-<pid>.map) names the compiled methods for a
-        // profiler (perf, samply).
-        if std::env::var_os("HORIZON_JAVA_PERFMAP").is_some() {
-            config.profiler(wasmtime::ProfilingStrategy::PerfMap);
-        }
-        // The copying collector allocates by bumping a pointer: 3.5 times
-        // the reference-counting one on allocation (SimplexNoise bench). The
-        // other stays to compare: HORIZON_JAVA_COLLECTOR=drc.
-        config.collector(match std::env::var("HORIZON_JAVA_COLLECTOR").as_deref() {
-            Ok("drc") => wasmtime::Collector::DeferredReferenceCounting,
-            _ => wasmtime::Collector::Copying,
-        });
-        // Small methods inlined into their callers (static calls 3 times
-        // faster); HORIZON_JAVA_INLINE=0 to compare.
-        if std::env::var("HORIZON_JAVA_INLINE").as_deref() != Ok("0") {
-            config.compiler_inlining(wasmtime::Inlining::Yes);
-        }
-        let engine = Engine::new(&config)?;
+        let engine = engine()?;
         let state = State {
             host,
             jars: Vec::new(),

@@ -4,7 +4,7 @@
 //! the classes are compiled as they are and the host answers the JDK calls
 //! a benchmark needs (math, `Object`), failing by name on any other.
 //!
-//!     jar_bench [--only <prefix>,...] [--imports] <jar or class dir>... -- <Class> <n>
+//!     jar_bench [--only <prefix>,...] [--imports] [--native <out.cwasm>] <jar or class dir>... -- <Class> <n>
 //!
 //! `--only` keeps the classes of the jars whose names start with a prefix
 //! (class directories are kept whole); `--imports` lists what the compiled
@@ -209,6 +209,7 @@ fn main() -> Result<()> {
     let (inputs, bench) = args.split_at(split);
     let mut only = Vec::new();
     let mut imports = false;
+    let mut native: Option<String> = None;
     let mut paths = Vec::new();
     let mut it = inputs.iter();
     while let Some(a) = it.next() {
@@ -222,6 +223,7 @@ fn main() -> Result<()> {
                     .collect()
             }
             "--imports" => imports = true,
+            "--native" => native = it.next().cloned(),
             p => paths.push(p.to_owned()),
         }
     }
@@ -239,6 +241,11 @@ fn main() -> Result<()> {
     );
     for (m, why) in &compiled.skipped {
         eprintln!("not compiled: {m}: {why}");
+    }
+    if let Some(out) = native {
+        std::fs::write(&out, horizon_java::runtime::precompile(&compiled)?)?;
+        eprintln!("native code in {out}");
+        return Ok(());
     }
     if imports {
         let mut config = wasmtime::Config::new();
