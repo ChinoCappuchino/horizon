@@ -11,6 +11,7 @@ pub mod compile;
 pub mod descriptor;
 #[cfg(feature = "runtime")]
 pub mod runtime;
+pub mod types;
 
 pub use bytecode::{Instruction, decode};
 pub use classfile::{ClassFile, Constant, Error};
