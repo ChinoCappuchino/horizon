@@ -12,7 +12,13 @@
 //! - boxes: the value;
 //! - `Throwable`: message, cause;
 //! - arrays (the compiler's): kind, length, elements.
-use std::{cell::Cell, collections::HashMap};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+};
+
+mod collections;
+pub use collections::array_clone;
 
 /// A built-in class.
 pub struct Builtin {
@@ -23,6 +29,9 @@ pub struct Builtin {
     pub size: i32,
     /// No subclass can override its methods: calls go straight to them.
     pub is_final: bool,
+    /// An interface: its methods are defaults for the classes that
+    /// implement it.
+    pub is_interface: bool,
     pub methods: Vec<Method>,
 }
 
@@ -50,6 +59,17 @@ pub struct Rt {
     /// The cached boxes: `Integer`, `Short`, `Byte`, `Long` from -128 to
     /// 127, `Character` from 0 to 127, and `Boolean`'s two.
     pub cache: HashMap<&'static str, Vec<u64>>,
+    /// Every vtable selector, by `name descriptor` (the runtime calls the
+    /// program's methods through them).
+    pub selectors: HashMap<String, usize>,
+    /// Each class id's `Class` object.
+    pub classes: Vec<u64>,
+    /// Each class id's ancestors by name (itself, superclasses, interfaces).
+    pub ancestors: Vec<HashSet<String>>,
+    /// Each enum class's `$VALUES` static (its address), by class id.
+    pub enum_values: HashMap<u32, u64>,
+    /// Objects the runtime makes once (`Optional.empty()`...), by name.
+    pub once: std::cell::RefCell<HashMap<&'static str, u64>>,
 }
 
 thread_local! {
@@ -195,6 +215,22 @@ fn call_virtual(o: u64, selector: Option<usize>) -> Option<usize> {
     // SAFETY: o's header is its vtable, with a slot per selector.
     let f = unsafe { word(word(o, 0), 8 * (1 + sel)) } as usize;
     (f != 0).then_some(f)
+}
+
+/// The method of `o`'s class for `name desc`, if it has one.
+fn method(o: u64, name_desc: &str) -> Option<usize> {
+    let sel = rt().selectors.get(name_desc).copied();
+    call_virtual(o, sel)
+}
+
+/// Whether object `o` is an instance of class or interface `name`.
+fn instance_of(o: u64, name: &str) -> bool {
+    if o == 0 {
+        return false;
+    }
+    // SAFETY: an object's vtable starts with its class id.
+    let id = unsafe { word(word(o, 0), 0) } as usize;
+    rt().ancestors.get(id).is_some_and(|a| a.contains(name))
 }
 
 fn java_hash(u: &[u16]) -> i32 {
@@ -857,6 +893,15 @@ extern "C" fn int_compare(a: i32, b: i32) -> i32 {
 extern "C" fn long_compare(a: i64, b: i64) -> i32 {
     a.cmp(&b) as i32
 }
+extern "C" fn int_sum(a: i32, b: i32) -> i32 {
+    a.wrapping_add(b)
+}
+extern "C" fn int_max(a: i32, b: i32) -> i32 {
+    a.max(b)
+}
+extern "C" fn int_min(a: i32, b: i32) -> i32 {
+    a.min(b)
+}
 extern "C" fn int_static_to_string(i: i32) -> u64 {
     str_of(&i.to_string())
 }
@@ -1010,6 +1055,7 @@ pub fn builtins() -> Vec<Builtin> {
             interfaces: &[],
             size: 8,
             is_final: false,
+            is_interface: false,
             methods: vec![
                 m("<init>", "()V", object_init as *const () as usize),
                 m(
@@ -1023,6 +1069,11 @@ pub fn builtins() -> Vec<Builtin> {
                     "()Ljava/lang/String;",
                     object_to_string_c as *const () as usize,
                 ),
+                m(
+                    "getClass",
+                    "()Ljava/lang/Class;",
+                    collections::object_get_class as *const () as usize,
+                ),
             ],
         },
         Builtin {
@@ -1031,6 +1082,7 @@ pub fn builtins() -> Vec<Builtin> {
             interfaces: &["java/lang/CharSequence", "java/lang/Comparable"],
             size: S_DATA as i32,
             is_final: true,
+            is_interface: false,
             methods: vec![
                 m("length", "()I", string_length as *const () as usize),
                 m("charAt", "(I)C", string_char_at as *const () as usize),
@@ -1159,6 +1211,7 @@ pub fn builtins() -> Vec<Builtin> {
             interfaces: &["java/lang/CharSequence"],
             size: 24,
             is_final: true,
+            is_interface: false,
             methods: vec![
                 m("<init>", "()V", sb_init as *const () as usize),
                 m("<init>", "(I)V", sb_init_cap as *const () as usize),
@@ -1228,6 +1281,7 @@ pub fn builtins() -> Vec<Builtin> {
             interfaces: &[],
             size: 8,
             is_final: false,
+            is_interface: false,
             methods: vec![],
         },
         Builtin {
@@ -1236,6 +1290,7 @@ pub fn builtins() -> Vec<Builtin> {
             interfaces: &[],
             size: 8,
             is_final: false,
+            is_interface: false,
             methods: vec![m("<init>", "()V", object_init as *const () as usize)],
         },
         Builtin {
@@ -1244,6 +1299,7 @@ pub fn builtins() -> Vec<Builtin> {
             interfaces: &[],
             size: 24,
             is_final: false,
+            is_interface: false,
             methods: vec![
                 m("<init>", "()V", throwable_init as *const () as usize),
                 m(
@@ -1294,6 +1350,7 @@ pub fn builtins() -> Vec<Builtin> {
             interfaces: &[],
             size: 8,
             is_final: true,
+            is_interface: false,
             methods: vec![
                 s(
                     "requireNonNull",
@@ -1361,6 +1418,9 @@ pub fn builtins() -> Vec<Builtin> {
             int_compare_to as *const () as usize,
         ),
         s("compare", "(II)I", int_compare as *const () as usize),
+        s("sum", "(II)I", int_sum as *const () as usize),
+        s("max", "(II)I", int_max as *const () as usize),
+        s("min", "(II)I", int_min as *const () as usize),
         s(
             "toString",
             "(I)Ljava/lang/String;",
@@ -1565,9 +1625,11 @@ pub fn builtins() -> Vec<Builtin> {
             interfaces: &["java/lang/Comparable"],
             size,
             is_final: true,
+            is_interface: false,
             methods,
         });
     }
+    out.extend(collections::builtins());
     out
 }
 
