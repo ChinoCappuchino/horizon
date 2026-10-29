@@ -85,4 +85,19 @@ public class Shapes {
     public static boolean squaresEqual() { return new Square(3).equals(new Square(3)); }
 
     public static String text(int i, String s, double d) { return "i=" + i + " s=" + s + " d=" + d; }
+
+    public static Object tri() { return new Tri(); }
+
+    public static Object bigSquare() { return new Square(9); }
+
+    public static int pattern(Object o) {
+        return switch (o) {
+            case null -> -1;
+            case Square s when s.side() > 5 -> 50;
+            case Square s -> 5;
+            case Tri t -> 3;
+            case Shape s -> 1;
+            default -> 0;
+        };
+    }
 }

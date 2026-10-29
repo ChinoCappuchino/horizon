@@ -256,4 +256,15 @@ fn game_classes_virtual_calls_arrays_and_records() {
         ],
     );
     assert_eq!(string(&t), "i=5 s=x d=2.5");
+    // A pattern switch: null, a guard (which restarts the switch), class
+    // patterns, default.
+    let pattern = "pattern(Ljava/lang/Object;)I";
+    let big = call(&mut cx, "bigSquare()Ljava/lang/Object;", &[]);
+    let small = call(&mut cx, "square()Ljava/lang/Object;", &[]);
+    let tri = call(&mut cx, "tri()Ljava/lang/Object;", &[]);
+    assert_eq!(int(&call(&mut cx, pattern, &[big])), 50);
+    assert_eq!(int(&call(&mut cx, pattern, &[small])), 5);
+    assert_eq!(int(&call(&mut cx, pattern, &[tri])), 3);
+    assert_eq!(int(&call(&mut cx, pattern, &[Value::Null])), -1);
+    assert_eq!(int(&call(&mut cx, pattern, &[host(Obj::Facing)])), 0);
 }

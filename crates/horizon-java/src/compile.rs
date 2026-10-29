@@ -1201,7 +1201,7 @@ fn wrapper(desc: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// Converts the value on top of the WASM stack from type `from` to `to`,
-/// as LambdaMetafactory does: boxing and unboxing.
+/// as LambdaMetafactory does: boxing, unboxing and widening.
 fn adapt(plan: &Plan, out: &mut Vec<W<'static>>, from: &str, to: &str) -> Result<()> {
     let (f, t) = (Kind::of(from), Kind::of(to));
     if f == t && (f == Some(Kind::Ref) || from == to || f == Some(Kind::Int)) {
@@ -1228,6 +1228,12 @@ fn adapt(plan: &Plan, out: &mut Vec<W<'static>>, from: &str, to: &str) -> Result
                 &desc,
             )?));
         }
+        (Some(Kind::Int), Some(Kind::Long)) => out.push(W::I64ExtendI32S),
+        (Some(Kind::Int), Some(Kind::Float)) => out.push(W::F32ConvertI32S),
+        (Some(Kind::Int), Some(Kind::Double)) => out.push(W::F64ConvertI32S),
+        (Some(Kind::Long), Some(Kind::Float)) => out.push(W::F32ConvertI64S),
+        (Some(Kind::Long), Some(Kind::Double)) => out.push(W::F64ConvertI64S),
+        (Some(Kind::Float), Some(Kind::Double)) => out.push(W::F64PromoteF32),
         _ => return Err(format!("converting {from} to {to} is not compiled yet")),
     }
     Ok(())
@@ -2476,6 +2482,90 @@ impl<'a> MethodCompiler<'a> {
         Ok(())
     }
 
+    /// A pattern `switch` (SwitchBootstraps.typeSwitch or enumSwitch): with
+    /// the object and the label to restart from on the stack, the index of
+    /// the first label from there that matches; -1 for null, the number of
+    /// labels for none.
+    fn type_switch(&mut self, bootstrap: &str, labels: &[u16], d: usize) -> Result<()> {
+        let (object, restart, out) = (
+            self.st(d - 2, Kind::Ref),
+            self.st(d - 1, Kind::Int),
+            self.st(2003, Kind::Int),
+        );
+        let equals = self.plan.host_method(
+            "invokevirtual",
+            "java/lang/Object",
+            "equals",
+            "(Ljava/lang/Object;)Z",
+        )?;
+        self.emit(W::Block(BlockType::Empty));
+        self.emit(W::LocalGet(object));
+        self.emit(W::RefIsNull);
+        self.emit(W::If(BlockType::Empty));
+        self.emit(W::I32Const(-1));
+        self.emit(W::LocalSet(out));
+        self.emit(W::Br(1));
+        self.emit(W::End);
+        for (i, &label) in labels.iter().enumerate() {
+            self.emit(W::LocalGet(restart));
+            self.emit(W::I32Const(i as i32));
+            self.emit(W::I32LeS);
+            self.emit(W::If(BlockType::Empty));
+            match self.class.constants.get(usize::from(label)) {
+                Some(Constant::Class(_)) => {
+                    let class = self
+                        .class
+                        .class_name(label)
+                        .map_err(|e| e.to_string())?
+                        .to_owned();
+                    self.emit(W::LocalGet(object));
+                    self.instance_of(&class);
+                }
+                Some(Constant::String(s)) => {
+                    let s = self.class.utf8(*s).map_err(|e| e.to_string())?.to_owned();
+                    self.emit(W::LocalGet(object));
+                    if bootstrap == "enumSwitch" {
+                        // An enum constant's label is its name.
+                        let name = self.plan.host_method(
+                            "invokevirtual",
+                            "java/lang/Enum",
+                            "name",
+                            "()Ljava/lang/String;",
+                        )?;
+                        self.emit(W::Call(name));
+                    }
+                    self.host_constant(HostConstant::String(s));
+                    self.emit(W::Call(equals));
+                }
+                Some(Constant::Integer(v)) => {
+                    let boxed = self.plan.host_method(
+                        "invokestatic",
+                        "java/lang/Integer",
+                        "valueOf",
+                        "(I)Ljava/lang/Integer;",
+                    )?;
+                    self.emit(W::LocalGet(object));
+                    self.emit(W::I32Const(*v));
+                    self.emit(W::Call(boxed));
+                    self.emit(W::Call(equals));
+                }
+                _ => return Err(format!("a {bootstrap} label of an unknown kind")),
+            }
+            self.emit(W::If(BlockType::Empty));
+            self.emit(W::I32Const(i as i32));
+            self.emit(W::LocalSet(out));
+            self.emit(W::Br(2));
+            self.emit(W::End);
+            self.emit(W::End);
+        }
+        self.emit(W::I32Const(labels.len() as i32));
+        self.emit(W::LocalSet(out));
+        self.emit(W::End);
+        self.emit(W::LocalGet(out));
+        self.set(d - 2, Kind::Int);
+        Ok(())
+    }
+
     /// `instanceof class` of the reference on top of the WASM stack: 0 or 1.
     fn instance_of(&mut self, class: &str) {
         if let Some(component) = class.strip_prefix('[') {
@@ -2588,12 +2678,19 @@ impl<'a> MethodCompiler<'a> {
             }
             return Ok(());
         }
-        if bo != "java/lang/invoke/LambdaMetafactory" || bn != "metafactory" {
+        if bo == "java/lang/runtime/SwitchBootstraps" {
+            return self.type_switch(&bn, &bootstrap.arguments, d);
+        }
+        // altMetafactory adds flags (serializable, markers, bridges) after
+        // the same three arguments: none of them changes the call.
+        if bo != "java/lang/invoke/LambdaMetafactory"
+            || (bn != "metafactory" && bn != "altMetafactory")
+        {
             return Err(format!(
                 "invokedynamic through {bo}.{bn} is not compiled yet"
             ));
         }
-        let [sam, target, _] = bootstrap.arguments[..] else {
+        let [sam, target, _, ..] = bootstrap.arguments[..] else {
             return Err("a bad lambda".into());
         };
         let Some(Constant::MethodType(sam)) = self.class.constants.get(usize::from(sam)) else {

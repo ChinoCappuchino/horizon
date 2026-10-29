@@ -118,11 +118,23 @@ Not done yet:
   the houses must then show in the game.
 - Step 6: the cache and the start time.
 
-What the compiler does not compile yet (it compiles the method as a stub
-that stops with an error, and it reports the method): exception handlers,
-arrays, `instanceof`, string concatenation through `invokedynamic`, virtual
-calls between classes of the jar that override a method, and classes of the
-jar that extend a game class.
+Compiler, all of the pack (2026-10-29): the compiler compiles every method
+of the Afterwinter pack. The object model is complete: classes that extend a
+game class (through a peer object), virtual and interface calls (one
+dispatcher for each name and descriptor), `instanceof`, arrays, exceptions,
+records, enums, string concatenation and pattern `switch`.
+`crates/horizon-java/examples/compile_pack.rs` measures it:
+
+| Item | Before | Now |
+|---|---:|---:|
+| Methods compiled | 74.2 % | 100 % (337,977) |
+| Jars compiled whole | 4 | 113 of 113 |
+| Farmer's Delight 1.3.4 | 62.4 % | 100 % (2,319 methods, 0.5 s) |
+| Time for the pack | | 53 s |
+
+A compiled method is not a working method. It runs only if the
+compatibility layer gives the members that it uses. Farmer's Delight uses
+about 2,200 members of Minecraft and NeoForge.
 
 ## 3. Progress on the startup splash
 
