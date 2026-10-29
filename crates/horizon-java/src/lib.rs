@@ -10,6 +10,8 @@ pub mod cfg;
 pub mod classfile;
 pub mod compile;
 pub mod descriptor;
+#[cfg(feature = "native")]
+pub mod native;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 pub mod types;

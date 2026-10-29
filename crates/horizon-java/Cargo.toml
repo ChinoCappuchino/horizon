@@ -10,8 +10,16 @@ description = "Java mod compatibility (fork afterwinter): reads JVM class files 
 default = ["runtime"]
 # Runs compiled jars (src/runtime.rs).
 runtime = ["dep:wasmtime"]
+# The native backend (docs/java-compat/compiler.md, step 6): Cranelift
+# straight to machine code, with its own object model.
+native = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-native"]
 
 [dependencies]
+cranelift-codegen = { version = "0.135.7", optional = true }
+cranelift-frontend = { version = "0.135.7", optional = true }
+cranelift-jit = { version = "0.135.7", optional = true }
+cranelift-module = { version = "0.135.7", optional = true }
+cranelift-native = { version = "0.135.7", optional = true }
 wasm-encoder = "0.254"
 wasmtime = { version = "48.0.7", default-features = false, features = ["runtime", "cranelift", "std", "gc-drc", "gc-copying"], optional = true }
 

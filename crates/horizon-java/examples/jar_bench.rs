@@ -210,6 +210,7 @@ fn main() -> Result<()> {
     let mut only = Vec::new();
     let mut imports = false;
     let mut native: Option<String> = None;
+    let mut run_native = false;
     let mut paths = Vec::new();
     let mut it = inputs.iter();
     while let Some(a) = it.next() {
@@ -224,6 +225,7 @@ fn main() -> Result<()> {
             }
             "--imports" => imports = true,
             "--native" => native = it.next().cloned(),
+            "--run-native" => run_native = true,
             p => paths.push(p.to_owned()),
         }
     }
@@ -241,6 +243,9 @@ fn main() -> Result<()> {
     );
     for (m, why) in &compiled.skipped {
         eprintln!("not compiled: {m}: {why}");
+    }
+    if run_native {
+        return native_bench(&classes, &bench[1..]);
     }
     if let Some(out) = native {
         std::fs::write(&out, horizon_java::runtime::precompile(&compiled)?)?;
@@ -289,4 +294,58 @@ fn main() -> Result<()> {
         eprintln!("{n:>12} {name}");
     }
     Ok(())
+}
+
+/// The benchmark through the native backend (built with `--features
+/// native`): `make(J)` then `run(made, n)`, five times.
+#[cfg(feature = "native")]
+fn native_bench(classes: &[ClassFile], bench: &[String]) -> Result<()> {
+    let [class, n] = bench else {
+        bail!("usage: ... -- <Class> <n>");
+    };
+    let n: i32 = n.parse()?;
+    let started = Instant::now();
+    let native = horizon_java::native::Native::compile(classes).map_err(anyhow)?;
+    eprintln!(
+        "compiled natively in {:.2} s; {} methods trap (not in the prototype)",
+        started.elapsed().as_secs_f64(),
+        native.unsupported.len()
+    );
+    if std::env::var_os("HORIZON_BENCH_UNSUPPORTED").is_some() {
+        for (m, why) in &native.unsupported {
+            eprintln!("  {m}: {why}");
+        }
+    }
+    let ty = [
+        "Lnet/minecraft/world/level/levelgen/synth/SimplexNoise;",
+        "Ljava/lang/Object;",
+    ]
+    .into_iter()
+    .find(|t| native.function(&format!("{class}.make(J){t}")).is_some())
+    .ok_or(anyhow("no make(J) method"))?;
+    let make = native
+        .function(&format!("{class}.make(J){ty}"))
+        .expect("found");
+    let run = native
+        .function(&format!("{class}.run({ty}I)D"))
+        .ok_or(anyhow("no run method"))?;
+    // SAFETY: the compiled methods have these signatures (a reference is
+    // a pointer, an int an i32), in the platform's calling convention.
+    let make: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(make) };
+    let run: extern "C" fn(i64, i32) -> f64 = unsafe { std::mem::transmute(run) };
+    let made = make(42);
+    for pass in 0..5 {
+        let t = Instant::now();
+        let sum = run(made, n);
+        println!(
+            "pass {pass}: {:.1} ms sum={sum}d",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "native"))]
+fn native_bench(_: &[ClassFile], _: &[String]) -> Result<()> {
+    bail!("built without the native backend: --features native")
 }
