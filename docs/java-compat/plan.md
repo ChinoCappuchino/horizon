@@ -72,13 +72,24 @@ Step 1 (2026-10-29): the class-file reader and the bytecode decoder
 
 Steps 2 to 7: not done yet.
 
-## 3. The order of mods for the Afterwinter pack
+## 3. Progress on the startup splash
+
+The first start after a mod is installed or updated can be slow, because the
+compiler compiles it. The startup splash ([../startup-splash.md](../startup-splash.md))
+shows this work:
+
+1. Each mod that the compiler completes is one drop.
+2. The stage line shows the step and the mod, for example
+   "Compiling Create · 12 / 75".
+3. A mod that comes from the cache is also one drop. It flies in fast.
+
+## 4. The order of mods for the Afterwinter pack
 
 Use the census to select the next mod. Select the mod that needs the smallest
 quantity of new members. This gives the most working mods for the least work.
 Run the census again after each phase.
 
-## 4. Risks
+## 5. Risks
 
 | Risk | Effect | What to do |
 |---|---|---|
