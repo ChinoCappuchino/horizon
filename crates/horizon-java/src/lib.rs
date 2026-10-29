@@ -9,6 +9,8 @@ pub mod bytecode;
 pub mod classfile;
 pub mod compile;
 pub mod descriptor;
+#[cfg(feature = "runtime")]
+pub mod runtime;
 
 pub use bytecode::{Instruction, decode};
 pub use classfile::{ClassFile, Constant, Error};

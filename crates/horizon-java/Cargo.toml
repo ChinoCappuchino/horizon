@@ -6,8 +6,14 @@ license.workspace = true
 publish = false
 description = "Java mod compatibility (fork afterwinter): reads JVM class files and decodes their bytecode, for the compiler that turns original mod jars into Horizon WASM mods"
 
+[features]
+default = ["runtime"]
+# Runs compiled jars (src/runtime.rs).
+runtime = ["dep:wasmtime"]
+
 [dependencies]
 wasm-encoder = "0.254"
+wasmtime = { version = "48.0.7", default-features = false, features = ["runtime", "cranelift", "std", "gc-drc"], optional = true }
 
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }

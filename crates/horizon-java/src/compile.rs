@@ -7,21 +7,46 @@
 //! to cross a block boundary on WASM's own stack. A method's basic blocks are
 //! cases of one dispatch loop: any jump the JVM allows compiles.
 //!
-//! This first version compiles the arithmetic, the local variables, every
-//! branch and switch, static fields and static calls inside the jar, and
-//! each class's static initializer, run once before the class's first use.
+//! References are `anyref`. An object of a class in the jar is a GC struct:
+//! field 0 is its class id, then the instance fields, the superclass's first.
+//! A lambda is a struct too: its site's id, then the captured values. Every
+//! other object belongs to the host (the game and the JDK, given by the
+//! compatibility layer) and is an `externref` converted to `anyref`.
+//!
+//! Whatever is outside the jar is an import of module `host`, named
+//! `<operation> <owner>.<member> <descriptor>`: `invokestatic`,
+//! `invokevirtual`, `invokeinterface`, `new` (a constructor: the arguments
+//! in, the object out), `getstatic`, `putstatic`, `getfield` and
+//! `putfield`. Two more: `constant` (an `ldc` string or class, by index into
+//! [`Compiled::constants`]) and `same` (`==` on references).
+//!
+//! Each method is exported as `<class>.<name><descriptor>`, each lambda as
+//! `lambda <n>` and each class's allocator as `new <class>`.
 use crate::{
-    ClassFile,
+    ClassFile, Constant,
     bytecode::{Instruction, Operand, decode},
+    classfile::{Attribute, Member},
     descriptor::{Kind, Method},
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, HashMap},
+};
 use wasm_encoder::{
-    BlockType, CodeSection, ConstExpr, ExportKind, ExportSection, Function, FunctionSection,
-    GlobalSection, GlobalType, Instruction as W, Module, TypeSection, ValType,
+    BlockType, CodeSection, CompositeInnerType, CompositeType, ConstExpr, EntityType, ExportKind,
+    ExportSection, FieldType, Function, FunctionSection, GlobalSection, GlobalType, HeapType,
+    ImportSection, Instruction as W, Module, RefType, StorageType, StructType, SubType,
+    TypeSection, ValType,
 };
 
 pub type Result<T> = std::result::Result<T, String>;
+
+const ANY: ValType = ValType::Ref(RefType::ANYREF);
+const STATIC: u16 = 0x0008;
+/// Calls to imports carry this bit until the imports are counted.
+const IMPORT: u32 = 1 << 31;
+/// The struct type all objects share: just the class id.
+const OBJECT: u32 = 0;
 
 fn val(kind: Kind) -> ValType {
     match kind {
@@ -29,7 +54,17 @@ fn val(kind: Kind) -> ValType {
         Kind::Long => ValType::I64,
         Kind::Float => ValType::F32,
         Kind::Double => ValType::F64,
-        Kind::Ref => ValType::Ref(wasm_encoder::RefType::ANYREF),
+        Kind::Ref => ANY,
+    }
+}
+
+fn zero(kind: Kind) -> W<'static> {
+    match kind {
+        Kind::Int => W::I32Const(0),
+        Kind::Long => W::I64Const(0),
+        Kind::Float => W::F32Const(0.0.into()),
+        Kind::Double => W::F64Const(0.0.into()),
+        Kind::Ref => W::RefNull(HeapType::ANY),
     }
 }
 
@@ -38,30 +73,22 @@ pub fn export_name(owner: &str, name: &str, descriptor: &str) -> String {
     format!("{owner}.{name}{descriptor}")
 }
 
-struct Plan {
-    /// (class, method, descriptor) → function index.
-    functions: BTreeMap<(String, String, String), u32>,
-    /// (class, field) → (global index, kind).
-    statics: BTreeMap<(String, String), (u32, Kind)>,
-    /// class → (init flag global, its initializer function).
-    inits: BTreeMap<String, (u32, Option<u32>)>,
-    /// class → the function that runs its initializer once.
-    ensure: BTreeMap<String, u32>,
-    types: Vec<(Vec<ValType>, Vec<ValType>)>,
+/// A constant the host makes: an `ldc` of a string or a class.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum HostConstant {
+    String(String),
+    Class(String),
 }
 
-impl Plan {
-    fn type_index(&mut self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
-        if let Some(i) = self
-            .types
-            .iter()
-            .position(|t| t.0 == params && t.1 == results)
-        {
-            return i as u32;
-        }
-        self.types.push((params, results));
-        (self.types.len() - 1) as u32
-    }
+/// A lambda site (an `invokedynamic` through LambdaMetafactory). Its
+/// objects implement `interface`; the host calls `method` on one through
+/// the export `lambda <n>`, with the object and the method's arguments as
+/// `descriptor` gives them (the erased form).
+#[derive(Clone, Debug)]
+pub struct Lambda {
+    pub interface: String,
+    pub method: String,
+    pub descriptor: String,
 }
 
 /// A compiled jar.
@@ -70,19 +97,313 @@ pub struct Compiled {
     /// The methods not compiled, with the reason: each one traps when
     /// called (docs/java-compat/plan.md: stub what is missing, and say so).
     pub skipped: Vec<(String, String)>,
+    /// The classes; an object of class `classes[i]` has id `i + 1`.
+    pub classes: Vec<String>,
+    /// The lambda sites; an object of site `n` has id `classes.len() + 1 + n`.
+    pub lambdas: Vec<Lambda>,
+    pub constants: Vec<HostConstant>,
+}
+
+impl Compiled {
+    /// What an object id is: a class, or a lambda site.
+    pub fn object(&self, id: i32) -> Option<Object<'_>> {
+        let i = usize::try_from(id).ok()?.checked_sub(1)?;
+        match self.classes.get(i) {
+            Some(c) => Some(Object::Class(c)),
+            None => self
+                .lambdas
+                .get(i - self.classes.len())
+                .map(|l| Object::Lambda(i - self.classes.len(), l)),
+        }
+    }
+}
+
+pub enum Object<'a> {
+    Class(&'a str),
+    Lambda(usize, &'a Lambda),
+}
+
+enum TypeDef {
+    Func(Vec<ValType>, Vec<ValType>),
+    /// A struct type: its supertype, and its fields after the class id.
+    Struct(u32, Vec<(ValType, bool)>),
+}
+
+struct Site {
+    sam: String,
+    captures: Vec<String>,
+    /// The method handle's kind (JVMS 5.4.3.5), owner, name, descriptor.
+    target: (u8, String, String, String),
+    ty: u32,
+}
+
+/// How a call is made, by the instruction or method handle.
+#[derive(Clone, Copy, PartialEq)]
+enum Call {
+    Static,
+    Virtual,
+    Interface,
+    Special,
+}
+
+struct Plan<'c> {
+    classes: BTreeMap<String, &'c ClassFile>,
+    ids: BTreeMap<String, u32>,
+    /// (class, method, descriptor) → function index.
+    functions: BTreeMap<(String, String, String), u32>,
+    /// (class, field) → (global index, kind).
+    statics: BTreeMap<(String, String), (u32, Kind)>,
+    /// class → (init flag global, its initializer function).
+    inits: BTreeMap<String, (u32, Option<u32>)>,
+    /// class → the function that runs its initializer once.
+    ensure: BTreeMap<String, u32>,
+    /// class → (struct type, fields: (declaring class, name, kind)).
+    structs: BTreeMap<String, (u32, Vec<(String, String, Kind)>)>,
+    types: RefCell<Vec<TypeDef>>,
+    imports: RefCell<Vec<(String, u32)>>,
+    globals: RefCell<Vec<(Kind, Option<ConstExpr>)>>,
+    constants: RefCell<Vec<(HostConstant, u32)>>,
+    sites: RefCell<Vec<(Lambda, Site)>>,
+}
+
+impl Plan<'_> {
+    fn type_index(&self, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
+        let mut types = self.types.borrow_mut();
+        let found = types
+            .iter()
+            .position(|t| matches!(t, TypeDef::Func(p, r) if *p == params && *r == results));
+        if let Some(i) = found {
+            return i as u32;
+        }
+        types.push(TypeDef::Func(params, results));
+        (types.len() - 1) as u32
+    }
+    fn struct_type(&self, supertype: u32, fields: Vec<(ValType, bool)>) -> u32 {
+        let mut types = self.types.borrow_mut();
+        types.push(TypeDef::Struct(supertype, fields));
+        (types.len() - 1) as u32
+    }
+
+    /// The function index of an import, numbered once the imports are known.
+    fn import(&self, name: String, params: Vec<ValType>, results: Vec<ValType>) -> u32 {
+        let ty = self.type_index(params, results);
+        let mut imports = self.imports.borrow_mut();
+        if let Some(i) = imports.iter().position(|(n, _)| *n == name) {
+            return IMPORT | i as u32;
+        }
+        imports.push((name, ty));
+        IMPORT | (imports.len() - 1) as u32
+    }
+    fn host_method(&self, op: &str, owner: &str, name: &str, desc: &str) -> Result<u32> {
+        let m = Method::parse(desc).ok_or("a bad method descriptor")?;
+        let mut params = Vec::new();
+        if matches!(op, "invokevirtual" | "invokeinterface") {
+            params.push(ANY);
+        }
+        params.extend(m.param_kinds().into_iter().map(val));
+        let results = if op == "new" {
+            vec![ANY]
+        } else {
+            m.return_kind().map(val).into_iter().collect()
+        };
+        Ok(self.import(format!("{op} {owner}.{name} {desc}"), params, results))
+    }
+    fn host_field(&self, op: &str, owner: &str, name: &str, kind: Kind, desc: &str) -> u32 {
+        let (params, results) = match op {
+            "getstatic" => (vec![], vec![val(kind)]),
+            "putstatic" => (vec![val(kind)], vec![]),
+            "getfield" => (vec![ANY], vec![val(kind)]),
+            _ => (vec![ANY, val(kind)], vec![]),
+        };
+        self.import(format!("{op} {owner}.{name} {desc}"), params, results)
+    }
+
+    /// The global that caches a host constant, and its index.
+    fn constant(&self, c: HostConstant) -> (u32, u32) {
+        let mut constants = self.constants.borrow_mut();
+        if let Some(i) = constants.iter().position(|(k, _)| *k == c) {
+            return (i as u32, constants[i].1);
+        }
+        let mut globals = self.globals.borrow_mut();
+        globals.push((Kind::Ref, None));
+        let g = (globals.len() - 1) as u32;
+        constants.push((c, g));
+        ((constants.len() - 1) as u32, g)
+    }
+
+    fn superclass(&self, class: &str) -> Option<&str> {
+        self.classes.get(class)?.super_name().ok().flatten()
+    }
+
+    /// The method a call to `owner.name desc` reaches, searching the
+    /// classes of the jar from `owner` up.
+    fn resolve(&self, owner: &str, name: &str, desc: &str) -> Option<(String, u32)> {
+        let mut c = Some(owner);
+        while let Some(class) = c {
+            let key = (class.to_owned(), name.to_owned(), desc.to_owned());
+            if let Some(&f) = self.functions.get(&key) {
+                return Some((class.to_owned(), f));
+            }
+            c = self.superclass(class);
+        }
+        None
+    }
+
+    /// Whether a class of the jar below `declaring` overrides the method.
+    fn overridden(&self, declaring: &str, name: &str, desc: &str) -> bool {
+        self.functions.keys().any(|(c, n, d)| {
+            n == name && d == desc && c != declaring && {
+                let mut s = self.superclass(c);
+                let mut below = false;
+                while let Some(x) = s {
+                    if x == declaring {
+                        below = true;
+                        break;
+                    }
+                    s = self.superclass(x);
+                }
+                below
+            }
+        })
+    }
+
+    /// Calls `owner.name desc`, its receiver (if any) and arguments on the
+    /// WASM stack. `within` is the class whose initializer is running, so
+    /// it is not started again.
+    fn call(
+        &self,
+        out: &mut Vec<W<'static>>,
+        call: Call,
+        owner: &str,
+        name: &str,
+        desc: &str,
+        within: Option<&str>,
+    ) -> Result<()> {
+        let in_jar = self.classes.contains_key(owner);
+        match call {
+            Call::Static if in_jar => {
+                let (declaring, f) = self
+                    .resolve(owner, name, desc)
+                    .ok_or_else(|| format!("{owner}.{name}{desc} has no code"))?;
+                if within != Some(declaring.as_str()) {
+                    out.push(W::Call(self.ensure[&declaring]));
+                }
+                out.push(W::Call(f));
+            }
+            Call::Static => out.push(W::Call(self.host_method(
+                "invokestatic",
+                owner,
+                name,
+                desc,
+            )?)),
+            Call::Virtual | Call::Interface | Call::Special if in_jar => {
+                match self.resolve(owner, name, desc) {
+                    Some((declaring, f)) => {
+                        if call != Call::Special && self.overridden(&declaring, name, desc) {
+                            return Err(format!(
+                                "{owner}.{name}{desc} is overridden: virtual calls between \
+                                 classes of the jar are not compiled yet"
+                            ));
+                        }
+                        out.push(W::Call(f));
+                    }
+                    // Inherited from the host (java/lang/Object's methods).
+                    None if call != Call::Special => {
+                        out.push(W::Call(self.host_method(
+                            "invokevirtual",
+                            owner,
+                            name,
+                            desc,
+                        )?));
+                    }
+                    None => return Err(format!("{owner}.{name}{desc} has no code")),
+                }
+            }
+            Call::Special if owner == "java/lang/Object" && name == "<init>" => {
+                // The superclass constructor of a class that extends Object.
+                out.push(W::Drop);
+            }
+            Call::Special => {
+                return Err(format!(
+                    "{owner}.{name}{desc}: classes that extend game classes are not compiled yet"
+                ));
+            }
+            Call::Virtual | Call::Interface => {
+                let op = if call == Call::Virtual {
+                    "invokevirtual"
+                } else {
+                    "invokeinterface"
+                };
+                out.push(W::Call(self.host_method(op, owner, name, desc)?));
+            }
+        }
+        Ok(())
+    }
+
+    /// A new object of a class of the jar, its fields zero.
+    fn alloc(&self, out: &mut Vec<W<'static>>, class: &str) -> Result<()> {
+        let (ty, fields) = &self.structs[class];
+        let c = self.classes[class];
+        if c.access & 0x0600 != 0 {
+            return Err(format!("{class} is abstract or an interface"));
+        }
+        if let Some(s) = self.superclass(class)
+            && s != "java/lang/Object"
+            && !self.classes.contains_key(s)
+        {
+            return Err(format!(
+                "{class} extends the game class {s}: not compiled yet"
+            ));
+        }
+        out.push(W::I32Const(self.ids[class] as i32));
+        for (_, _, k) in fields {
+            out.push(zero(*k));
+        }
+        out.push(W::StructNew(*ty));
+        Ok(())
+    }
+
+    /// A field of an object of a class of the jar: (struct type, field index).
+    fn field(&self, owner: &str, name: &str) -> Option<(u32, u32)> {
+        let (ty, fields) = self.structs.get(owner)?;
+        // The field the name means from `owner`: its own, else its
+        // superclass's (the nearest one).
+        let mut c = Some(owner);
+        while let Some(class) = c {
+            if let Some(i) = fields.iter().position(|(d, n, _)| d == class && n == name) {
+                return Some((*ty, i as u32 + 1));
+            }
+            c = self.superclass(class);
+        }
+        None
+    }
 }
 
 /// Compiles the classes of one jar into a WASM module.
 pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
-    let mut skipped = Vec::new();
     let mut plan = Plan {
+        classes: BTreeMap::new(),
+        ids: BTreeMap::new(),
         functions: BTreeMap::new(),
         statics: BTreeMap::new(),
         inits: BTreeMap::new(),
         ensure: BTreeMap::new(),
-        types: Vec::new(),
+        structs: BTreeMap::new(),
+        types: RefCell::new(vec![TypeDef::Struct(u32::MAX, Vec::new())]),
+        imports: RefCell::new(Vec::new()),
+        globals: RefCell::new(Vec::new()),
+        constants: RefCell::new(Vec::new()),
+        sites: RefCell::new(Vec::new()),
     };
-    // Functions: every method with code, then one `ensure` per class.
+    let mut names = Vec::new();
+    for class in classes {
+        let name = class.name().map_err(|e| e.to_string())?.to_owned();
+        plan.ids.insert(name.clone(), names.len() as u32 + 1);
+        plan.classes.insert(name.clone(), class);
+        names.push(name);
+    }
+    // Functions: every method with code, then for each class its `ensure`
+    // and its allocator, then the lambdas.
     let mut bodies = Vec::new();
     for class in classes {
         let owner = class.name().map_err(|e| e.to_string())?.to_owned();
@@ -96,117 +417,204 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
             bodies.push((class, m));
         }
     }
-    let mut globals: Vec<(Kind, Option<ConstExpr>)> = Vec::new();
     for class in classes {
         let owner = class.name().map_err(|e| e.to_string())?.to_owned();
         for f in &class.fields {
-            if f.access & 0x0008 == 0 {
+            if f.access & STATIC == 0 {
                 continue;
             }
             let kind = Kind::of(&f.descriptor).ok_or("a field with a bad descriptor")?;
+            // A constant (`static final int X = 3`) has its value here, not
+            // in the initializer.
+            let constant = f.attributes.iter().find_map(|a| match a {
+                Attribute::ConstantValue(i) => match class.constants.get(usize::from(*i)) {
+                    Some(Constant::Integer(v)) => Some(ConstExpr::i32_const(*v)),
+                    Some(Constant::Float(v)) => Some(ConstExpr::f32_const((*v).into())),
+                    Some(Constant::Long(v)) => Some(ConstExpr::i64_const(*v)),
+                    Some(Constant::Double(v)) => Some(ConstExpr::f64_const((*v).into())),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let mut globals = plan.globals.borrow_mut();
             plan.statics.insert(
                 (owner.clone(), f.name.clone()),
                 (globals.len() as u32, kind),
             );
-            // A constant (`static final int X = 3`) has its value here, not
-            // in the initializer.
-            let constant = f.attributes.iter().find_map(|a| match a {
-                crate::classfile::Attribute::ConstantValue(i) => {
-                    match class.constants.get(usize::from(*i)) {
-                        Some(crate::Constant::Integer(v)) => Some(ConstExpr::i32_const(*v)),
-                        Some(crate::Constant::Float(v)) => Some(ConstExpr::f32_const((*v).into())),
-                        Some(crate::Constant::Long(v)) => Some(ConstExpr::i64_const(*v)),
-                        Some(crate::Constant::Double(v)) => Some(ConstExpr::f64_const((*v).into())),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            });
             globals.push((kind, constant));
         }
         let clinit = plan
             .functions
             .get(&(owner.clone(), "<clinit>".to_owned(), "()V".to_owned()))
             .copied();
+        let mut globals = plan.globals.borrow_mut();
         plan.inits
             .insert(owner.clone(), (globals.len() as u32, clinit));
         globals.push((Kind::Int, None));
     }
-    let ensure_base = bodies.len() as u32;
-    for (i, owner) in plan
-        .inits
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter()
-        .enumerate()
-    {
-        plan.ensure.insert(owner, ensure_base + i as u32);
+    let base = bodies.len() as u32;
+    for (i, owner) in names.iter().enumerate() {
+        plan.ensure.insert(owner.clone(), base + i as u32);
+    }
+    // Struct types, each class after its superclass.
+    fn layout(plan: &mut Plan, class: &str) -> Result<()> {
+        if plan.structs.contains_key(class) {
+            return Ok(());
+        }
+        let c = plan.classes[class];
+        let (supertype, mut fields) = match plan.superclass(class).map(str::to_owned) {
+            Some(s) if plan.classes.contains_key(&s) => {
+                layout(plan, &s)?;
+                plan.structs[&s].clone()
+            }
+            _ => (OBJECT, Vec::new()),
+        };
+        for f in &c.fields {
+            if f.access & STATIC == 0 {
+                let kind = Kind::of(&f.descriptor).ok_or("a field with a bad descriptor")?;
+                fields.push((class.to_owned(), f.name.clone(), kind));
+            }
+        }
+        let ty = plan.struct_type(
+            supertype,
+            fields.iter().map(|(_, _, k)| (val(*k), true)).collect(),
+        );
+        plan.structs.insert(class.to_owned(), (ty, fields));
+        Ok(())
+    }
+    for name in &names {
+        layout(&mut plan, name)?;
     }
 
-    let mut functions = FunctionSection::new();
-    let mut code = CodeSection::new();
-    let mut exports = ExportSection::new();
+    let mut skipped = Vec::new();
+    let mut functions: Vec<(u32, Vec<ValType>, Vec<W<'static>>)> = Vec::new();
+    let mut exports: Vec<(String, u32)> = Vec::new();
     for (class, m) in &bodies {
         let owner = class.name().map_err(|e| e.to_string())?;
         let sig = Method::parse(&m.descriptor).ok_or("a bad method descriptor")?;
         let mut params: Vec<ValType> = Vec::new();
-        if m.access & 0x0008 == 0 {
-            params.push(val(Kind::Ref));
+        if m.access & STATIC == 0 {
+            params.push(ANY);
         }
         params.extend(sig.param_kinds().into_iter().map(val));
         let results: Vec<ValType> = sig.return_kind().map(val).into_iter().collect();
         let ty = plan.type_index(params, results);
-        functions.function(ty);
-        let body = match MethodCompiler::new(&plan, class, m).and_then(|c| c.compile()) {
+        let name = export_name(owner, &m.name, &m.descriptor);
+        let (locals, body) = match MethodCompiler::new(&plan, class, m).and_then(|c| c.compile()) {
             Ok(body) => body,
             Err(e) => {
-                skipped.push((export_name(owner, &m.name, &m.descriptor), e));
-                let mut f = Function::new([]);
-                f.instruction(&W::Unreachable);
-                f.instruction(&W::End);
-                f
+                skipped.push((name.clone(), e));
+                (Vec::new(), vec![W::Unreachable, W::End])
             }
         };
-        code.function(&body);
-        exports.export(
-            &export_name(owner, &m.name, &m.descriptor),
-            ExportKind::Func,
-            plan.functions[&(owner.to_owned(), m.name.clone(), m.descriptor.clone())],
-        );
+        exports.push((name, functions.len() as u32));
+        functions.push((ty, locals, body));
     }
     // ensure(class): if !flag { flag = 1; <clinit>() }
-    let ensure_ty = plan.type_index(Vec::new(), Vec::new());
-    for (flag, clinit) in plan.inits.values() {
-        functions.function(ensure_ty);
-        let mut f = Function::new([]);
-        f.instruction(&W::GlobalGet(*flag));
-        f.instruction(&W::I32Eqz);
-        f.instruction(&W::If(BlockType::Empty));
-        f.instruction(&W::I32Const(1));
-        f.instruction(&W::GlobalSet(*flag));
+    let none = plan.type_index(Vec::new(), Vec::new());
+    for owner in &names {
+        let (flag, clinit) = plan.inits[owner];
+        let mut f = vec![
+            W::GlobalGet(flag),
+            W::I32Eqz,
+            W::If(BlockType::Empty),
+            W::I32Const(1),
+            W::GlobalSet(flag),
+        ];
         if let Some(c) = clinit {
-            f.instruction(&W::Call(*c));
+            f.push(W::Call(c));
         }
-        f.instruction(&W::End);
-        f.instruction(&W::End);
-        code.function(&f);
+        f.extend([W::End, W::End]);
+        functions.push((none, Vec::new(), f));
+    }
+    let alloc_ty = plan.type_index(Vec::new(), vec![ANY]);
+    for owner in &names {
+        let mut f = Vec::new();
+        match plan.alloc(&mut f, owner) {
+            Ok(()) => {
+                f.insert(0, W::Call(plan.ensure[owner]));
+                f.push(W::End);
+                exports.push((format!("new {owner}"), functions.len() as u32));
+                functions.push((alloc_ty, Vec::new(), f));
+            }
+            Err(_) => functions.push((alloc_ty, Vec::new(), vec![W::Unreachable, W::End])),
+        }
+    }
+    // The lambdas: closure and arguments in, the target method called.
+    let sites = plan.sites.borrow().len();
+    for n in 0..sites {
+        let (ty, locals, body) = lambda(&plan, n).map_err(|e| format!("lambda {n}: {e}"))?;
+        exports.push((format!("lambda {n}"), functions.len() as u32));
+        functions.push((ty, locals, body));
     }
 
+    // Now the imports are known: they come first.
+    let imports = plan.imports.borrow();
+    let shift = imports.len() as u32;
+    let fix = |i: u32| {
+        if i & IMPORT != 0 {
+            i & !IMPORT
+        } else {
+            i + shift
+        }
+    };
     let mut types = TypeSection::new();
-    for (params, results) in &plan.types {
-        types
-            .ty()
-            .function(params.iter().copied(), results.iter().copied());
+    for t in plan.types.borrow().iter() {
+        match t {
+            TypeDef::Func(params, results) => {
+                types
+                    .ty()
+                    .function(params.iter().copied(), results.iter().copied());
+            }
+            TypeDef::Struct(supertype, fields) => {
+                let mut all = vec![FieldType {
+                    element_type: StorageType::Val(ValType::I32),
+                    mutable: false,
+                }];
+                all.extend(fields.iter().map(|(v, mutable)| FieldType {
+                    element_type: StorageType::Val(*v),
+                    mutable: *mutable,
+                }));
+                types.ty().subtype(&SubType {
+                    is_final: false,
+                    supertype_idx: (*supertype != u32::MAX).then_some(*supertype),
+                    composite_type: CompositeType {
+                        inner: CompositeInnerType::Struct(StructType {
+                            fields: all.into_boxed_slice(),
+                        }),
+                        shared: false,
+                        descriptor: None,
+                        describes: None,
+                    },
+                });
+            }
+        }
+    }
+    let mut import_section = ImportSection::new();
+    for (name, ty) in imports.iter() {
+        import_section.import("host", name, EntityType::Function(*ty));
+    }
+    let mut function_section = FunctionSection::new();
+    let mut code = CodeSection::new();
+    for (ty, locals, body) in &functions {
+        function_section.function(*ty);
+        let mut f = Function::new_with_locals_types(locals.iter().copied());
+        for i in body {
+            match i {
+                W::Call(c) => f.instruction(&W::Call(fix(*c))),
+                i => f.instruction(i),
+            };
+        }
+        code.function(&f);
     }
     let mut global_section = GlobalSection::new();
-    for (kind, constant) in &globals {
+    for (kind, constant) in plan.globals.borrow().iter() {
         let init = constant.clone().unwrap_or_else(|| match kind {
             Kind::Int => ConstExpr::i32_const(0),
             Kind::Long => ConstExpr::i64_const(0),
             Kind::Float => ConstExpr::f32_const(0.0.into()),
             Kind::Double => ConstExpr::f64_const(0.0.into()),
-            Kind::Ref => ConstExpr::ref_null(wasm_encoder::HeapType::ANY),
+            Kind::Ref => ConstExpr::ref_null(HeapType::ANY),
         });
         global_section.global(
             GlobalType {
@@ -217,25 +625,202 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
             &init,
         );
     }
+    let mut export_section = ExportSection::new();
+    for (name, f) in &exports {
+        export_section.export(name, ExportKind::Func, f + shift);
+    }
     let mut module = Module::new();
     module.section(&types);
-    module.section(&functions);
+    module.section(&import_section);
+    module.section(&function_section);
     module.section(&global_section);
-    module.section(&exports);
+    module.section(&export_section);
     module.section(&code);
     Ok(Compiled {
         wasm: module.finish(),
         skipped,
+        classes: names,
+        lambdas: plan.sites.borrow().iter().map(|(l, _)| l.clone()).collect(),
+        constants: plan
+            .constants
+            .borrow()
+            .iter()
+            .map(|(c, _)| c.clone())
+            .collect(),
     })
 }
 
-/// The stack kinds before each instruction, by abstract interpretation.
+/// The wrapper class of a primitive descriptor, for boxing.
+fn wrapper(desc: &str) -> Option<(&'static str, &'static str)> {
+    Some(match desc {
+        "I" => ("java/lang/Integer", "intValue"),
+        "Z" => ("java/lang/Boolean", "booleanValue"),
+        "B" => ("java/lang/Byte", "byteValue"),
+        "C" => ("java/lang/Character", "charValue"),
+        "S" => ("java/lang/Short", "shortValue"),
+        "J" => ("java/lang/Long", "longValue"),
+        "F" => ("java/lang/Float", "floatValue"),
+        "D" => ("java/lang/Double", "doubleValue"),
+        _ => return None,
+    })
+}
+
+/// Converts the value on top of the WASM stack from type `from` to `to`,
+/// as LambdaMetafactory does: boxing and unboxing.
+fn adapt(plan: &Plan, out: &mut Vec<W<'static>>, from: &str, to: &str) -> Result<()> {
+    let (f, t) = (Kind::of(from), Kind::of(to));
+    if f == t && (f == Some(Kind::Ref) || from == to || f == Some(Kind::Int)) {
+        return Ok(());
+    }
+    match (f, t) {
+        (Some(Kind::Ref), Some(_)) => {
+            let (class, method) = wrapper(to).ok_or("a bad type")?;
+            let desc = format!("(){to}");
+            out.push(W::Call(plan.host_method(
+                "invokevirtual",
+                class,
+                method,
+                &desc,
+            )?));
+        }
+        (Some(_), Some(Kind::Ref)) => {
+            let (class, _) = wrapper(from).ok_or("a bad type")?;
+            let desc = format!("({from})L{class};");
+            out.push(W::Call(plan.host_method(
+                "invokestatic",
+                class,
+                "valueOf",
+                &desc,
+            )?));
+        }
+        _ => return Err(format!("converting {from} to {to} is not compiled yet")),
+    }
+    Ok(())
+}
+
+/// The function behind lambda site `n`: (closure, interface arguments) →
+/// the interface method's result.
+fn lambda(plan: &Plan, n: usize) -> Result<(u32, Vec<ValType>, Vec<W<'static>>)> {
+    let sites = plan.sites.borrow();
+    let site = &sites[n].1;
+    let sam = Method::parse(&site.sam).ok_or("a bad descriptor")?;
+    let mut params = vec![ANY];
+    params.extend(sam.param_kinds().into_iter().map(val));
+    let results: Vec<ValType> = sam.return_kind().map(val).into_iter().collect();
+    let ty = plan.type_index(params.clone(), results);
+
+    let (kind, owner, name, desc) = &site.target;
+    let target = Method::parse(desc).ok_or("a bad descriptor")?;
+    let receiver = matches!(kind, 5 | 7 | 9);
+    let mut wanted: Vec<String> = Vec::new();
+    if receiver {
+        wanted.push(format!("L{owner};"));
+    }
+    wanted.extend(target.params.iter().cloned());
+    // The values: the captured ones, then the interface method's arguments.
+    let mut values: Vec<(String, W<'static>, Option<u32>)> = Vec::new();
+    for (j, c) in site.captures.iter().enumerate() {
+        values.push((c.clone(), W::LocalGet(0), Some(j as u32 + 1)));
+    }
+    for (j, p) in sam.params.iter().enumerate() {
+        values.push((p.clone(), W::LocalGet(j as u32 + 1), None));
+    }
+    if values.len() != wanted.len() {
+        return Err(format!(
+            "{} values for {} parameters",
+            values.len(),
+            wanted.len()
+        ));
+    }
+    let mut out = Vec::new();
+    let in_jar = plan.classes.contains_key(owner.as_str());
+    // A constructor of the jar's class (`Foo::new`): allocate first.
+    let object = params.len() as u32;
+    let mut locals = Vec::new();
+    if *kind == 8 && in_jar {
+        locals.push(ANY);
+        out.push(W::Call(plan.ensure[owner.as_str()]));
+        plan.alloc(&mut out, owner)?;
+        out.push(W::LocalTee(object));
+    }
+    for ((from, get, field), to) in values.into_iter().zip(&wanted) {
+        out.push(get);
+        if let Some(f) = field {
+            out.push(W::RefCastNullable(HeapType::Concrete(site.ty)));
+            out.push(W::StructGet {
+                struct_type_index: site.ty,
+                field_index: f,
+            });
+        }
+        adapt(plan, &mut out, &from, to)?;
+    }
+    let returns = match kind {
+        6 => {
+            plan.call(&mut out, Call::Static, owner, name, desc, None)?;
+            target.ret.clone()
+        }
+        5 | 9 | 7 => {
+            let call = match kind {
+                5 => Call::Virtual,
+                9 => Call::Interface,
+                _ => Call::Special,
+            };
+            plan.call(&mut out, call, owner, name, desc, None)?;
+            target.ret.clone()
+        }
+        8 if in_jar => {
+            plan.call(&mut out, Call::Special, owner, name, desc, None)?;
+            out.push(W::LocalGet(object));
+            format!("L{owner};")
+        }
+        8 => {
+            out.push(W::Call(plan.host_method("new", owner, name, desc)?));
+            format!("L{owner};")
+        }
+        _ => {
+            return Err(format!(
+                "method handles of kind {kind} are not compiled yet"
+            ));
+        }
+    };
+    if sam.ret == "V" {
+        if returns != "V" {
+            out.push(W::Drop);
+        }
+    } else {
+        adapt(plan, &mut out, &returns, &sam.ret)?;
+    }
+    out.push(W::End);
+    Ok((ty, locals, out))
+}
+
+/// A value on the stack, as the kinds pass sees it: its kind, and for an
+/// object from `new` not yet constructed, that `new`'s offset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Slot {
+    kind: Kind,
+    new: Option<u32>,
+}
+
+impl From<Kind> for Slot {
+    fn from(kind: Kind) -> Slot {
+        Slot { kind, new: None }
+    }
+}
+
+impl Slot {
+    fn wide(self) -> bool {
+        self.kind.wide()
+    }
+}
+
+/// The stack before each instruction, by abstract interpretation.
 fn stack_kinds(
     class: &ClassFile,
     insns: &[Instruction],
     at: &HashMap<u32, usize>,
-) -> Result<Vec<Option<Vec<Kind>>>> {
-    let mut before: Vec<Option<Vec<Kind>>> = vec![None; insns.len()];
+) -> Result<Vec<Option<Vec<Slot>>>> {
+    let mut before: Vec<Option<Vec<Slot>>> = vec![None; insns.len()];
     let mut work = vec![(0usize, Vec::new())];
     while let Some((i, stack)) = work.pop() {
         if i >= insns.len() {
@@ -291,15 +876,35 @@ fn successors(insn: &Instruction, i: usize, at: &HashMap<u32, usize>) -> Result<
     })
 }
 
-fn pop(s: &mut Vec<Kind>) -> Result<Kind> {
+fn pop(s: &mut Vec<Slot>) -> Result<Slot> {
     s.pop().ok_or_else(|| "the stack underflows".to_owned())
 }
 
+fn push(s: &mut Vec<Slot>, v: impl Into<Slot>) {
+    s.push(v.into());
+}
+
+/// The member an invoke instruction names, and its descriptor.
+fn invoked(class: &ClassFile, insn: &Instruction) -> Result<(String, String, String)> {
+    let (Operand::Constant(i) | Operand::Interface(i, _)) = insn.operand else {
+        return Err("an invoke without a constant".into());
+    };
+    if insn.opcode == 0xBA {
+        let Some(Constant::InvokeDynamic(_, nat)) = class.constants.get(usize::from(i)) else {
+            return Err("a bad invokedynamic".into());
+        };
+        let (name, desc) = class.name_and_type(*nat).map_err(|e| e.to_string())?;
+        return Ok((String::new(), name.to_owned(), desc.to_owned()));
+    }
+    let (o, n, d) = class.member_ref(i).map_err(|e| e.to_string())?;
+    Ok((o.to_owned(), n.to_owned(), d.to_owned()))
+}
+
 /// What an instruction does to the stack's kinds.
-fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Kind>) -> Result<()> {
+fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Slot>) -> Result<()> {
     use Kind::*;
     let op = insn.opcode;
-    let pops = |s: &mut Vec<Kind>, n: usize| -> Result<()> {
+    let pops = |s: &mut Vec<Slot>, n: usize| -> Result<()> {
         for _ in 0..n {
             pop(s)?;
         }
@@ -307,44 +912,49 @@ fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Kind>) -> Result<()
     };
     match op {
         0x00 => {}
-        0x01 => s.push(Ref),
-        0x02..=0x08 | 0x10 | 0x11 => s.push(Int),
-        0x09 | 0x0A => s.push(Long),
-        0x0B..=0x0D => s.push(Float),
-        0x0E | 0x0F => s.push(Double),
+        0x01 => push(s, Ref),
+        0x02..=0x08 | 0x10 | 0x11 => push(s, Int),
+        0x09 | 0x0A => push(s, Long),
+        0x0B..=0x0D => push(s, Float),
+        0x0E | 0x0F => push(s, Double),
         0x12..=0x14 => {
             let Operand::Constant(i) = insn.operand else {
                 unreachable!()
             };
-            s.push(match class.constants.get(usize::from(i)) {
-                Some(crate::Constant::Integer(_)) => Int,
-                Some(crate::Constant::Float(_)) => Float,
-                Some(crate::Constant::Long(_)) => Long,
-                Some(crate::Constant::Double(_)) => Double,
-                _ => Ref,
-            })
+            push(
+                s,
+                match class.constants.get(usize::from(i)) {
+                    Some(Constant::Integer(_)) => Int,
+                    Some(Constant::Float(_)) => Float,
+                    Some(Constant::Long(_)) => Long,
+                    Some(Constant::Double(_)) => Double,
+                    _ => Ref,
+                },
+            )
         }
-        0x15 | 0x1A..=0x1D => s.push(Int),
-        0x16 | 0x1E..=0x21 => s.push(Long),
-        0x17 | 0x22..=0x25 => s.push(Float),
-        0x18 | 0x26..=0x29 => s.push(Double),
-        0x19 | 0x2A..=0x2D => s.push(Ref),
+        0x15 | 0x1A..=0x1D => push(s, Int),
+        0x16 | 0x1E..=0x21 => push(s, Long),
+        0x17 | 0x22..=0x25 => push(s, Float),
+        0x18 | 0x26..=0x29 => push(s, Double),
+        0x19 | 0x2A..=0x2D => push(s, Ref),
         0x2E..=0x35 => {
             pops(s, 2)?;
-            s.push(match op {
-                0x2F => Long,
-                0x30 => Float,
-                0x31 => Double,
-                0x32 => Ref,
-                _ => Int,
-            })
+            push(
+                s,
+                match op {
+                    0x2F => Long,
+                    0x30 => Float,
+                    0x31 => Double,
+                    0x32 => Ref,
+                    _ => Int,
+                },
+            )
         }
         0x36..=0x4E => pops(s, 1)?,
         0x4F..=0x56 => pops(s, 3)?,
         0x57 => pops(s, 1)?,
         0x58 => {
-            if pop(s)?.wide() {
-            } else {
+            if !pop(s)?.wide() {
                 pop(s)?;
             }
         }
@@ -413,33 +1023,30 @@ fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Kind>) -> Result<()
             let b = pop(s)?;
             s.extend([a, b]);
         }
-        0x60..=0x73 => {
+        0x60..=0x73 | 0x7E..=0x83 => {
             let k = pop(s)?;
             pop(s)?;
-            s.push(k);
+            push(s, k);
         }
-        0x74..=0x77 => {}
+        0x74..=0x77 | 0x84 => {}
         0x78..=0x7D => {
             pop(s)?;
         }
-        0x7E..=0x83 => {
-            let k = pop(s)?;
-            pop(s)?;
-            s.push(k);
-        }
-        0x84 => {}
         0x85..=0x93 => {
             pop(s)?;
-            s.push(match op {
-                0x85 | 0x8C | 0x8F => Long,
-                0x86 | 0x89 | 0x90 => Float,
-                0x87 | 0x8A | 0x8D => Double,
-                _ => Int,
-            })
+            push(
+                s,
+                match op {
+                    0x85 | 0x8C | 0x8F => Long,
+                    0x86 | 0x89 | 0x90 => Float,
+                    0x87 | 0x8A | 0x8D => Double,
+                    _ => Int,
+                },
+            )
         }
         0x94..=0x98 => {
             pops(s, 2)?;
-            s.push(Int)
+            push(s, Int)
         }
         0x99..=0x9E | 0xC6 | 0xC7 => pops(s, 1)?,
         0x9F..=0xA6 => pops(s, 2)?,
@@ -447,29 +1054,46 @@ fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Kind>) -> Result<()
         0xAA | 0xAB => pops(s, 1)?,
         0xAC..=0xB0 => pops(s, 1)?,
         0xB1 => {}
-        0xB2 | 0xB3 => {
+        0xB2..=0xB5 => {
             let Operand::Constant(i) = insn.operand else {
                 unreachable!()
             };
             let (_, _, d) = class.member_ref(i).map_err(|e| e.to_string())?;
             let k = Kind::of(d).ok_or("a bad field descriptor")?;
-            if op == 0xB2 {
-                s.push(k)
-            } else {
-                pop(s)?;
+            match op {
+                0xB2 => push(s, k),
+                0xB3 => pops(s, 1)?,
+                0xB4 => {
+                    pop(s)?;
+                    push(s, k)
+                }
+                _ => pops(s, 2)?,
             }
         }
-        0xB8 => {
-            let Operand::Constant(i) = insn.operand else {
-                unreachable!()
-            };
-            let (_, _, d) = class.member_ref(i).map_err(|e| e.to_string())?;
-            let m = Method::parse(d).ok_or("a bad method descriptor")?;
+        0xB6..=0xBA => {
+            let (_, name, d) = invoked(class, insn)?;
+            let m = Method::parse(&d).ok_or("a bad method descriptor")?;
             pops(s, m.params.len())?;
+            if matches!(op, 0xB6 | 0xB7 | 0xB9) {
+                let receiver = pop(s)?;
+                // A constructor makes every copy of the new object whole.
+                if op == 0xB7 && name == "<init>" && receiver.new.is_some() {
+                    for v in s.iter_mut() {
+                        if v.new == receiver.new {
+                            v.new = None;
+                        }
+                    }
+                }
+            }
             if let Some(k) = m.return_kind() {
-                s.push(k);
+                push(s, k);
             }
         }
+        0xBB => s.push(Slot {
+            kind: Ref,
+            new: Some(insn.at),
+        }),
+        0xC0 => {}
         _ => {
             return Err(format!("{} is not compiled yet", crate::bytecode::name(op)));
         }
@@ -478,10 +1102,10 @@ fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Kind>) -> Result<()
 }
 
 struct MethodCompiler<'a> {
-    plan: &'a Plan,
+    plan: &'a Plan<'a>,
     class: &'a ClassFile,
     owner: String,
-    method: &'a crate::classfile::Member,
+    method: &'a Member,
     insns: Vec<Instruction>,
     /// Local index by (JVM slot or stack depth, kind).
     locals: BTreeMap<(bool, u16, Kind), u32>,
@@ -491,18 +1115,17 @@ struct MethodCompiler<'a> {
 }
 
 impl<'a> MethodCompiler<'a> {
-    fn new(
-        plan: &'a Plan,
-        class: &'a ClassFile,
-        method: &'a crate::classfile::Member,
-    ) -> Result<Self> {
+    fn new(plan: &'a Plan<'a>, class: &'a ClassFile, method: &'a Member) -> Result<Self> {
         let code = method.code().ok_or("no code")?;
+        if !code.handlers.is_empty() {
+            return Err("exception handlers are not compiled yet".into());
+        }
         let insns = decode(&code.code).map_err(|e| e.to_string())?;
         let sig = Method::parse(&method.descriptor).ok_or("a bad method descriptor")?;
         let mut locals = BTreeMap::new();
         let mut slot = 0u16;
         let mut index = 0u32;
-        if method.access & 0x0008 == 0 {
+        if method.access & STATIC == 0 {
             locals.insert((true, 0, Kind::Ref), 0);
             slot = 1;
             index = 1;
@@ -552,8 +1175,12 @@ impl<'a> MethodCompiler<'a> {
         let l = self.st(d, kind);
         self.emit(W::LocalSet(l));
     }
+    /// The class whose initializer this is, if it is one.
+    fn within(&self) -> Option<&str> {
+        (self.method.name == "<clinit>").then_some(self.owner.as_str())
+    }
 
-    fn compile(mut self) -> Result<Function> {
+    fn compile(mut self) -> Result<(Vec<ValType>, Vec<W<'static>>)> {
         let at: HashMap<u32, usize> = self
             .insns
             .iter()
@@ -566,16 +1193,9 @@ impl<'a> MethodCompiler<'a> {
         let mut leaders = BTreeSet::from([0usize]);
         for (i, insn) in self.insns.iter().enumerate() {
             let succ = successors(insn, i, &at)?;
-            let ends = !matches!(
+            let ends = matches!(
                 insn.operand,
-                Operand::None
-                    | Operand::Value(_)
-                    | Operand::Local(_)
-                    | Operand::Increment(..)
-                    | Operand::Constant(_)
-                    | Operand::Interface(..)
-                    | Operand::Dimensions(..)
-                    | Operand::ArrayType(_)
+                Operand::Target(_) | Operand::Table { .. } | Operand::Lookup { .. }
             ) || matches!(insn.opcode, 0xAC..=0xB1 | 0xBF);
             if ends {
                 leaders.extend(succ.iter().copied().filter(|&t| t < self.insns.len()));
@@ -594,7 +1214,7 @@ impl<'a> MethodCompiler<'a> {
 
         // A static method makes sure its class is initialized (the host may
         // call it first), as the JVM does on invokestatic.
-        if self.method.access & 0x0008 != 0 && self.method.name != "<clinit>" {
+        if self.method.access & STATIC != 0 && self.method.name != "<clinit>" {
             let e = self.plan.ensure[&self.owner];
             self.emit(W::Call(e));
         }
@@ -618,8 +1238,7 @@ impl<'a> MethodCompiler<'a> {
             for i in start..end {
                 let stack = before[i].clone().expect("reachable within a block");
                 let insn = self.insns[i].clone();
-                let last = i + 1 == end;
-                self.instruction(&insn, &stack, &block_of, &at, loop_depth, last)?;
+                self.instruction(&insn, &stack, &block_of, &at, loop_depth)?;
             }
             // Falling through to the next block needs nothing: its code
             // follows the end of its block.
@@ -627,11 +1246,7 @@ impl<'a> MethodCompiler<'a> {
         self.emit(W::End);
         self.emit(W::Unreachable);
         self.emit(W::End);
-        let mut f = Function::new_with_locals_types(self.extra.iter().copied());
-        for i in &self.out {
-            f.instruction(i);
-        }
-        Ok(f)
+        Ok((self.extra, self.out))
     }
 
     /// Jumps to the block at instruction `target`.
@@ -647,13 +1262,13 @@ impl<'a> MethodCompiler<'a> {
     fn instruction(
         &mut self,
         insn: &Instruction,
-        stack: &[Kind],
+        slots: &[Slot],
         block_of: &HashMap<usize, usize>,
         at: &HashMap<u32, usize>,
         loop_depth: u32,
-        _last: bool,
     ) -> Result<()> {
         use Kind::*;
+        let stack: Vec<Kind> = slots.iter().map(|s| s.kind).collect();
         let d = stack.len();
         let op = insn.opcode;
         let top = |k: usize| stack[d - 1 - k];
@@ -661,7 +1276,7 @@ impl<'a> MethodCompiler<'a> {
         match op {
             0x00 => {}
             0x01 => {
-                self.emit(W::RefNull(wasm_encoder::HeapType::ANY));
+                self.emit(W::RefNull(HeapType::ANY));
                 self.set(d, Ref);
             }
             0x02..=0x08 => {
@@ -692,11 +1307,23 @@ impl<'a> MethodCompiler<'a> {
                     unreachable!()
                 };
                 let (w, k) = match self.class.constants.get(usize::from(i)) {
-                    Some(crate::Constant::Integer(v)) => (W::I32Const(*v), Int),
-                    Some(crate::Constant::Float(v)) => (W::F32Const((*v).into()), Float),
-                    Some(crate::Constant::Long(v)) => (W::I64Const(*v), Long),
-                    Some(crate::Constant::Double(v)) => (W::F64Const((*v).into()), Double),
-                    _ => return Err("ldc of a string or class is not compiled yet".into()),
+                    Some(Constant::Integer(v)) => (W::I32Const(*v), Int),
+                    Some(Constant::Float(v)) => (W::F32Const((*v).into()), Float),
+                    Some(Constant::Long(v)) => (W::I64Const(*v), Long),
+                    Some(Constant::Double(v)) => (W::F64Const((*v).into()), Double),
+                    Some(Constant::String(s)) => {
+                        let s = self.class.utf8(*s).map_err(|e| e.to_string())?;
+                        self.host_constant(HostConstant::String(s.to_owned()));
+                        self.set(d, Ref);
+                        return Ok(());
+                    }
+                    Some(Constant::Class(_)) => {
+                        let c = self.class.class_name(i).map_err(|e| e.to_string())?;
+                        self.host_constant(HostConstant::Class(c.to_owned()));
+                        self.set(d, Ref);
+                        return Ok(());
+                    }
+                    _ => return Err("ldc of a method type or handle is not compiled yet".into()),
                 };
                 self.emit(w);
                 self.set(d, k);
@@ -725,12 +1352,10 @@ impl<'a> MethodCompiler<'a> {
                 let l = self.var(n, k);
                 self.emit(W::LocalSet(l));
             }
-            0x57 => {}
-            0x58 => {}
+            0x57 | 0x58 => {}
             0x59..=0x5F => {
-                // Rearrange the stack locals as the kinds pass computed.
                 // The values the instruction moves: the top of the stack.
-                let low = d - pick(op, stack)?;
+                let low = d - pick(op, &stack)?;
                 let moved: Vec<(usize, Kind)> = (low..d).map(|i| (i, stack[i])).collect();
                 let order = arrangement(op, &moved)?;
                 for &(i, k) in &order {
@@ -864,7 +1489,15 @@ impl<'a> MethodCompiler<'a> {
                         self.emit(int_compare(op - 0x9F));
                     }
                     0xA5 | 0xA6 => {
-                        return Err("reference comparisons are not compiled yet".into());
+                        self.get(d - 2, Ref);
+                        self.get(d - 1, Ref);
+                        let same =
+                            self.plan
+                                .import("same".into(), vec![ANY, ANY], vec![ValType::I32]);
+                        self.emit(W::Call(same));
+                        if op == 0xA6 {
+                            self.emit(W::I32Eqz);
+                        }
                     }
                     _ => {
                         self.get(d - 1, Ref);
@@ -923,44 +1556,140 @@ impl<'a> MethodCompiler<'a> {
                 };
                 let (owner, name, desc) = self.class.member_ref(i).map_err(|e| e.to_string())?;
                 let k = Kind::of(desc).ok_or("a bad field descriptor")?;
-                let Some(&(g, _)) = self.plan.statics.get(&(owner.to_owned(), name.to_owned()))
-                else {
-                    return Err(format!(
-                        "the static field {owner}.{name} is outside the jar"
-                    ));
-                };
-                self.ensure(owner);
-                if op == 0xB2 {
-                    self.emit(W::GlobalGet(g));
-                    self.set(d, k);
-                } else {
-                    self.get(d - 1, k);
-                    self.emit(W::GlobalSet(g));
+                match self.plan.statics.get(&(owner.to_owned(), name.to_owned())) {
+                    Some(&(g, _)) => {
+                        self.ensure(owner);
+                        if op == 0xB2 {
+                            self.emit(W::GlobalGet(g));
+                            self.set(d, k);
+                        } else {
+                            self.get(d - 1, k);
+                            self.emit(W::GlobalSet(g));
+                        }
+                    }
+                    None if self.plan.classes.contains_key(owner) => {
+                        return Err(format!("the static field {owner}.{name} is inherited"));
+                    }
+                    None if op == 0xB2 => {
+                        let f = self.plan.host_field("getstatic", owner, name, k, desc);
+                        self.emit(W::Call(f));
+                        self.set(d, k);
+                    }
+                    None => {
+                        let f = self.plan.host_field("putstatic", owner, name, k, desc);
+                        self.get(d - 1, k);
+                        self.emit(W::Call(f));
+                    }
                 }
             }
-            0xB8 => {
+            0xB4 | 0xB5 => {
                 let Operand::Constant(i) = insn.operand else {
                     unreachable!()
                 };
                 let (owner, name, desc) = self.class.member_ref(i).map_err(|e| e.to_string())?;
-                let key = (owner.to_owned(), name.to_owned(), desc.to_owned());
-                let Some(&f) = self.plan.functions.get(&key) else {
-                    return Err(format!(
-                        "the method {owner}.{name}{desc} is outside the jar"
-                    ));
-                };
-                let m = Method::parse(desc).ok_or("a bad method descriptor")?;
+                let k = Kind::of(desc).ok_or("a bad field descriptor")?;
+                let object = if op == 0xB4 { d - 1 } else { d - 2 };
+                self.get(object, Ref);
+                match self.plan.field(owner, name) {
+                    Some((ty, field)) => {
+                        self.emit(W::RefCastNullable(HeapType::Concrete(ty)));
+                        if op == 0xB4 {
+                            self.emit(W::StructGet {
+                                struct_type_index: ty,
+                                field_index: field,
+                            });
+                            self.set(d - 1, k);
+                        } else {
+                            self.get(d - 1, k);
+                            self.emit(W::StructSet {
+                                struct_type_index: ty,
+                                field_index: field,
+                            });
+                        }
+                    }
+                    None if self.plan.classes.contains_key(owner) => {
+                        return Err(format!("the field {owner}.{name} is the game's"));
+                    }
+                    None if op == 0xB4 => {
+                        let f = self.plan.host_field("getfield", owner, name, k, desc);
+                        self.emit(W::Call(f));
+                        self.set(d - 1, k);
+                    }
+                    None => {
+                        let f = self.plan.host_field("putfield", owner, name, k, desc);
+                        self.get(d - 1, k);
+                        self.emit(W::Call(f));
+                    }
+                }
+            }
+            0xB6..=0xB9 => {
+                let (owner, name, desc) = invoked(self.class, insn)?;
+                let m = Method::parse(&desc).ok_or("a bad method descriptor")?;
                 let kinds = m.param_kinds();
                 let base = d - kinds.len();
+                let receiver = (op != 0xB8).then(|| base - 1);
+                let within = self.within().map(str::to_owned);
+                // A game class's constructor on an object from `new`: the
+                // host makes the object, which replaces every copy.
+                if op == 0xB7 && name == "<init>" && !self.plan.classes.contains_key(&owner) {
+                    let r = base - 1;
+                    if let Some(new) = slots[r].new {
+                        for (j, k) in kinds.iter().enumerate() {
+                            self.get(base + j, *k);
+                        }
+                        let f = self.plan.host_method("new", &owner, &name, &desc)?;
+                        self.emit(W::Call(f));
+                        self.set(r, Ref);
+                        for j in 0..r {
+                            if slots[j].new == Some(new) {
+                                self.get(r, Ref);
+                                self.set(j, Ref);
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+                if let Some(r) = receiver {
+                    self.get(r, Ref);
+                }
                 for (j, k) in kinds.iter().enumerate() {
                     self.get(base + j, *k);
                 }
-                self.ensure(owner);
-                self.emit(W::Call(f));
+                let call = match op {
+                    0xB6 => Call::Virtual,
+                    0xB7 => Call::Special,
+                    0xB8 => Call::Static,
+                    _ => Call::Interface,
+                };
+                let mut out = std::mem::take(&mut self.out);
+                let r = self
+                    .plan
+                    .call(&mut out, call, &owner, &name, &desc, within.as_deref());
+                self.out = out;
+                r?;
                 if let Some(k) = m.return_kind() {
-                    self.set(base, k);
+                    self.set(receiver.unwrap_or(base), k);
                 }
             }
+            0xBA => self.invokedynamic(insn, d)?,
+            0xBB => {
+                let Operand::Constant(i) = insn.operand else {
+                    unreachable!()
+                };
+                let class = self.class.class_name(i).map_err(|e| e.to_string())?;
+                if self.plan.classes.contains_key(class) {
+                    self.ensure(class);
+                    let mut out = std::mem::take(&mut self.out);
+                    let r = self.plan.alloc(&mut out, class);
+                    self.out = out;
+                    r?;
+                } else {
+                    // The host makes it in the constructor call.
+                    self.emit(W::RefNull(HeapType::ANY));
+                }
+                self.set(d, Ref);
+            }
+            0xC0 => {}
             _ => {
                 return Err(format!("{} is not compiled yet", crate::bytecode::name(op)));
             }
@@ -968,8 +1697,99 @@ impl<'a> MethodCompiler<'a> {
         Ok(())
     }
 
+    /// Pushes a host constant to the stack local `d` (the caller sets it).
+    fn host_constant(&mut self, c: HostConstant) {
+        let (index, g) = self.plan.constant(c);
+        let f = self
+            .plan
+            .import("constant".into(), vec![ValType::I32], vec![ANY]);
+        self.emit(W::GlobalGet(g));
+        self.emit(W::RefIsNull);
+        self.emit(W::If(BlockType::Empty));
+        self.emit(W::I32Const(index as i32));
+        self.emit(W::Call(f));
+        self.emit(W::GlobalSet(g));
+        self.emit(W::End);
+        self.emit(W::GlobalGet(g));
+    }
+
+    fn invokedynamic(&mut self, insn: &Instruction, d: usize) -> Result<()> {
+        let e = |e: crate::Error| e.to_string();
+        let Operand::Constant(i) = insn.operand else {
+            unreachable!()
+        };
+        let Some(Constant::InvokeDynamic(bsm, nat)) = self.class.constants.get(usize::from(i))
+        else {
+            return Err("a bad invokedynamic".into());
+        };
+        let (method, desc) = self.class.name_and_type(*nat).map_err(e)?;
+        let bootstrap = self
+            .class
+            .bootstrap_methods()
+            .get(usize::from(*bsm))
+            .ok_or("a bad bootstrap method")?;
+        let handle = |index: u16| match self.class.constants.get(usize::from(index)) {
+            Some(Constant::MethodHandle(kind, r)) => {
+                let (o, n, d) = self.class.member_ref(*r).map_err(e)?;
+                Ok((*kind, o.to_owned(), n.to_owned(), d.to_owned()))
+            }
+            _ => Err("a bad method handle".to_owned()),
+        };
+        let (_, bo, bn, _) = handle(bootstrap.method_handle)?;
+        if bo != "java/lang/invoke/LambdaMetafactory" || bn != "metafactory" {
+            return Err(format!(
+                "invokedynamic through {bo}.{bn} is not compiled yet"
+            ));
+        }
+        let [sam, target, _] = bootstrap.arguments[..] else {
+            return Err("a bad lambda".into());
+        };
+        let Some(Constant::MethodType(sam)) = self.class.constants.get(usize::from(sam)) else {
+            return Err("a bad lambda".into());
+        };
+        let sam = self.class.utf8(*sam).map_err(e)?.to_owned();
+        let target = handle(target)?;
+        let site_desc = Method::parse(desc).ok_or("a bad descriptor")?;
+        let interface = site_desc
+            .ret
+            .strip_prefix('L')
+            .and_then(|r| r.strip_suffix(';'))
+            .ok_or("a lambda of no interface")?
+            .to_owned();
+        let captures = site_desc.param_kinds();
+        let ty = self
+            .plan
+            .struct_type(OBJECT, captures.iter().map(|k| (val(*k), false)).collect());
+        let n = {
+            let mut sites = self.plan.sites.borrow_mut();
+            sites.push((
+                Lambda {
+                    interface,
+                    method: method.to_owned(),
+                    descriptor: sam.clone(),
+                },
+                Site {
+                    sam,
+                    captures: site_desc.params.clone(),
+                    target,
+                    ty,
+                },
+            ));
+            sites.len() - 1
+        };
+        let id = self.plan.classes.len() + 1 + n;
+        let base = d - captures.len();
+        self.emit(W::I32Const(id as i32));
+        for (j, k) in captures.iter().enumerate() {
+            self.get(base + j, *k);
+        }
+        self.emit(W::StructNew(ty));
+        self.set(base, Kind::Ref);
+        Ok(())
+    }
+
     fn ensure(&mut self, owner: &str) {
-        if owner == self.owner && self.method.name == "<clinit>" {
+        if self.within() == Some(owner) {
             return;
         }
         if let Some(&e) = self.plan.ensure.get(owner) {
