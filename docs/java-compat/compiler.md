@@ -161,6 +161,50 @@ Rules for level 2:
    from observed behavior. Compile the JDK classes only on the player's
    computer, from the player's Java runtime. Do not distribute them.
 
+### 4.5 Mods of other game versions (the version bridge)
+
+Decision 2026-10-29 (owner): mods of older game versions run on the new
+game through a bridge, as ViaVersion bridges protocol versions. The bridge
+is a chain of steps, one per game version, and each step is shared by all
+mods. There is no per-mod adaptation.
+
+| Change between versions | What the bridge does |
+|---|---|
+| Unchanged member | Nothing. |
+| Class renamed or moved (`ResourceLocation` to `Identifier`, `net/minecraft/Util` to `net/minecraft/util/Util`) | The install remaps the mod's references. Found by a tool, no manual work. |
+| Member renamed | The same, after a check. |
+| Signature changed (`CompoundTag.getInt` now gives `Optional`) | A generated or small written adapter method. |
+| Class or member removed, or an API that changed its design (`ItemInteractionResult` merged into `InteractionResult`, GUI rendering) | A translation unit, written one time for each API change. |
+
+Mixin targets go through the same chain. A Mixin whose injection point is in
+a method that changed falls back as in 4.2.
+
+Data from the Afterwinter pack (113 mods, 1.21.1 to 26.3; tool
+`examples/api_diff.rs`), as a share of the mods' references to the game:
+
+| Category | Share |
+|---|---:|
+| Unchanged | 75.9% |
+| Inherited from a library (unchanged) | 2.3% |
+| Class renamed or moved (automatic) | 4.1% |
+| Member renamed (candidates) | 2.9% |
+| Signature changed | 5.0% |
+| Removed | 4.5% |
+| Class removed | 4.2% |
+
+The 13.7% that need adapters or translation units is concentrated: 23
+classes have half of it, 123 classes have 80%, 244 have 90%. The largest are
+`CompoundTag`, `GuiGraphics`, `RenderSystem`, `Minecraft`, `InteractionResult`,
+`RenderType`, `Level`, `ItemInteractionResult`, `ItemStack`. Client rendering
+changed most.
+
+Each step of the chain is tested against the vanilla of both versions,
+compiled locally (differential tests of each translation unit).
+
+Loaders and their versions are settings of the install (a file like
+`server.properties`); the default order is NeoForge 1.21.1, Fabric 26.x,
+NeoForge 26.x, Fabric 1.21.1, Quilt, Forge 1.20.1, then older.
+
 ## 5. Steps
 
 Do the steps in this sequence. Each step keeps all tests correct (Farmer's
