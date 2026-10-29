@@ -135,6 +135,32 @@ ticks.
 
 `ItemStack` is not a value type: vanilla uses its identity in 31 places.
 
+### 4.4 Library methods
+
+Decision 2026-10-29 (owner): the library methods that almost all mods use
+get Rust versions, to remove calls and objects. Data from the Afterwinter pack
+(113 mods; tool `examples/lib_census.rs`): 1,091 library classes and 6,635
+library methods, but a small set has most of the uses.
+
+| Level | What | Uses in the pack |
+|---|---|---|
+| 1. Resolved at install | `invokedynamic`: lambdas (`LambdaMetafactory`), string concatenation (`StringConcatFactory`), record methods (`ObjectMethods`). Each call site becomes direct code. `java.lang.invoke` is not used at run time. | Lambdas: 109 mods, 11,855 sites. Concatenation: 103 mods, 4,790 sites. Records: 79 mods, 2,831 sites. |
+| 2. Rust versions | `String`, boxing (`Integer.valueOf`, `intValue`, `Boolean`), `ArrayList`, `HashMap`, `HashSet`, iterators, `Optional`, `Objects`, `Math`. They make fewer objects (no node object per map entry, no iterator object after inlining). | 81 to 106 mods each |
+| 3. Compiled library | All other library methods: the real classes, compiled from the player's own Java runtime. | the remainder |
+
+Rules for level 2:
+
+1. The behavior is the same as Java's, also where code can see it: the
+   iteration order of `HashMap` (its hash and its resize policy), the
+   exceptions, the identity of cached boxes (`Integer` from -128 to 127).
+2. A differential test against the real compiled class must pass before a
+   Rust version is used.
+3. The Rust versions are classes of the object model, so that a mod class can
+   extend them and override their methods.
+4. Clean room: write the Rust versions from the public API documentation and
+   from observed behavior. Compile the JDK classes only on the player's
+   computer, from the player's Java runtime. Do not distribute them.
+
 ## 5. Steps
 
 Do the steps in this sequence. Each step keeps all tests correct (Farmer's
