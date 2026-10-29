@@ -466,6 +466,33 @@ none.
     "top": "carve", "bottom": "none", "rigid_junctions": true, "inflate": true } }
 ```
 
+#### Villager professions (fork `afterwinter`)
+
+Professions and their job sites are registries, not a fixed list: the
+game's fifteen keep their places and a mod adds its own. A job site is a
+POI type, the blocks a villager can take as its workplace:
+
+```json
+// data/mymod/horizon/poi_type/oven.json
+{ "blocks": ["mymod:oven"], "max_tickets": 1, "valid_range": 1 }
+```
+
+```json
+// data/mymod/horizon/villager_profession/baker.json
+{ "job_site": "mymod:oven", "work_sound": "mymod:block.oven.bake",
+  "requested_items": ["minecraft:wheat"], "secondary_job_sites": [] }
+```
+
+An unemployed villager near a `mymod:oven` becomes a `mymod:baker`. Its
+outfit is `assets/mymod/textures/entity/villager/profession/baker.png` (and
+`entity/zombie_villager/...` for the zombie), with the usual `.png.mcmeta`
+`villager.hat`. Its trades are the trade sets `mymod:baker/level_1` to
+`level_5`. Saves keep the profession's id; a mod's profession past the
+game's goes over the network by its index, which both sides share because
+they load the same mods. The Java compatibility layer
+(docs/java-compat/README.md) registers NeoForge mods' professions the same
+way, from code (`horizon_client::professions`).
+
 ### Server mods (API 0.3, experimental)
 
 A server mod runs where the world is simulated: on the dedicated server, on a

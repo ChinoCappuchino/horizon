@@ -2002,7 +2002,7 @@ pub fn boat_from_nbt(tag: &Tag) -> Option<(Vec3, Vec3, f32)> {
 
 /// `VillagerData`: type, profession and level.
 fn villager_data(m: &Mob) -> Tag {
-    use crate::mobs::render::{PROFESSIONS, VILLAGER_TYPES};
+    use crate::mobs::render::VILLAGER_TYPES;
     Tag::compound([
         (
             "type",
@@ -2013,10 +2013,7 @@ fn villager_data(m: &Mob) -> Tag {
         ),
         (
             "profession",
-            string(&format!(
-                "minecraft:{}",
-                PROFESSIONS[m.extra.variant2 as usize % PROFESSIONS.len()]
-            )),
+            string(&crate::professions::id(m.extra.variant2)),
         ),
         ("level", Tag::Int(i32::from(m.extra.variant3.max(1)))),
     ])
@@ -2134,18 +2131,15 @@ fn put_memories(map: &mut Compound, m: &Mob) {
     );
 }
 fn read_villager(m: &mut Mob, tag: &Tag) {
-    use crate::{
-        merchant::Trader,
-        mobs::render::{PROFESSIONS, VILLAGER_TYPES},
-    };
+    use crate::{merchant::Trader, mobs::render::VILLAGER_TYPES};
     if let Some(data) = tag.get("VillagerData") {
         let name = |key| text(data.get(key)).map(|s| s.trim_start_matches("minecraft:").to_owned());
         if let Some(t) = name("type").and_then(|t| VILLAGER_TYPES.iter().position(|v| *v == t)) {
             m.extra.variant = t as u8;
         }
-        m.extra.variant2 = name("profession")
-            .and_then(|p| PROFESSIONS.iter().position(|v| *v == p))
-            .unwrap_or(0) as u8;
+        m.extra.variant2 = text(data.get("profession"))
+            .and_then(|p| crate::professions::index(&p))
+            .unwrap_or(0);
         m.extra.variant3 = number(data.get("level")).unwrap_or(1).clamp(1, 5) as u8;
     }
     let memory = |key: &str| {

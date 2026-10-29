@@ -1,8 +1,5 @@
 //! VillagerProfessionLayer's cached texture metadata and type-layer head visibility.
-use super::{
-    anim::Poses,
-    render::{PROFESSIONS, VILLAGER_TYPES},
-};
+use super::{anim::Poses, render::VILLAGER_TYPES};
 use std::{collections::HashMap, fs, path::Path};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -20,41 +17,43 @@ impl VillagerHats {
     pub fn load(root: &Path) -> Self {
         let mut hats = HashMap::new();
         for folder in ["villager", "zombie_villager"] {
-            for (group, names) in [
-                ("type", VILLAGER_TYPES.as_slice()),
-                ("profession", PROFESSIONS.as_slice()),
-            ] {
-                for name in names {
-                    let texture = format!("entity/{folder}/{group}/{name}");
-                    let path = root.join(format!("assets/minecraft/textures/{texture}.png.mcmeta"));
-                    let metadata = fs::read(path)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-                    let hat = match metadata
-                        .as_ref()
-                        .and_then(|v| v["villager"]["hat"].as_str())
-                    {
-                        Some("partial") => Hat::Partial,
-                        Some("full") => Hat::Full,
-                        _ => Hat::None,
-                    };
-                    hats.insert(texture, hat);
-                }
+            // The type layers, then every profession's (a mod's in its own
+            // namespace: `ns:entity/villager/profession/name`).
+            let mut textures: Vec<String> = VILLAGER_TYPES
+                .iter()
+                .map(|t| format!("entity/{folder}/type/{t}"))
+                .collect();
+            textures.extend(
+                (0..crate::professions::count())
+                    .map(|p| crate::professions::texture(&format!("entity/{folder}"), p as u8)),
+            );
+            for texture in textures {
+                let (ns, path) = texture.split_once(':').unwrap_or(("minecraft", &texture));
+                let path = root.join(format!("assets/{ns}/textures/{path}.png.mcmeta"));
+                let metadata = fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                let hat = match metadata
+                    .as_ref()
+                    .and_then(|v| v["villager"]["hat"].as_str())
+                {
+                    Some("partial") => Hat::Partial,
+                    Some("full") => Hat::Full,
+                    _ => Hat::None,
+                };
+                hats.insert(texture, hat);
             }
         }
         Self(hats)
     }
 
+    /// Hides the head under a profession's hat: `profession` is the
+    /// profession layer's texture ([`crate::professions::texture`]).
     pub fn apply(&self, folder: &str, variant: &str, profession: &str, poses: &mut Poses) {
-        let hat = |group, name| {
-            self.0
-                .get(&format!("{folder}/{group}/{name}"))
-                .copied()
-                .unwrap_or_default()
-        };
-        let visible = match hat("profession", profession) {
+        let hat = |texture: &str| self.0.get(texture).copied().unwrap_or_default();
+        let visible = match hat(profession) {
             Hat::None => true,
-            Hat::Partial => hat("type", variant) != Hat::Full,
+            Hat::Partial => hat(&format!("{folder}/type/{variant}")) != Hat::Full,
             Hat::Full => false,
         };
         // VillagerModel.createNoHatModel clears the head and every child.

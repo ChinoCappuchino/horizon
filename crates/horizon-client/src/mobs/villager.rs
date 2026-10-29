@@ -11,32 +11,17 @@ use horizon_core::random::RandomSource;
 use std::f32::consts::PI;
 
 // Villager state: `variant` type, `variant2` profession (index into
-// `render::PROFESSIONS`), `variant3` level, `home` the claimed job site,
+// `crate::professions`), `variant3` level, `home` the claimed job site,
 // `bed` and `meeting` the claimed bed head and bell, `ints[0]` the unhappy
 // counter, `ints[1]` the bed's facing while asleep (1 north, 2 south,
 // 3 west, 4 east), `trade` the offers, experience and restocks.
 
-pub const NONE: u8 = 0;
-pub const NITWIT: u8 = 11;
+pub const NONE: u8 = crate::professions::NONE;
+pub const NITWIT: u8 = crate::professions::NITWIT;
 
-/// `PoiTypes`: the job site block of each profession.
+/// `PoiTypes`: the profession whose job site a block is.
 pub fn job_site_profession(block: &str) -> Option<u8> {
-    Some(match block.trim_start_matches("minecraft:") {
-        "blast_furnace" => 1,
-        "smoker" => 2,
-        "cartography_table" => 3,
-        "brewing_stand" => 4,
-        "composter" => 5,
-        "barrel" => 6,
-        "fletching_table" => 7,
-        "cauldron" | "water_cauldron" | "lava_cauldron" | "powder_snow_cauldron" => 8,
-        "lectern" => 9,
-        "stonecutter" => 10,
-        "loom" => 12,
-        "smithing_table" => 13,
-        "grindstone" => 14,
-        _ => return None,
-    })
+    crate::professions::job_site_profession(block)
 }
 
 pub fn register(m: &mut Mob) {
@@ -297,22 +282,7 @@ pub fn set_profession(m: &mut Mob, profession: u8) {
 }
 /// `VillagerProfession.workSound`.
 pub fn work_sound(profession: u8) -> Option<&'static str> {
-    Some(match super::render::PROFESSIONS[profession as usize % 15] {
-        "armorer" => "entity.villager.work_armorer",
-        "butcher" => "entity.villager.work_butcher",
-        "cartographer" => "entity.villager.work_cartographer",
-        "cleric" => "entity.villager.work_cleric",
-        "farmer" => "entity.villager.work_farmer",
-        "fisherman" => "entity.villager.work_fisherman",
-        "fletcher" => "entity.villager.work_fletcher",
-        "leatherworker" => "entity.villager.work_leatherworker",
-        "librarian" => "entity.villager.work_librarian",
-        "mason" => "entity.villager.work_mason",
-        "shepherd" => "entity.villager.work_shepherd",
-        "toolsmith" => "entity.villager.work_toolsmith",
-        "weaponsmith" => "entity.villager.work_weaponsmith",
-        _ => return None,
-    })
+    crate::professions::work_sound(profession)
 }
 /// A `CropBlock` at `p`.
 pub fn crop(w: &MobWorld, p: [i32; 3]) -> bool {
@@ -336,9 +306,11 @@ pub fn gift_table(m: &Mob) -> String {
     if m.is_baby() {
         return "minecraft:gameplay/hero_of_the_village/baby_gift".into();
     }
-    let profession = super::render::PROFESSIONS[m.extra.variant2 as usize % 15];
-    let name = match profession {
+    let profession = crate::professions::name(m.extra.variant2);
+    // GiveGiftToHero's gifts: the game's professions, else the unemployed's.
+    let name = match &*profession {
         "none" | "nitwit" => "unemployed",
+        other if other.contains(':') => "unemployed",
         other => other,
     };
     format!("minecraft:gameplay/hero_of_the_village/{name}_gift")
@@ -365,14 +337,10 @@ pub fn farmer_items() -> &'static [&'static str] {
 }
 /// A villager's `requestedItems` by profession.
 pub fn requested_items(m: &Mob) -> &'static [&'static str] {
-    if super::render::PROFESSIONS[m.extra.variant2 as usize % 15] == "farmer" {
-        farmer_items()
-    } else {
-        &[]
-    }
+    crate::professions::requested_items(m.extra.variant2)
 }
 pub fn is_farmer(m: &Mob) -> bool {
-    super::render::PROFESSIONS[m.extra.variant2 as usize % 15] == "farmer"
+    &*crate::professions::name(m.extra.variant2) == "farmer"
 }
 /// `SimpleContainer(8)`: stacks the villager carries.
 const INVENTORY_SLOTS: usize = 8;

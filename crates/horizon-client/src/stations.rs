@@ -25,6 +25,8 @@ pub struct StationData {
 }
 impl StationData {
     pub fn load(root: &Path, items: &Items) -> Self {
+        // Mods' villager professions and job sites (before the trades).
+        crate::professions::load(root);
         Self {
             enchantments: std::sync::Arc::clone(&items.enchantments),
             recipes: StationRecipes::load(root, items),

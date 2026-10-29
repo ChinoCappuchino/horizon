@@ -186,7 +186,7 @@ impl Game<'_> {
             }
             "trade" => {
                 let profession = arg(1)?.trim_start_matches("minecraft:").to_owned();
-                if !horizon_client::merchant::PROFESSIONS.contains(&profession.as_str()) {
+                if horizon_client::professions::index(&profession).is_none() {
                     return Err(format!("unknown profession {profession}").into());
                 }
                 let level: i32 = words.get(2).map_or(Ok(1), |l| l.parse())?;

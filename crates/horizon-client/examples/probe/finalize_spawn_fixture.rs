@@ -15,7 +15,7 @@ use horizon_client::{
         data::MobData,
         finalize::{self, Attr, Ctx, FinalizeLevel, Reason, SpawnData, SpawnRegistries},
         gear,
-        render::{DYE_NAMES, PROFESSIONS, VILLAGER_TYPES},
+        render::{DYE_NAMES, VILLAGER_TYPES},
         spawning::LocalDifficulty,
     },
 };
@@ -223,7 +223,7 @@ fn variant(m: &Mob, regs: &SpawnRegistries, v: &mut Vec<String>) {
         S::Villager => v.push(format!(
             "minecraft:{}/minecraft:{}/{}",
             VILLAGER_TYPES[m.extra.variant as usize % 7],
-            PROFESSIONS[m.extra.variant2 as usize % PROFESSIONS.len()],
+            &*horizon_client::professions::name(m.extra.variant2),
             m.extra.variant3.max(1)
         )),
         S::ZombieVillager => v.push(format!(

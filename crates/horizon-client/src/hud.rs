@@ -393,18 +393,39 @@ impl HudAtlas {
         for folder in folders {
             walk(&textures.join(folder), &mut files);
         }
+        // Mods' entity textures too (a mod villager profession's layer, a
+        // mod mob's skin), named `ns:entity/...`.
+        if let Ok(namespaces) = fs::read_dir(root.join("assets")) {
+            let mut namespaces: Vec<_> = namespaces.flatten().map(|e| e.path()).collect();
+            namespaces.sort();
+            for ns in namespaces {
+                if ns.file_name().is_some_and(|n| n == "minecraft") {
+                    continue;
+                }
+                for folder in folders.iter().filter(|f| f.starts_with("entity")) {
+                    walk(&ns.join("textures").join(folder), &mut files);
+                }
+            }
+        }
+        let assets = root.join("assets");
         files.retain(|p| {
             let s = p.to_string_lossy();
             !s.contains("title/background") && !s.contains("realms") && !s.contains("presets")
         });
         type Decoded = (PackedImage, Option<TextureFlags>, Option<(u32, u32)>, bool);
         let decode_one = |path: &PathBuf| -> Option<Decoded> {
-            let name = path
-                .strip_prefix(&textures)
-                .ok()?
-                .with_extension("")
-                .to_string_lossy()
-                .replace('\\', "/");
+            let name = match path.strip_prefix(&textures) {
+                Ok(rel) => rel.with_extension("").to_string_lossy().replace('\\', "/"),
+                Err(_) => {
+                    // assets/<ns>/textures/<rel>.png
+                    let rel = path.strip_prefix(&assets).ok()?;
+                    let mut parts = rel.components();
+                    let ns = parts.next()?.as_os_str().to_string_lossy().into_owned();
+                    parts.next()?;
+                    let rest = parts.as_path().with_extension("");
+                    format!("{ns}:{}", rest.to_string_lossy().replace('\\', "/"))
+                }
+            };
             let (mut w, mut h, pixels) = decode(path).ok()?;
             let mcmeta = fs::read_to_string(path.with_extension("png.mcmeta")).ok();
             let animation = mcmeta

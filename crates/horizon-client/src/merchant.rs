@@ -563,11 +563,13 @@ impl Trades {
         v
     }
     /// `VillagerProfession.getTrades(level)`.
+    /// The trade set of a profession's level: `minecraft:farmer/level_1`,
+    /// a mod's in its namespace (`chefsdelight:chef/level_1`).
     pub fn set_for(profession: &str, level: i32) -> String {
-        format!(
-            "minecraft:{}/level_{level}",
-            profession.trim_start_matches("minecraft:")
-        )
+        let (ns, name) = profession
+            .split_once(':')
+            .unwrap_or(("minecraft", profession));
+        format!("{ns}:{name}/level_{level}")
     }
     fn trade_list(&self, spec: &Value) -> Vec<String> {
         match spec {

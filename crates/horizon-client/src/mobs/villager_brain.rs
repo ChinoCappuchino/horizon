@@ -794,13 +794,15 @@ impl Poi {
     fn max_tickets(self) -> usize {
         match self {
             Poi::Meeting => 32,
-            _ => 1,
+            Poi::Job(p) => crate::professions::job_site(p).map_or(1, |t| t.max_tickets as usize),
+            Poi::Home => 1,
         }
     }
     fn valid_range(self) -> i32 {
         match self {
             Poi::Meeting => 6,
-            _ => 1,
+            Poi::Job(p) => crate::professions::job_site(p).map_or(1, |t| t.valid_range as i32),
+            Poi::Home => 1,
         }
     }
 }

@@ -3,7 +3,7 @@
 //! `onSyncedDataUpdated`): what a client draws from it rather than from its
 //! own simulation, which a client of a server doesn't run.
 use super::Game;
-use horizon_client::mobs::render::{PROFESSIONS, VILLAGER_TYPES};
+use horizon_client::mobs::render::VILLAGER_TYPES;
 use horizon_client::mobs::{
     Mob, Species, Who, armadillo, bat, bee, camel, creaking, equine, finalize, illusioner, panda,
     sniffer, sync, tame, zombie_villager,
@@ -400,7 +400,16 @@ fn villager_data(m: &mut Mob, data: &[i32], builtin: &Builtin) {
     if let Some(t) = index("minecraft:villager_type", kind, &VILLAGER_TYPES) {
         m.extra.variant = t;
     }
-    if let Some(p) = index("minecraft:villager_profession", profession, &PROFESSIONS) {
+    // A profession by its id in the built-in registry; a mod's (past the
+    // game's) by its index in the registry both sides load.
+    let by_name = builtin
+        .get("minecraft:villager_profession")
+        .and_then(|r| r.name(profession))
+        .and_then(horizon_client::professions::index);
+    let by_index = u8::try_from(profession)
+        .ok()
+        .filter(|p| usize::from(*p) < horizon_client::professions::count());
+    if let Some(p) = by_name.or(by_index) {
         m.extra.variant2 = p;
     }
     m.extra.variant3 = level.clamp(0, i32::from(u8::MAX)) as u8;

@@ -67,23 +67,6 @@ pub fn sheep_wool_rgb(color: u8) -> u32 {
 pub const VILLAGER_TYPES: [&str; 7] = [
     "plains", "desert", "jungle", "savanna", "snow", "swamp", "taiga",
 ];
-pub const PROFESSIONS: [&str; 15] = [
-    "none",
-    "armorer",
-    "butcher",
-    "cartographer",
-    "cleric",
-    "farmer",
-    "fisherman",
-    "fletcher",
-    "leatherworker",
-    "librarian",
-    "mason",
-    "nitwit",
-    "shepherd",
-    "toolsmith",
-    "weaponsmith",
-];
 fn baby_or(m: &Mob, adult: &str, baby: &str) -> String {
     if m.is_baby() && m.kind.layer(baby).is_some() {
         baby.to_owned()
@@ -753,16 +736,16 @@ pub fn layers(m: &Mob) -> Vec<Layer> {
                 white,
                 false,
             );
-            let prof = PROFESSIONS[m.extra.variant2 as usize % PROFESSIONS.len()];
-            if !m.is_baby() && prof != "none" {
+            let prof = crate::professions::name(m.extra.variant2);
+            if !m.is_baby() && &*prof != "none" {
                 push(
                     &mut v,
                     &model,
-                    &format!("{folder}/profession/{prof}"),
+                    &crate::professions::texture(folder, m.extra.variant2),
                     white,
                     false,
                 );
-                if prof != "nitwit" {
+                if &*prof != "nitwit" {
                     // `LEVEL_LOCATIONS` clamps the level to 1..=5.
                     let level = ["stone", "iron", "gold", "emerald", "diamond"]
                         [(m.extra.variant3.max(1) as usize - 1).min(4)];
@@ -1256,11 +1239,11 @@ fn render_visible(
                 .split_once("/type/")
                 .or_else(|| layer.texture.split_once("/baby/"))
         {
-            let profession = PROFESSIONS[m.extra.variant2 as usize % PROFESSIONS.len()];
+            let profession = crate::professions::texture(folder, m.extra.variant2);
             data.villager_hats
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .apply(folder, variant, profession, &mut layer_poses);
+                .apply(folder, variant, &profession, &mut layer_poses);
         }
         let light = if layer.full_bright {
             240 | 240 << 8
@@ -1527,7 +1510,7 @@ mod tests {
             let kind = std::sync::Arc::new(types.types[kind].clone());
             for baby in [false, true] {
                 for t in 0..VILLAGER_TYPES.len() {
-                    for p in 0..PROFESSIONS.len() {
+                    for p in 0..15 {
                         let mut m =
                             Mob::new(1, kind.clone(), horizon_core::geometry::Vec3::ZERO, 0.0);
                         m.extra.age = if baby { -24000 } else { 0 };
