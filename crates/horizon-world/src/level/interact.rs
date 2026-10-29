@@ -82,6 +82,12 @@ pub enum PlayerEffect {
     OpenMenu,
     /// `CakeBlock.eat`: the player eats a slice (food 2, saturation 0.1).
     EatCake,
+    /// `FoodData.eat(nutrition, saturationModifier)`, from a mod's code: the
+    /// food added and the saturation modifier.
+    Eat {
+        nutrition: i32,
+        saturation_modifier: f32,
+    },
     /// Give the item to the player (dropping it when the inventory is full).
     GiveItem(Arc<str>),
     /// Pop the item at the block (composter bone meal).
@@ -107,9 +113,15 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         player: PlayerContext,
     ) -> InteractionResult {
         let b = self.b;
+        let state = self.state(pos);
+        // A mod's own code for its block first (its game class's below).
+        if let Some(code) = b.code_for(state)
+            && let Some(r) = code.use_without_item(self, pos, face, hit, &player)
+        {
+            return r;
+        }
         let p = b.props;
         let table = &b.table;
-        let state = self.state(pos);
         let data = b.data(state);
         let block = b.block(state);
         use InteractionResult::*;

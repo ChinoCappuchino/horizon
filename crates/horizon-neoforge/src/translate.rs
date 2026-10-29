@@ -73,111 +73,177 @@ struct Subscriber {
     is_static: bool,
 }
 
-/// Translates mods that run together (a mod after the mods it needs), one
-/// translation each, in order.
-pub fn translate_all(jars: &[Vec<ClassFile>], game: Arc<GameData>) -> Result<Vec<Translation>> {
-    let mut compiled = Vec::new();
-    let mut out = Vec::new();
-    for classes in jars {
-        let c = compile(classes).map_err(wasmtime::Error::msg)?;
-        out.push(Translation {
-            skipped: c.skipped.len(),
-            ..Translation::default()
-        });
-        compiled.push(c);
-    }
-    let host = Rc::new(NeoForge::new(game.clone()));
-    let mut rt = Runtime::link(compiled, host.clone())?;
-    let mut cx = rt.context();
-    let mod_bus = obj(Obj::Bus("mod".into()));
-    let mut errors: Vec<String> = Vec::new();
+/// Mods running: constructed and registered as NeoForge does, kept for
+/// what comes after (writing their content, running their blocks' code).
+pub struct Session {
+    pub rt: Runtime,
+    pub host: Rc<NeoForge>,
+    pub jars: Vec<Vec<ClassFile>>,
+    /// Each jar's mod id (from `@Mod`).
+    pub mod_ids: Vec<String>,
+    /// Methods each jar's compiler did not compile.
+    pub skipped: Vec<usize>,
+    subscribers: Vec<Subscriber>,
+    /// What the registers hold: blocks and items by id, POI types (their
+    /// holders), professions by id.
+    pub blocks: Vec<(String, Value)>,
+    pub items: Vec<(String, Value)>,
+    pois: Vec<(Arc<Holder>, Value)>,
+    professions: Vec<(String, Value)>,
+    pub errors: Vec<String>,
+}
 
-    // 1. The @Mod classes that run on a server, constructed; the event
-    // subscribers' static methods.
-    let mut subscribers = Vec::new();
-    for (jar, classes) in jars.iter().enumerate() {
-        for class in classes {
-            let name = class.name()?.to_owned();
-            for a in class.annotations() {
-                match a.type_descriptor.as_str() {
-                    "Lnet/neoforged/fml/common/EventBusSubscriber;" => {
-                        subscribers.extend(subscribed(jar, class, true));
-                    }
-                    "Lnet/neoforged/fml/common/Mod;" => {
-                        let client_only = a.values.iter().any(|(k, v)| {
-                            k == "dist"
-                                && matches!(v, ElementValue::Array(vs) if vs.iter().all(|x| matches!(x, ElementValue::Enum { name, .. } if name == "CLIENT")))
-                        });
-                        if client_only {
-                            continue;
+impl Session {
+    /// Compiles and links the jars (a mod after the mods it needs),
+    /// constructs their `@Mod` classes and binds their registers: blocks,
+    /// then items, then the rest.
+    pub fn start(jars: Vec<Vec<ClassFile>>, game: Arc<GameData>) -> Result<Session> {
+        let mut compiled = Vec::new();
+        let mut skipped = Vec::new();
+        for classes in &jars {
+            let c = compile(classes).map_err(wasmtime::Error::msg)?;
+            skipped.push(c.skipped.len());
+            compiled.push(c);
+        }
+        let host = Rc::new(NeoForge::new(game));
+        let mut rt = Runtime::link(compiled, host.clone())?;
+        let mut cx = rt.context();
+        let mod_bus = obj(Obj::Bus("mod".into()));
+        let mut errors: Vec<String> = Vec::new();
+        let mut mod_ids = vec![String::new(); jars.len()];
+
+        // The @Mod classes that run on a server, constructed; the event
+        // subscribers' static methods.
+        let mut subscribers = Vec::new();
+        for (jar, classes) in jars.iter().enumerate() {
+            for class in classes {
+                let name = class.name()?.to_owned();
+                for a in class.annotations() {
+                    match a.type_descriptor.as_str() {
+                        "Lnet/neoforged/fml/common/EventBusSubscriber;" => {
+                            subscribers.extend(subscribed(jar, class, true));
                         }
-                        for (k, v) in &a.values {
-                            if k == "value"
-                                && let ElementValue::Const(_, i) = v
-                                && let Ok(id) = class.utf8(*i)
-                            {
-                                out[jar].mod_id = id.to_owned();
+                        "Lnet/neoforged/fml/common/Mod;" => {
+                            let client_only = a.values.iter().any(|(k, v)| {
+                                k == "dist"
+                                    && matches!(v, ElementValue::Array(vs) if vs.iter().all(|x| matches!(x, ElementValue::Enum { name, .. } if name == "CLIENT")))
+                            });
+                            if client_only {
+                                continue;
+                            }
+                            for (k, v) in &a.values {
+                                if k == "value"
+                                    && let ElementValue::Const(_, i) = v
+                                    && let Ok(id) = class.utf8(*i)
+                                {
+                                    mod_ids[jar] = id.to_owned();
+                                }
+                            }
+                            let Some(init) = class.methods.iter().find(|m| m.name == "<init>")
+                            else {
+                                continue;
+                            };
+                            let made = cx.in_jar(jar, |cx| -> Result<()> {
+                                let object = cx.call(&format!("new {name}"), &[])?;
+                                let mut args = vec![object];
+                                for p in Method::parse(&init.descriptor)
+                                    .map(|m| m.params)
+                                    .unwrap_or_default()
+                                {
+                                    args.push(match p.as_str() {
+                                        "Lnet/neoforged/bus/api/IEventBus;" => mod_bus.clone(),
+                                        _ => opaque(p),
+                                    });
+                                }
+                                cx.call(&format!("{name}.<init>{}", init.descriptor), &args)?;
+                                Ok(())
+                            });
+                            if let Err(e) = made {
+                                errors.push(format!("{name}: constructor: {e:#}"));
                             }
                         }
-                        let Some(init) = class.methods.iter().find(|m| m.name == "<init>") else {
-                            continue;
-                        };
-                        let made = cx.in_jar(jar, |cx| -> Result<()> {
-                            let object = cx.call(&format!("new {name}"), &[])?;
-                            let mut args = vec![object];
-                            for p in Method::parse(&init.descriptor)
-                                .map(|m| m.params)
-                                .unwrap_or_default()
-                            {
-                                args.push(match p.as_str() {
-                                    "Lnet/neoforged/bus/api/IEventBus;" => mod_bus.clone(),
-                                    _ => opaque(p),
-                                });
-                            }
-                            cx.call(&format!("{name}.<init>{}", init.descriptor), &args)?;
-                            Ok(())
-                        });
-                        if let Err(e) = made {
-                            errors.push(format!("{name}: constructor: {e:#}"));
-                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
-    }
 
-    // 2. RegisterEvent: blocks, then items, then the rest.
-    let registers = host.state.borrow().registers.clone();
-    let order = |r: &str| match r {
-        "block" => 0,
-        "item" => 1,
-        _ => 2,
-    };
-    let mut sorted: Vec<_> = registers
-        .iter()
-        .filter(|r| r.active.load(std::sync::atomic::Ordering::Relaxed))
-        .collect();
-    sorted.sort_by_key(|r| order(&r.registry));
-    let mut blocks = Vec::new();
-    let mut items = Vec::new();
-    let mut pois = Vec::new();
-    let mut professions = Vec::new();
-    for r in sorted {
-        let entries = r.entries.lock().unwrap().clone();
-        for h in entries {
-            match host.bind(&mut cx, &h) {
-                Ok(v) => match r.registry.as_str() {
-                    "block" => blocks.push((h.id.clone(), v)),
-                    "item" => items.push((h.id.clone(), v)),
-                    "point_of_interest_type" => pois.push((h.clone(), v)),
-                    "villager_profession" => professions.push((h.id.clone(), v)),
-                    _ => {}
-                },
-                Err(e) => errors.push(format!("{}: {e:#}", h.id)),
+        // RegisterEvent: blocks, then items, then the rest.
+        let registers = host.state.borrow().registers.clone();
+        let order = |r: &str| match r {
+            "block" => 0,
+            "item" => 1,
+            _ => 2,
+        };
+        let mut sorted: Vec<_> = registers
+            .iter()
+            .filter(|r| r.active.load(std::sync::atomic::Ordering::Relaxed))
+            .collect();
+        sorted.sort_by_key(|r| order(&r.registry));
+        let mut blocks = Vec::new();
+        let mut items = Vec::new();
+        let mut pois = Vec::new();
+        let mut professions = Vec::new();
+        for r in sorted {
+            let entries = r.entries.lock().unwrap().clone();
+            for h in entries {
+                match host.bind(&mut cx, &h) {
+                    Ok(v) => match r.registry.as_str() {
+                        "block" => blocks.push((h.id.clone(), v)),
+                        "item" => items.push((h.id.clone(), v)),
+                        "point_of_interest_type" => pois.push((h.clone(), v)),
+                        "villager_profession" => professions.push((h.id.clone(), v)),
+                        _ => {}
+                    },
+                    Err(e) => errors.push(format!("{}: {e:#}", h.id)),
+                }
             }
         }
+        Ok(Session {
+            rt,
+            host,
+            jars,
+            mod_ids,
+            skipped,
+            subscribers,
+            blocks,
+            items,
+            pois,
+            professions,
+            errors,
+        })
     }
+}
+
+/// Translates mods that run together (a mod after the mods it needs), one
+/// translation each, in order.
+pub fn translate_all(jars: &[Vec<ClassFile>], game: Arc<GameData>) -> Result<Vec<Translation>> {
+    let session = Session::start(jars.to_vec(), game.clone())?;
+    translate_session(session, game)
+}
+
+/// What a running session's mods make, as content.
+pub fn translate_session(mut session: Session, game: Arc<GameData>) -> Result<Vec<Translation>> {
+    let host = session.host.clone();
+    let jars = session.jars.clone();
+    let subscribers = std::mem::take(&mut session.subscribers);
+    let blocks = std::mem::take(&mut session.blocks);
+    let items = std::mem::take(&mut session.items);
+    let pois = std::mem::take(&mut session.pois);
+    let professions = std::mem::take(&mut session.professions);
+    let mut errors = std::mem::take(&mut session.errors);
+    let mut out: Vec<Translation> = session
+        .mod_ids
+        .iter()
+        .zip(&session.skipped)
+        .map(|(id, skipped)| Translation {
+            mod_id: id.clone(),
+            skipped: *skipped,
+            ..Translation::default()
+        })
+        .collect();
+    let mut cx = session.rt.context();
+    let jars = &jars;
 
     // 3. Each block's declaration.
     let mut item_blocks: BTreeMap<String, String> = BTreeMap::new();

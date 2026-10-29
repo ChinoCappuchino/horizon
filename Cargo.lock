@@ -1387,6 +1387,7 @@ dependencies = [
  "horizon-hdr",
  "horizon-items",
  "horizon-mods",
+ "horizon-neoforge",
  "horizon-protocol",
  "horizon-server-files",
  "horizon-shader-api",

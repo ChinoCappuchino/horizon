@@ -96,6 +96,7 @@ use horizon_core::{
 use std::{collections::HashMap, io, path::Path, sync::Arc, sync::Mutex};
 
 pub mod classes;
+pub mod code;
 pub mod data;
 pub mod states;
 pub mod ticks;
@@ -497,9 +498,26 @@ pub struct Behaviours {
     dynamic: HashMap<BlockStateId, crate::dynamic_support::DynamicSupport>,
     occlusion_cache: Mutex<HashMap<(i32, i32, u8), bool>>,
     growth: growth::Growth,
+    /// Mods' code for their blocks (fork `afterwinter`), once set.
+    code: std::sync::RwLock<Option<Arc<dyn code::BlockCode>>>,
 }
 
 impl Behaviours {
+    /// Gives mods' code for their blocks ([`code::BlockCode`]).
+    pub fn set_code(&self, code: Arc<dyn code::BlockCode>) {
+        *self
+            .code
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(code);
+    }
+    /// The mods' code, if it handles blocks in this state.
+    pub(crate) fn code_for(&self, state: BlockStateId) -> Option<Arc<dyn code::BlockCode>> {
+        let code = self
+            .code
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        code.as_ref().filter(|c| c.has(state)).cloned()
+    }
     /// Load from a prepared client resource directory (`.local/horizon-client/<version>`).
     pub fn load(registry: &BlockRegistry, resources_dir: &Path) -> io::Result<Self> {
         data::load(registry, resources_dir)

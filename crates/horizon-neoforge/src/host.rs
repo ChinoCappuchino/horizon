@@ -119,6 +119,19 @@ pub struct State {
 pub struct NeoForge {
     pub game: Arc<GameData>,
     pub state: RefCell<State>,
+    /// While a block's code runs in the game: the level it acts on.
+    pub world: RefCell<Option<World>>,
+}
+
+/// The game a block's code runs in, for the length of one call.
+pub struct World {
+    /// Valid for the call it was set for (see `crate::world`).
+    pub level: *mut (dyn horizon_world::level::code::CodeLevel + 'static),
+    pub registry: &'static horizon_world::registry::BlockRegistry,
+    /// The mods' blocks by id.
+    pub blocks: Arc<BTreeMap<String, Value>>,
+    /// The block a player uses.
+    pub using: horizon_core::position::BlockPos,
 }
 
 impl NeoForge {
@@ -126,6 +139,7 @@ impl NeoForge {
         NeoForge {
             game,
             state: RefCell::new(State::default()),
+            world: RefCell::new(None),
         }
     }
 
@@ -234,6 +248,84 @@ impl NeoForge {
             *def.block.lock().unwrap() = Some(v.clone());
             v
         })
+    }
+
+    /// The level a block's code acts on, while it runs.
+    #[allow(clippy::mut_from_ref)]
+    fn level(&self) -> Option<&mut dyn horizon_world::level::code::CodeLevel> {
+        let w = self.world.borrow();
+        // SAFETY: crate::world sets the pointer for one call of the game's
+        // into a block's code and clears it after; the level outlives it,
+        // and the code runs on that one thread.
+        w.as_ref().map(|w| unsafe { &mut *w.level })
+    }
+
+    /// A game state as the mods see it.
+    pub fn java_state(&self, id: horizon_world::registry::BlockStateId) -> Option<Value> {
+        let (registry, blocks) = {
+            let w = self.world.borrow();
+            let w = w.as_ref()?;
+            (w.registry, w.blocks.clone())
+        };
+        let state = registry.state(id)?;
+        let def = match blocks.get(&state.name) {
+            // A mod's block: its peer holds the definition.
+            Some(_) => {
+                let peer = self
+                    .state
+                    .borrow()
+                    .blocks
+                    .iter()
+                    .find(|b| b.id.lock().unwrap().as_deref() == Some(state.name.as_str()))
+                    .cloned()?;
+                peer.def()?
+            }
+            None => match get(&self.game_block(&state.name)) {
+                Some(Obj::Block(b)) => b.def()?,
+                _ => return None,
+            },
+        };
+        let values: Vec<usize> = def
+            .props
+            .iter()
+            .map(|p| {
+                state
+                    .properties
+                    .get(&p.name)
+                    .and_then(|v| p.values.iter().position(|x| x == v))
+                    .unwrap_or(0)
+            })
+            .collect();
+        let index = def.index(&values);
+        Some(obj(Obj::State(def, index)))
+    }
+
+    /// A mod's state as the game has it.
+    pub fn game_state(
+        &self,
+        cx: &mut Context<'_>,
+        v: &Value,
+    ) -> Option<horizon_world::registry::BlockStateId> {
+        let Some(Obj::State(d, i)) = get(v) else {
+            return None;
+        };
+        let block = d.block.lock().unwrap().clone()?;
+        let name = self.item_id(cx, &block).ok().filter(|n| !n.is_empty())?;
+        let properties = d
+            .props
+            .iter()
+            .zip(d.values(*i))
+            .map(|(p, v)| (p.name.clone(), p.values[v].clone()))
+            .collect();
+        let registry = self.world.borrow().as_ref()?.registry;
+        registry.id(&horizon_world::chunk::BlockState { name, properties })
+    }
+
+    fn pos(v: &Value) -> Option<horizon_core::position::BlockPos> {
+        match get(v) {
+            Some(Obj::Pos(x, y, z)) => Some(horizon_core::position::BlockPos::new(*x, *y, *z)),
+            _ => None,
+        }
     }
 
     /// A game profession (`VillagerProfession.FARMER`), one object each.
@@ -409,6 +501,31 @@ impl NeoForge {
             }
         };
         Ok(Some(v))
+    }
+
+    /// An item by id: a mod's registered one (the object the mod has), else
+    /// the game's.
+    pub fn item_by_id(&self, id: &str) -> Value {
+        let found = self
+            .state
+            .borrow()
+            .items
+            .iter()
+            .find(|i| i.id.lock().unwrap().as_deref() == Some(id))
+            .cloned();
+        match found {
+            Some(i) => i.this.clone().unwrap_or_else(|| obj(Obj::Item(i))),
+            None => self.game_item(id),
+        }
+    }
+
+    /// An item's food (`Item.Properties.food`).
+    fn food_of(&self, cx: &mut Context<'_>, item: &Value) -> Result<Option<Food>> {
+        let peer = self.peer(cx, item)?;
+        Ok(match get(&peer) {
+            Some(Obj::Item(i)) => i.props.food.clone(),
+            _ => None,
+        })
     }
 
     fn game_item(&self, id: &str) -> Value {
@@ -1291,6 +1408,8 @@ impl NeoForge {
         let f = |i: usize| args.get(i).and_then(float).unwrap_or(0.0);
         Ok(match member.as_str() {
             "Pair.of" => obj(Obj::Pair(args[0].clone(), args[1].clone())),
+            // A server's: success.
+            "InteractionResult.sidedSuccess" => self.constant(&import.owner, "SUCCESS"),
             "SoundEvent.createVariableRangeEvent" | "SoundEvent.createFixedRangeEvent" => {
                 obj(Obj::Sound(string(&args[0]).unwrap_or_default()))
             }
@@ -1675,6 +1794,19 @@ impl NeoForge {
                 }
                 target.clone()
             }
+            // FoodProperties is a record: its accessors take nothing.
+            Obj::Food(f) if args.is_empty() && name != "build" && !returns_self => {
+                let f = f.lock().unwrap();
+                match name {
+                    "nutrition" | "getNutrition" => Value::Int(f.nutrition),
+                    "saturation" | "getSaturationModifier" => {
+                        Value::Float(f.nutrition as f32 * f.saturation_modifier * 2.0)
+                    }
+                    "canAlwaysEat" => Value::Int(f.always_edible as i32),
+                    "eatSeconds" => Value::Float(if f.fast { 0.8 } else { 1.6 }),
+                    _ => self.unknown(import),
+                }
+            }
             Obj::Food(f) => {
                 if name == "build" {
                     return Ok(obj(Obj::Food(Mutex::new(f.lock().unwrap().clone()))));
@@ -1743,6 +1875,8 @@ impl NeoForge {
                     Some(d) => obj(Obj::StateDef(d)),
                     None => self.unknown(import),
                 },
+                // The game's own use: the block's game class decides.
+                "useWithoutItem" | "useItemOn" => Value::Null,
                 // CropBlock's age, for a crop that keeps it.
                 "getAgeProperty" => {
                     match self.static_property("net/minecraft/world/level/block/CropBlock", "AGE") {
@@ -2346,6 +2480,191 @@ impl NeoForge {
                 "orElse" => v.clone().unwrap_or_else(|| a(0)),
                 _ => self.unknown(import),
             },
+            Obj::Level => {
+                let Some(level) = self.level() else {
+                    return Ok(self.unknown(import));
+                };
+                match name {
+                    "isClientSide" => Value::Int(0),
+                    "getBlockState" => {
+                        let Some(pos) = Self::pos(&a0) else {
+                            return Ok(self.unknown(import));
+                        };
+                        let id = level.block_state(pos);
+                        self.java_state(id).unwrap_or(Value::Null)
+                    }
+                    "setBlock" | "setBlockAndUpdate" => {
+                        let Some(pos) = Self::pos(&a0) else {
+                            return Ok(self.unknown(import));
+                        };
+                        let Some(state) = self.game_state(cx, &a(1)) else {
+                            return Ok(Value::Int(0));
+                        };
+                        let flags = if name == "setBlock" {
+                            int(&a(2)).unwrap_or(3) as i32
+                        } else {
+                            3
+                        };
+                        let level = self.level().expect("the level");
+                        Value::Int(level.set_block(pos, state, flags) as i32)
+                    }
+                    "removeBlock" | "destroyBlock" => {
+                        let Some(pos) = Self::pos(&a0) else {
+                            return Ok(self.unknown(import));
+                        };
+                        Value::Int(level.remove_block(pos) as i32)
+                    }
+                    "playSound" => {
+                        // (player, pos, sound, source, volume, pitch)
+                        let pos = args.iter().find_map(Self::pos);
+                        let sound = args.iter().find_map(|v| match get(v) {
+                            Some(Obj::Sound(s)) => Some(s.clone()),
+                            Some(Obj::Holder(h)) => Some(h.id.clone()),
+                            _ => None,
+                        });
+                        let floats: Vec<f32> = args
+                            .iter()
+                            .filter_map(|v| match v {
+                                Value::Float(f) => Some(*f),
+                                _ => None,
+                            })
+                            .collect();
+                        if let (Some(pos), Some(sound)) = (pos, sound) {
+                            let volume = floats.first().copied().unwrap_or(1.0);
+                            let pitch = floats.get(1).copied().unwrap_or(1.0);
+                            level.sound(pos, &sound, volume, pitch);
+                        }
+                        Value::Void
+                    }
+                    "gameEvent" => {
+                        let pos = args.iter().find_map(Self::pos);
+                        let event = args.iter().find_map(|v| match get(v) {
+                            Some(Obj::Key(_, id)) | Some(Obj::Loc(id)) => Some(id.clone()),
+                            Some(Obj::Const(_, n)) => {
+                                Some(format!("minecraft:{}", n.to_lowercase()))
+                            }
+                            _ => None,
+                        });
+                        if let (Some(pos), Some(event)) = (pos, event) {
+                            level.game_event(pos, &event);
+                        }
+                        Value::Void
+                    }
+                    "getRandom" => opaque("random"),
+                    _ => self.unknown(import),
+                }
+            }
+            Obj::Pos(x, y, z) => {
+                let (x, y, z) = (*x, *y, *z);
+                let by = |v: &Value| int(v).unwrap_or(1) as i32;
+                match name {
+                    "getX" => Value::Int(x),
+                    "getY" => Value::Int(y),
+                    "getZ" => Value::Int(z),
+                    "above" => obj(Obj::Pos(
+                        x,
+                        y + if args.is_empty() { 1 } else { by(&a0) },
+                        z,
+                    )),
+                    "below" => obj(Obj::Pos(
+                        x,
+                        y - if args.is_empty() { 1 } else { by(&a0) },
+                        z,
+                    )),
+                    "north" => obj(Obj::Pos(
+                        x,
+                        y,
+                        z - if args.is_empty() { 1 } else { by(&a0) },
+                    )),
+                    "south" => obj(Obj::Pos(
+                        x,
+                        y,
+                        z + if args.is_empty() { 1 } else { by(&a0) },
+                    )),
+                    "west" => obj(Obj::Pos(
+                        x - if args.is_empty() { 1 } else { by(&a0) },
+                        y,
+                        z,
+                    )),
+                    "east" => obj(Obj::Pos(
+                        x + if args.is_empty() { 1 } else { by(&a0) },
+                        y,
+                        z,
+                    )),
+                    "relative" => {
+                        let (dx, dy, dz) = match get(&a0) {
+                            Some(Obj::Const(_, d)) => match d.as_str() {
+                                "NORTH" => (0, 0, -1),
+                                "SOUTH" => (0, 0, 1),
+                                "WEST" => (-1, 0, 0),
+                                "EAST" => (1, 0, 0),
+                                "UP" => (0, 1, 0),
+                                "DOWN" => (0, -1, 0),
+                                _ => (0, 0, 0),
+                            },
+                            _ => (0, 0, 0),
+                        };
+                        let n = if args.len() > 1 { by(&a(1)) } else { 1 };
+                        obj(Obj::Pos(x + dx * n, y + dy * n, z + dz * n))
+                    }
+                    "offset" => obj(Obj::Pos(
+                        x + int(&a0).unwrap_or(0) as i32,
+                        y + int(&a(1)).unwrap_or(0) as i32,
+                        z + int(&a(2)).unwrap_or(0) as i32,
+                    )),
+                    "equals" => Value::Int(
+                        matches!(get(&a0), Some(Obj::Pos(p, q, r)) if (*p, *q, *r) == (x, y, z))
+                            as i32,
+                    ),
+                    "immutable" => target.clone(),
+                    _ => self.unknown(import),
+                }
+            }
+            Obj::Player { can_eat, creative } => match name {
+                "getFoodData" => obj(Obj::FoodData { can_eat: *can_eat }),
+                "canEat" => Value::Int((*can_eat || *creative) as i32),
+                "isCreative" => Value::Int(*creative as i32),
+                "isShiftKeyDown" | "isSpectator" => Value::Int(0),
+                "level" => obj(Obj::Level),
+                "getItemInHand" | "getMainHandItem" | "getOffhandItem" => {
+                    obj(Obj::Stack("minecraft:air".into(), 0))
+                }
+                "awardStat" | "causeFoodExhaustion" | "displayClientMessage" => Value::Void,
+                _ => self.unknown(import),
+            },
+            Obj::FoodData { can_eat } => match name {
+                "eat" => {
+                    // eat(nutrition, saturationModifier) or eat(FoodProperties)
+                    let (nutrition, modifier) = match (get(&a0), &a0) {
+                        (Some(Obj::Food(f)), _) => {
+                            let f = f.lock().unwrap();
+                            (f.nutrition, f.saturation_modifier)
+                        }
+                        (_, Value::Int(n)) => (*n, float(&a(1)).unwrap_or(0.0) as f32),
+                        _ => (0, 0.0),
+                    };
+                    let using = self.world.borrow().as_ref().map(|w| w.using);
+                    if let (Some(level), Some(pos)) = (self.level(), using) {
+                        level.player_effect(
+                            pos,
+                            horizon_world::level::PlayerEffect::Eat {
+                                nutrition,
+                                saturation_modifier: modifier,
+                            },
+                        );
+                    }
+                    Value::Void
+                }
+                "needsFood" => Value::Int(*can_eat as i32),
+                "getFoodLevel" => Value::Int(if *can_eat { 10 } else { 20 }),
+                _ => self.unknown(import),
+            },
+            Obj::Hit(face, x, y, z) => match name {
+                "getDirection" => self.constant("net/minecraft/core/Direction", face),
+                "getBlockPos" => obj(Obj::Pos(*x, *y, *z)),
+                "isInside" => Value::Int(0),
+                _ => self.unknown(import),
+            },
             Obj::Bus(bus) => match name {
                 "addListener" => {
                     let listener = args.last().cloned().unwrap_or(Value::Null);
@@ -2473,8 +2792,29 @@ impl NeoForge {
             },
             Obj::Stack(id, n) => match name {
                 "getCount" => Value::Int(*n),
-                "getItem" | "item" => self.game_item(id),
+                "getItem" | "item" => self.item_by_id(id),
                 "copy" => target.clone(),
+                "isEmpty" => Value::Int((*n <= 0 || id == "minecraft:air") as i32),
+                // ItemStack.getFoodProperties (NeoForge) and get(FOOD).
+                "getFoodProperties" | "get" => {
+                    let item = self.item_by_id(id);
+                    match self.food_of(cx, &item)? {
+                        Some(f) => obj(Obj::Food(Mutex::new(f))),
+                        None => Value::Null,
+                    }
+                }
+                _ => self.unknown(import),
+            },
+            Obj::Item(i) => match name {
+                "getFoodProperties" => match &i.props.food {
+                    Some(f) => obj(Obj::Food(Mutex::new(f.clone()))),
+                    None => Value::Null,
+                },
+                "getDefaultInstance" => obj(Obj::Stack(
+                    i.id.lock().unwrap().clone().unwrap_or_default(),
+                    1,
+                )),
+                _ if returns_self => target.clone(),
                 _ => self.unknown(import),
             },
             // The server's registries, at ServerAboutToStartEvent.

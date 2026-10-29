@@ -107,5 +107,7 @@ workspace = true
 
 [dev-dependencies]
 horizon-items = { path = "../horizon-items", features = ["test-support"] }
+# Mods' block code in the game (tests/java_blocks.rs).
+horizon-neoforge = { path = "../horizon-neoforge" }
 # Every WGSL shader translated as wgpu's DirectX 12 backend does (gfx.rs tests).
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out", "spv-out"] }

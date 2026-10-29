@@ -165,6 +165,21 @@ houses in the 5 village pools: all equal to NeoForge. On a Horizon dedicated
 server with the two mods, a cooking pot is placed, a villager next to it
 becomes `chefsdelight:chef`, and the chef house template loads.
 
+Block code in the game, first part (2026-10-29): Horizon's block behaviour
+has a hook for mods' code (`horizon_world::level::code::BlockCode`), which
+`Behaviours` asks before the game class's behaviour. A running session of
+the layer (`horizon_neoforge::world`) answers it on the server thread: the
+game calls the block's `useWithoutItem` in the mod's own code, which acts on
+the level (block changes, sounds, game events, player effects). In
+`crates/horizon-client/tests/java_blocks.rs`, a player uses Farmer's
+Delight's apple pie through the game's use path: the pie's code eats a
+slice (its food values), sets `bites` to 1, and plays the eating sound; a
+player who cannot eat gets `PASS`.
+
+Not done yet: the session in the running game (the server starts it from
+the mods' jars), `useItemOn`, placement, ticks, block entities and menus
+(the cooking pot), client code.
+
 A compiled method is not a working method. It runs only if the
 compatibility layer gives the members that it uses. Farmer's Delight uses
 about 2,200 members of Minecraft and NeoForge.

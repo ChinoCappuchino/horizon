@@ -3522,6 +3522,19 @@ impl Game<'_> {
                             food.saturation = (food.saturation + 0.4).min(food.food as f32);
                         }
                     }
+                    PlayerEffect::Eat {
+                        nutrition,
+                        saturation_modifier,
+                    } => {
+                        // FoodData.eat(nutrition, saturationModifier)
+                        if let Some(p) = self.player.as_mut() {
+                            let food = &mut p.health.food;
+                            food.food = (food.food + nutrition).clamp(0, 20);
+                            food.saturation = (food.saturation
+                                + nutrition as f32 * saturation_modifier * 2.0)
+                                .clamp(0.0, food.food as f32);
+                        }
+                    }
                     PlayerEffect::RespawnAnchor => {
                         self.respawn_anchor_used([pos.x, pos.y, pos.z])?
                     }

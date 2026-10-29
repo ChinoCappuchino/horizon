@@ -76,6 +76,22 @@ pub enum Obj {
     PoolFn(String, String, bool),
     /// A pool element: location, processors, legacy.
     PoolElement(String, String, bool),
+    /// The level a block's code runs in (the game's, while it runs).
+    Level,
+    /// `BlockPos`.
+    Pos(i32, i32, i32),
+    /// The player who uses a block: whether they can eat, and are in
+    /// creative.
+    Player {
+        can_eat: bool,
+        creative: bool,
+    },
+    /// `Player.getFoodData()`.
+    FoodData {
+        can_eat: bool,
+    },
+    /// `BlockHitResult`: the face (a Direction's name) and the block.
+    Hit(String, i32, i32, i32),
     /// What the layer does not model: a placeholder, named for the log.
     Opaque(String),
 }

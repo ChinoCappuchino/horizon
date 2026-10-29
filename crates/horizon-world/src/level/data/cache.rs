@@ -690,6 +690,7 @@ impl Snapshot {
             dynamic,
             occlusion_cache: Default::default(),
             growth: Default::default(),
+            code: Default::default(),
         })
     }
 }
