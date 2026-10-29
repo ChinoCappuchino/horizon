@@ -307,7 +307,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if *cat == "unchanged" || *cat == "unknown owner" {
             continue;
         }
-        list.sort_by(|a, b| b.0.cmp(&a.0));
+        list.sort_by_key(|x| std::cmp::Reverse(x.0));
         println!("\n{cat}: most referenced");
         for (refs, m) in list.iter().take(top) {
             println!("  {refs:>6}  {m}");
@@ -327,7 +327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let mut classes: Vec<_> = by_class.into_iter().collect();
-    classes.sort_by(|a, b| b.1.cmp(&a.1));
+    classes.sort_by_key(|x| std::cmp::Reverse(x.1));
     let changed: usize = classes.iter().map(|c| c.1).sum();
     let mut acc = 0;
     let mut marks = vec![50usize, 80, 90, 95];
