@@ -72,6 +72,9 @@ pub struct Native {
     _globals: Box<Globals>,
     _statics: Vec<u64>,
     _vtables: Vec<Vec<u64>>,
+    /// Boxed: each one's address is baked into the code.
+    #[allow(clippy::vec_box)]
+    _singletons: Vec<Box<u64>>,
 }
 
 fn kind_type(t: &Ty) -> Option<Type> {
@@ -172,8 +175,17 @@ impl Native {
             .collect();
         let superclass = |c: &str| -> Option<&str> { by_name.get(c)?.super_name().ok().flatten() };
 
-        // Virtual selectors: every instance method that dispatches.
+        let (lambdas, lambda_at, called) = prepass(classes);
+        // Virtual selectors: every instance method that dispatches, every
+        // method called virtually, every lambda's interface method.
         let mut selectors: BTreeMap<(String, String), usize> = BTreeMap::new();
+        for key in called
+            .into_iter()
+            .chain(lambdas.iter().map(|l| (l.name.clone(), l.sam.clone())))
+        {
+            let n = selectors.len();
+            selectors.entry(key).or_insert(n);
+        }
         for c in classes {
             for m in &c.methods {
                 if m.access & (STATIC | PRIVATE) == 0 && m.name != "<init>" {
@@ -194,6 +206,11 @@ impl Native {
                         .or_default() += 1;
                 }
             }
+        }
+        for l in &lambdas {
+            *implementations
+                .entry((l.name.clone(), l.sam.clone()))
+                .or_default() += 1;
         }
 
         // Layouts.
@@ -249,9 +266,36 @@ impl Native {
                 selectors.len(),
             );
         }
-        // Array vtables: the element kind in place of a class id.
+        // Each lambda site's class: an id after the classes', a vtable, and
+        // (when it captures nothing) one object for every use.
+        let mut lambda_vt: Vec<i64> = Vec::new();
+        let mut singletons: Vec<Box<u64>> = Vec::new();
+        let mut singleton_at: Vec<Option<i64>> = Vec::new();
+        for (i, l) in lambdas.iter().enumerate() {
+            let mut vt = vec![0u64; 1 + selectors.len()];
+            vt[0] = (names.len() + 1 + i) as u64;
+            vtables.push(vt);
+            let p = vtables.last_mut().expect("just pushed").as_mut_ptr() as i64;
+            lambda_vt.push(p);
+            singleton_at.push(if l.captures.is_empty() {
+                singletons.push(Box::new(p as u64));
+                Some(&**singletons.last().expect("just pushed") as *const u64 as i64)
+            } else {
+                None
+            });
+        }
         // Ancestors, for instanceof and checkcast.
-        let mut ancestors: Vec<HashSet<u32>> = vec![HashSet::new(); names.len() + 1];
+        let mut ancestors: Vec<HashSet<u32>> =
+            vec![HashSet::new(); names.len() + 1 + lambdas.len()];
+        for (i, l) in lambdas.iter().enumerate() {
+            let id = (names.len() + 1 + i) as u32;
+            let mut set: HashSet<u32> = ancestors_of(&l.interface, &by_name)
+                .iter()
+                .filter_map(|c| ids.get(c.as_str()).copied())
+                .collect();
+            set.insert(id);
+            ancestors[id as usize] = set;
+        }
         for n in &names {
             let mut set = HashSet::new();
             let mut todo = vec![*n];
@@ -344,6 +388,17 @@ impl Native {
                 inits.insert((*n).to_owned(), id);
             }
         }
+        let mut bridges: Vec<Option<FuncId>> = Vec::new();
+        for (i, l) in lambdas.iter().enumerate() {
+            bridges.push(match signature(&module, true, &l.sam) {
+                Some(sig) => Some(
+                    module
+                        .declare_function(&format!("lambda {i}"), Linkage::Local, &sig)
+                        .map_err(|e| e.to_string())?,
+                ),
+                None => None,
+            });
+        }
         let mut host = HashMap::new();
         for (name, params, ret) in [
             ("host_sin", vec![types::F64], Some(types::F64)),
@@ -380,6 +435,10 @@ impl Native {
             flags_at,
             globals_at,
             ptr,
+            lambdas: &lambdas,
+            lambda_at: &lambda_at,
+            lambda_vt: &lambda_vt,
+            singleton_at: &singleton_at,
         };
         let mut unsupported = Vec::new();
         let mut ctx = module.make_context();
@@ -413,6 +472,30 @@ impl Native {
                 bodies.insert(id, (name, ctx.func.clone()));
                 module.clear_context(&mut ctx);
             }
+        }
+        // The lambdas' bridges: captured values and the interface method's
+        // arguments to the target.
+        for (i, l) in lambdas.iter().enumerate() {
+            let Some(id) = bridges[i] else { continue };
+            ctx.func.signature = signature(&module, true, &l.sam).expect("declared");
+            let r = {
+                let b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                bridge(&world, l, b, &mut module)
+            };
+            if let Err(e) = r {
+                ctx.func.clear();
+                unsupported.push((format!("lambda {i} -> {}.{}", l.owner, l.target), e));
+                ctx.func.signature = signature(&module, true, &l.sam).expect("declared");
+                let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                let e = b.create_block();
+                b.append_block_params_for_function_params(e);
+                b.switch_to_block(e);
+                b.seal_block(e);
+                b.ins().trap(UNSUPPORTED);
+                b.finalize(module.target_config());
+            }
+            bodies.insert(id, (format!("lambda {i}"), ctx.func.clone()));
+            module.clear_context(&mut ctx);
         }
         // Small methods inlined into their callers, then every method defined.
         let sizes: HashMap<FuncId, usize> = bodies
@@ -506,6 +589,29 @@ impl Native {
                 }
             }
         }
+        for (i, l) in lambdas.iter().enumerate() {
+            let vt = lambda_vt[i] as *mut u64;
+            if let (Some(id), Some(&sel)) =
+                (bridges[i], selectors.get(&(l.name.clone(), l.sam.clone())))
+            {
+                let p = module.get_finalized_function(id);
+                // SAFETY: the vtable has 1 + selectors entries.
+                unsafe { *vt.add(1 + sel) = p as u64 };
+            }
+            // The interface's default methods for its other selectors.
+            for ((mname, mdesc), &sel) in &selectors {
+                if *mname == l.name && *mdesc == l.sam {
+                    continue;
+                }
+                let found = ancestors_of(&l.interface, &by_name)
+                    .iter()
+                    .find_map(|c| funcs.get(&export_name(c, mname, mdesc)).copied());
+                if let Some(f) = found {
+                    // SAFETY: as above.
+                    unsafe { *vt.add(1 + sel) = module.get_finalized_function(f) as u64 };
+                }
+            }
+        }
         let exports = funcs;
         Ok(Native {
             module,
@@ -515,6 +621,7 @@ impl Native {
             _globals: globals,
             _statics: statics,
             _vtables: vtables,
+            _singletons: singletons,
         })
     }
 
@@ -525,6 +632,105 @@ impl Native {
                 .get_finalized_function(*self.exports.get(export)?),
         )
     }
+}
+
+/// A lambda site (`invokedynamic` through `LambdaMetafactory`): made into a
+/// class at install, whose interface method is a bridge to the target.
+#[derive(Clone, Debug)]
+struct LambdaSite {
+    /// The interface method's name and erased descriptor.
+    name: String,
+    sam: String,
+    /// The interface (the site's return type).
+    interface: String,
+    /// The captured values' descriptors.
+    captures: Vec<String>,
+    /// The target method handle: kind (JVMS 5.4.3.5), owner, name, descriptor.
+    kind: u8,
+    owner: String,
+    target: String,
+    target_desc: String,
+}
+
+/// Every lambda site of `classes` (by class and position), and the method
+/// names and descriptors called virtually (they need vtable selectors).
+#[allow(clippy::type_complexity)]
+fn prepass(
+    classes: &[ClassFile],
+) -> (
+    Vec<LambdaSite>,
+    HashMap<(String, u32), usize>,
+    Vec<(String, String)>,
+) {
+    let mut sites = Vec::new();
+    let mut at = HashMap::new();
+    let mut called = Vec::new();
+    for c in classes {
+        let Ok(owner) = c.name() else { continue };
+        for m in &c.methods {
+            let Some(code) = m.code() else { continue };
+            let Ok(insns) = decode(&code.code) else {
+                continue;
+            };
+            for x in &insns {
+                match (x.opcode, &x.operand) {
+                    (0xB6 | 0xB9, Operand::Constant(i) | Operand::Interface(i, _)) => {
+                        if let Ok((_, n, d)) = c.member_ref(*i) {
+                            called.push((n.to_owned(), d.to_owned()));
+                        }
+                    }
+                    (0xBA, Operand::Constant(i)) => {
+                        if let Some(site) = lambda_site(c, *i) {
+                            at.insert((owner.to_owned(), x.at), sites.len());
+                            sites.push(site);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    (sites, at, called)
+}
+
+fn lambda_site(c: &ClassFile, index: u16) -> Option<LambdaSite> {
+    let Some(Constant::InvokeDynamic(bsm, nat)) = c.constants.get(usize::from(index)) else {
+        return None;
+    };
+    let (name, desc) = c.name_and_type(*nat).ok()?;
+    let b = c.bootstrap_methods().get(usize::from(*bsm))?;
+    let handle = |i: u16| match c.constants.get(usize::from(i)) {
+        Some(Constant::MethodHandle(kind, r)) => {
+            let (o, n, d) = c.member_ref(*r).ok()?;
+            Some((*kind, o.to_owned(), n.to_owned(), d.to_owned()))
+        }
+        _ => None,
+    };
+    let (_, bo, bn, _) = handle(b.method_handle)?;
+    if bo != "java/lang/invoke/LambdaMetafactory" || (bn != "metafactory" && bn != "altMetafactory")
+    {
+        return None;
+    }
+    let [sam, target, ..] = b.arguments[..] else {
+        return None;
+    };
+    let Some(Constant::MethodType(sam)) = c.constants.get(usize::from(sam)) else {
+        return None;
+    };
+    let sam = c.utf8(*sam).ok()?.to_owned();
+    let (kind, owner, target, target_desc) = handle(target)?;
+    let site = Method::parse(desc)?;
+    let interface = site.ret.strip_prefix('L')?.strip_suffix(';')?.to_owned();
+    Some(LambdaSite {
+        name: name.to_owned(),
+        sam,
+        interface,
+        captures: site.params,
+        kind,
+        owner,
+        target,
+        target_desc,
+    })
 }
 
 /// Inlines calls to small methods (`INLINE` instructions or fewer), not
@@ -619,6 +825,10 @@ struct World<'a> {
     flags_at: usize,
     globals_at: i64,
     ptr: Type,
+    lambdas: &'a [LambdaSite],
+    lambda_at: &'a HashMap<(String, u32), usize>,
+    lambda_vt: &'a [i64],
+    singleton_at: &'a [Option<i64>],
 }
 
 impl World<'_> {
@@ -655,6 +865,189 @@ impl World<'_> {
         }
         None
     }
+}
+
+/// Bump allocation of `size` bytes (zeroed), the header set to `header`.
+fn alloc_in(b: &mut FunctionBuilder<'_>, w: &World<'_>, size: Value, header: Value) -> Value {
+    let g = b.ins().iconst(types::I64, w.globals_at);
+    let cur = b.ins().load(types::I64, MemFlagsData::trusted(), g, 0);
+    let limit = b.ins().load(types::I64, MemFlagsData::trusted(), g, 8);
+    let size = b.ins().iadd_imm_s(size, 7);
+    let size = b.ins().band_imm_s(size, !7);
+    let next = b.ins().iadd(cur, size);
+    let over = b.ins().icmp(IntCC::UnsignedGreaterThan, next, limit);
+    b.ins().trapnz(over, ARENA);
+    b.ins().store(MemFlagsData::trusted(), next, g, 0);
+    b.ins().store(MemFlagsData::trusted(), header, cur, 0);
+    cur
+}
+
+/// Runs the static initializer of `class` if it has not run.
+fn init_in(b: &mut FunctionBuilder<'_>, module: &mut JITModule, w: &World<'_>, class: &str) {
+    let Some(&id) = w.inits.get(class) else {
+        return;
+    };
+    let flag = w.statics_base + 8 * (w.flags_at + w.ids[class] as usize) as i64;
+    let at = b.ins().iconst(types::I64, flag);
+    let v = b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+    let run = b.create_block();
+    let done = b.create_block();
+    b.ins().brif(v, done, &[], run, &[]);
+    b.switch_to_block(run);
+    b.seal_block(run);
+    let f = module.declare_func_in_func(id, b.func);
+    b.ins().call(f, &[]);
+    b.ins().jump(done, &[]);
+    b.switch_to_block(done);
+    b.seal_block(done);
+}
+
+/// Calls instance method `name desc` of `owner` on `args[0]`: directly when
+/// the closed world has one implementation, else through the vtable.
+fn call_virtual(
+    b: &mut FunctionBuilder<'_>,
+    module: &mut JITModule,
+    w: &World<'_>,
+    owner: &str,
+    name: &str,
+    desc: &str,
+    args: &[Value],
+) -> Result<Option<Value>, String> {
+    b.ins().trapz(args[0], NULL);
+    let key = (name.to_owned(), desc.to_owned());
+    let direct = (w.implementations.get(&key) == Some(&1))
+        .then(|| w.resolve(owner, name, desc))
+        .flatten()
+        .filter(|c| {
+            w.by_name
+                .get(c.as_str())
+                .is_some_and(|cf| cf.access & INTERFACE == 0)
+        });
+    let call = match (direct, w.selectors.get(&key)) {
+        (Some(declaring), _) => {
+            let id = w.funcs[&export_name(&declaring, name, desc)];
+            let fr = module.declare_func_in_func(id, b.func);
+            b.ins().call(fr, args)
+        }
+        (None, Some(&sel)) => {
+            let vt = b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), args[0], 0);
+            let fp = b.ins().load(
+                types::I64,
+                MemFlagsData::trusted(),
+                vt,
+                (8 * (1 + sel)) as i32,
+            );
+            let sig = signature(module, true, desc).ok_or("a bad signature")?;
+            let sr = b.import_signature(sig);
+            b.ins().call_indirect(sr, fp, args)
+        }
+        (None, None) => return Err(format!("no implementation of {owner}.{name}{desc}")),
+    };
+    Ok(b.inst_results(call).first().copied())
+}
+
+/// The body of a lambda's interface method: its captured values and
+/// arguments to the target method handle.
+fn bridge(
+    w: &World<'_>,
+    l: &LambdaSite,
+    mut b: FunctionBuilder<'_>,
+    module: &mut JITModule,
+) -> Result<(), String> {
+    let e = b.create_block();
+    b.append_block_params_for_function_params(e);
+    b.switch_to_block(e);
+    b.seal_block(e);
+    let params = b.block_params(e).to_vec();
+    let sam = Method::parse(&l.sam).ok_or("a bad interface descriptor")?;
+    let target = Method::parse(&l.target_desc).ok_or("a bad target descriptor")?;
+    let mut args = Vec::new();
+    for (k, c) in l.captures.iter().enumerate() {
+        let t = desc_type(c).ok_or("a bad capture")?;
+        args.push(
+            b.ins()
+                .load(t, MemFlagsData::trusted(), params[0], 8 + 8 * k as i32),
+        );
+    }
+    args.extend_from_slice(&params[1..]);
+    let mut want: Vec<Type> = Vec::new();
+    if matches!(l.kind, 5 | 7 | 9) {
+        want.push(types::I64);
+    }
+    for p in &target.params {
+        want.push(desc_type(p).ok_or("a bad parameter")?);
+    }
+    if args.len() != want.len() {
+        return Err("arguments do not match the target".into());
+    }
+    if args
+        .iter()
+        .zip(&want)
+        .any(|(a, t)| b.func.dfg.value_type(*a) != *t)
+    {
+        return Err("boxing between the interface and the target (not in the prototype)".into());
+    }
+    let result = match l.kind {
+        6 | 7 => {
+            let declaring = w
+                .resolve(&l.owner, &l.target, &l.target_desc)
+                .ok_or("no target")?;
+            if l.kind == 6 {
+                init_in(&mut b, module, w, &declaring);
+            } else {
+                b.ins().trapz(args[0], NULL);
+            }
+            let id = w.funcs[&export_name(&declaring, &l.target, &l.target_desc)];
+            let fr = module.declare_func_in_func(id, b.func);
+            let call = b.ins().call(fr, &args);
+            b.inst_results(call).first().copied()
+        }
+        5 | 9 => call_virtual(
+            &mut b,
+            module,
+            w,
+            &l.owner,
+            &l.target,
+            &l.target_desc,
+            &args,
+        )?,
+        8 => {
+            let layout = w
+                .layouts
+                .get(&l.owner)
+                .ok_or("a constructor outside the classes")?;
+            let (size, vt) = (layout.size, layout.vtable as i64);
+            init_in(&mut b, module, w, &l.owner);
+            let size = b.ins().iconst(types::I64, i64::from(size));
+            let header = b.ins().iconst(types::I64, vt);
+            let obj = alloc_in(&mut b, w, size, header);
+            let declaring = w
+                .resolve(&l.owner, "<init>", &l.target_desc)
+                .ok_or("no constructor")?;
+            let id = w.funcs[&export_name(&declaring, "<init>", &l.target_desc)];
+            let fr = module.declare_func_in_func(id, b.func);
+            let mut all = vec![obj];
+            all.extend_from_slice(&args);
+            b.ins().call(fr, &all);
+            Some(obj)
+        }
+        k => return Err(format!("method handle kind {k}")),
+    };
+    if sam.ret == "V" {
+        b.ins().return_(&[]);
+    } else {
+        let want = desc_type(&sam.ret).ok_or("a bad return")?;
+        match result {
+            Some(v) if b.func.dfg.value_type(v) == want => {
+                b.ins().return_(&[v]);
+            }
+            _ => return Err("boxing of the result (not in the prototype)".into()),
+        }
+    }
+    b.finalize(module.target_config());
+    Ok(())
 }
 
 struct MethodGen<'a, 'b, 'f> {
@@ -1180,8 +1573,35 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             }
             0xB6..=0xB9 => return self.invoke(insn, f),
             0xBA => {
-                self.b.ins().trap(UNSUPPORTED);
-                return Ok(true);
+                let site = self
+                    .w
+                    .lambda_at
+                    .get(&(self.owner.to_owned(), insn.at))
+                    .copied();
+                let Some(n) = site else {
+                    self.b.ins().trap(UNSUPPORTED);
+                    return Ok(true);
+                };
+                let l = &self.w.lambdas[n];
+                let obj = match self.w.singleton_at[n] {
+                    Some(at) => self.b.ins().iconst(i64t, at),
+                    None => {
+                        let k = l.captures.len();
+                        let size = self.b.ins().iconst(i64t, 8 + 8 * k as i64);
+                        let header = self.b.ins().iconst(i64t, self.w.lambda_vt[n]);
+                        let obj = alloc_in(&mut self.b, self.w, size, header);
+                        for (j, c) in l.captures.clone().iter().enumerate() {
+                            let t = desc_type(c).ok_or("a bad capture")?;
+                            let v = self.get(d - k + j, t);
+                            self.b
+                                .ins()
+                                .store(MemFlagsData::trusted(), v, obj, 8 + 8 * j as i32);
+                        }
+                        obj
+                    }
+                };
+                let k = l.captures.len();
+                self.set(d - k, i64t, obj);
             }
             0xBB => {
                 let Operand::Constant(c) = insn.operand else {
