@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("{} jars compile whole: {}", whole.len(), whole.join(", "));
     let mut by_count: Vec<_> = reasons.into_iter().collect();
-    by_count.sort_by(|a, b| b.1.cmp(&a.1));
+    by_count.sort_by_key(|r| std::cmp::Reverse(r.1));
     println!("skipped, by reason:");
     for (r, n) in by_count.iter().take(40) {
         println!("  {n:7}  {r}");

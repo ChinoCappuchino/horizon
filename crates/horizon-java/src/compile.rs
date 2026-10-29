@@ -8,17 +8,39 @@
 //! cases of one dispatch loop: any jump the JVM allows compiles.
 //!
 //! References are `anyref`. An object of a class in the jar is a GC struct:
-//! field 0 is its class id, then the instance fields, the superclass's first.
-//! A lambda is a struct too: its site's id, then the captured values. Every
+//! field 0 is its class id, field 1 its peer, then the instance fields, the
+//! superclass's first. A lambda is a struct too: its site's id, no peer,
+//! then the captured values. An array is a GC array (`i8` for boolean and
+//! byte, `i16` for char and short, `anyref` for every reference type). Every
 //! other object belongs to the host (the game and the JDK, given by the
 //! compatibility layer) and is an `externref` converted to `anyref`.
 //!
+//! A class of the jar can extend a game class (a block, an item). Its
+//! superclass constructor is the import `extend`: the host makes a game
+//! object, the peer, that stands for the mod object in the game, and the
+//! peer goes in field 1. The game's fields and methods of the object are
+//! the peer's.
+//!
+//! A virtual call goes through a dispatcher, one for each method name and
+//! descriptor: by the object's class id it calls the method of the jar that
+//! the class has, or else the game's method of its superclass (import
+//! `super`), or for an object of the host, the host's method. Each
+//! dispatcher is exported as `virtual <name> <descriptor>`: the game calls
+//! the overrides of a mod's objects through it.
+//!
 //! Whatever is outside the jar is an import of module `host`, named
 //! `<operation> <owner>.<member> <descriptor>`: `invokestatic`,
-//! `invokevirtual`, `invokeinterface`, `new` (a constructor: the arguments
-//! in, the object out), `getstatic`, `putstatic`, `getfield` and
-//! `putfield`. Two more: `constant` (an `ldc` string or class, by index into
-//! [`Compiled::constants`]) and `same` (`==` on references).
+//! `invokevirtual`, `invokeinterface`, `invokespecial` (a game method of the
+//! superclass, on a mod object), `new` (a constructor: the arguments in, the
+//! object out), `extend` (the superclass constructor of a mod object: the
+//! object and the arguments in, the peer out), `super` (from a dispatcher),
+//! `getstatic`, `putstatic`, `getfield`, `putfield` and `instanceof <class>`.
+//! And: `constant` (an `ldc` string or class, by index into
+//! [`Compiled::constants`]), `same` (`==` on references), `concat
+//! <descriptor> <recipe>` (string concatenation, StringConcatFactory's
+//! recipe) and `record <class>.<method> <descriptor>` (a record's
+//! `toString`, `equals` or `hashCode`; [`ClassInfo::fields`] names the
+//! fields).
 //!
 //! Each method is exported as `<class>.<name><descriptor>`, each lambda as
 //! `lambda <n>` and each class's allocator as `new <class>`.
@@ -45,8 +67,50 @@ const ANY: ValType = ValType::Ref(RefType::ANYREF);
 const STATIC: u16 = 0x0008;
 /// Calls to imports carry this bit until the imports are counted.
 const IMPORT: u32 = 1 << 31;
-/// The struct type all objects share: just the class id.
+/// Calls to dispatchers and type tests, made after the methods.
+const LATE: u32 = 1 << 30;
+/// The struct type all objects share: the class id and the peer.
 const OBJECT: u32 = 0;
+/// The array types, by [`array_kind`]: i8, i16, i32, i64, f32, f64, anyref.
+const ARRAYS: [u32; 7] = [1, 2, 3, 4, 5, 6, 7];
+
+/// The array type of a component descriptor.
+fn array_kind(component: &str) -> usize {
+    match component.as_bytes().first() {
+        Some(b'Z' | b'B') => 0,
+        Some(b'C' | b'S') => 1,
+        Some(b'I') => 2,
+        Some(b'J') => 3,
+        Some(b'F') => 4,
+        Some(b'D') => 5,
+        _ => 6,
+    }
+}
+
+fn storage(kind: usize) -> StorageType {
+    match kind {
+        0 => StorageType::I8,
+        1 => StorageType::I16,
+        2 => StorageType::Val(ValType::I32),
+        3 => StorageType::Val(ValType::I64),
+        4 => StorageType::Val(ValType::F32),
+        5 => StorageType::Val(ValType::F64),
+        _ => StorageType::Val(ANY),
+    }
+}
+
+/// Every struct of the module is an object of the jar: testing for a struct
+/// (not for the concrete type) also keeps wasmtime's subtype check away
+/// from host objects, which it does not expect there.
+const STRUCT_REF: HeapType = HeapType::Abstract {
+    shared: false,
+    ty: wasm_encoder::AbstractHeapType::Struct,
+};
+
+const ARRAY_REF: HeapType = HeapType::Abstract {
+    shared: false,
+    ty: wasm_encoder::AbstractHeapType::Array,
+};
 
 fn val(kind: Kind) -> ValType {
     match kind {
@@ -110,6 +174,21 @@ pub struct Compiled {
     /// The lambda sites; an object of site `n` has id `classes.len() + 1 + n`.
     pub lambdas: Vec<Lambda>,
     pub constants: Vec<HostConstant>,
+    /// The classes, as the host needs them, in the order of `classes`.
+    pub info: Vec<ClassInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ClassInfo {
+    pub name: String,
+    pub superclass: Option<String>,
+    pub interfaces: Vec<String>,
+    /// The game class it extends, through the jar's own classes: its
+    /// objects have a peer of this class.
+    pub game_superclass: Option<String>,
+    /// The instance fields, as the struct has them: field `i` of the list
+    /// is struct field `i + 2`.
+    pub fields: Vec<String>,
 }
 
 impl Compiled {
@@ -133,8 +212,22 @@ pub enum Object<'a> {
 
 enum TypeDef {
     Func(Vec<ValType>, Vec<ValType>),
-    /// A struct type: its supertype, and its fields after the class id.
+    /// A struct type: its supertype, and its fields after the class id and
+    /// the peer.
     Struct(u32, Vec<(ValType, bool)>),
+    Array(StorageType),
+}
+
+/// A function made after the methods, when all classes and lambdas are
+/// known.
+#[derive(Clone, PartialEq, Eq)]
+enum Late {
+    /// The dispatcher of a method name and descriptor.
+    Virtual(String, String),
+    /// `instanceof` a class or interface of the jar.
+    InstanceOf(String),
+    /// `multianewarray` of an array descriptor, with this many lengths.
+    MultiArray(String, u32),
 }
 
 struct Site {
@@ -172,6 +265,18 @@ struct Plan<'c> {
     globals: RefCell<Vec<(Kind, Option<ConstExpr>)>>,
     constants: RefCell<Vec<(HostConstant, u32)>>,
     sites: RefCell<Vec<(Lambda, Site)>>,
+    late: RefCell<Vec<Late>>,
+    /// The (name, descriptor) of every instance method the jar declares.
+    virtuals: BTreeSet<(String, String)>,
+    /// class → (name, descriptor) → the function its objects run: its own
+    /// method, else its superclass's, else a default method of an
+    /// interface.
+    vtables: HashMap<String, HashMap<(String, String), u32>>,
+    /// (name, descriptor) → function → the ids of the objects that run it
+    /// (classes that can have objects, and lambdas, added later).
+    implementations: HashMap<(String, String), BTreeMap<u32, Vec<i32>>>,
+    /// class → itself and every class and interface above it.
+    ancestors: HashMap<String, BTreeSet<String>>,
 }
 
 impl Plan<'_> {
@@ -205,11 +310,14 @@ impl Plan<'_> {
     fn host_method(&self, op: &str, owner: &str, name: &str, desc: &str) -> Result<u32> {
         let m = Method::parse(desc).ok_or("a bad method descriptor")?;
         let mut params = Vec::new();
-        if matches!(op, "invokevirtual" | "invokeinterface") {
+        if matches!(
+            op,
+            "invokevirtual" | "invokeinterface" | "invokespecial" | "extend" | "super"
+        ) {
             params.push(ANY);
         }
         params.extend(m.param_kinds().into_iter().map(val));
-        let results = if op == "new" {
+        let results = if op == "new" || op == "extend" {
             vec![ANY]
         } else {
             m.return_kind().map(val).into_iter().collect()
@@ -243,6 +351,155 @@ impl Plan<'_> {
         self.classes.get(class)?.super_name().ok().flatten()
     }
 
+    fn interfaces(&self, class: &str) -> Vec<String> {
+        let Some(c) = self.classes.get(class) else {
+            return Vec::new();
+        };
+        c.interfaces
+            .iter()
+            .filter_map(|i| c.class_name(*i).ok().map(str::to_owned))
+            .collect()
+    }
+
+    /// The game class a class of the jar extends through the jar's classes,
+    /// unless it is Object or Record.
+    fn game_superclass(&self, class: &str) -> Option<String> {
+        let mut c = class;
+        loop {
+            let s = self.superclass(c)?;
+            if !self.classes.contains_key(s) {
+                return (!base_class(s)).then(|| s.to_owned());
+            }
+            c = s;
+        }
+    }
+
+    /// The class to name in an import for a member that `owner` (perhaps a
+    /// class of the jar) inherits from the game.
+    fn game_owner(&self, owner: &str) -> String {
+        if self.classes.contains_key(owner) {
+            self.game_superclass(owner)
+                .unwrap_or_else(|| "java/lang/Object".to_owned())
+        } else {
+            owner.to_owned()
+        }
+    }
+
+    /// Whether `class` is `target` or below it, as far as the jar knows.
+    fn is_subtype(&self, class: &str, target: &str) -> bool {
+        class == target
+            || self
+                .ancestors
+                .get(class)
+                .is_some_and(|a| a.contains(target))
+    }
+
+    /// Builds the vtables, the implementations and the ancestors.
+    fn tables(&mut self) {
+        fn ancestors(
+            plan: &Plan,
+            class: &str,
+            memo: &mut HashMap<String, BTreeSet<String>>,
+        ) -> BTreeSet<String> {
+            if let Some(a) = memo.get(class) {
+                return a.clone();
+            }
+            let mut a = BTreeSet::from([class.to_owned()]);
+            if plan.classes.contains_key(class) {
+                // A placeholder stops a cycle (a bad jar).
+                memo.insert(class.to_owned(), a.clone());
+                let mut above: Vec<String> = plan.interfaces(class);
+                above.extend(plan.superclass(class).map(str::to_owned));
+                for s in above {
+                    a.extend(ancestors(plan, &s, memo));
+                }
+            }
+            memo.insert(class.to_owned(), a.clone());
+            a
+        }
+        fn vtable(
+            plan: &Plan,
+            class: &str,
+            memo: &mut HashMap<String, HashMap<(String, String), u32>>,
+        ) -> HashMap<(String, String), u32> {
+            if let Some(v) = memo.get(class) {
+                return v.clone();
+            }
+            memo.insert(class.to_owned(), HashMap::new());
+            let mut v = HashMap::new();
+            for i in plan.interfaces(class) {
+                if plan.classes.contains_key(&i) {
+                    v.extend(vtable(plan, &i, memo));
+                }
+            }
+            if let Some(s) = plan.superclass(class).map(str::to_owned)
+                && plan.classes.contains_key(&s)
+            {
+                v.extend(vtable(plan, &s, memo));
+            }
+            let c = plan.classes[class];
+            for m in &c.methods {
+                if m.access & STATIC == 0 && m.name != "<init>" && m.code().is_some() {
+                    let key = (class.to_owned(), m.name.clone(), m.descriptor.clone());
+                    v.insert((m.name.clone(), m.descriptor.clone()), plan.functions[&key]);
+                }
+            }
+            memo.insert(class.to_owned(), v.clone());
+            v
+        }
+        let names: Vec<String> = self.classes.keys().cloned().collect();
+        let mut memo = HashMap::new();
+        let mut vt = HashMap::new();
+        for n in &names {
+            ancestors(self, n, &mut memo);
+            vtable(self, n, &mut vt);
+        }
+        let mut implementations: HashMap<(String, String), BTreeMap<u32, Vec<i32>>> =
+            HashMap::new();
+        for n in &names {
+            if self.classes[n.as_str()].access & 0x0600 != 0 {
+                continue;
+            }
+            for (sig, f) in &vt[n] {
+                implementations
+                    .entry(sig.clone())
+                    .or_default()
+                    .entry(*f)
+                    .or_default()
+                    .push(self.ids[n] as i32);
+            }
+        }
+        self.ancestors = memo;
+        self.vtables = vt;
+        self.implementations = implementations;
+    }
+
+    /// A static field as `owner` sees it: its own, or one it inherits from a
+    /// class or interface of the jar. (declaring class, global, kind).
+    fn static_field(&self, owner: &str, name: &str) -> Option<(String, u32, Kind)> {
+        let mut todo = vec![owner.to_owned()];
+        while let Some(c) = todo.pop() {
+            if let Some(&(g, k)) = self.statics.get(&(c.clone(), name.to_owned())) {
+                return Some((c, g, k));
+            }
+            todo.extend(self.interfaces(&c));
+            if let Some(s) = self.superclass(&c) {
+                todo.push(s.to_owned());
+            }
+        }
+        None
+    }
+
+    /// A late function's index, numbered once the methods are compiled.
+    fn late(&self, l: Late) -> u32 {
+        let mut late = self.late.borrow_mut();
+        if let Some(i) = late.iter().position(|x| *x == l) {
+            return LATE | i as u32;
+        }
+        late.push(l);
+        LATE | (late.len() - 1) as u32
+    }
+
     /// The method a call to `owner.name desc` reaches, searching the
     /// classes of the jar from `owner` up.
     fn resolve(&self, owner: &str, name: &str, desc: &str) -> Option<(String, u32)> {
@@ -257,22 +514,12 @@ impl Plan<'_> {
         None
     }
 
-    /// Whether a class of the jar below `declaring` overrides the method.
-    fn overridden(&self, declaring: &str, name: &str, desc: &str) -> bool {
-        self.functions.keys().any(|(c, n, d)| {
-            n == name && d == desc && c != declaring && {
-                let mut s = self.superclass(c);
-                let mut below = false;
-                while let Some(x) = s {
-                    if x == declaring {
-                        below = true;
-                        break;
-                    }
-                    s = self.superclass(x);
-                }
-                below
-            }
-        })
+    /// Whether objects of the jar run more than one method for `name desc`
+    /// (so a call needs the dispatcher).
+    fn overridden(&self, name: &str, desc: &str) -> bool {
+        self.implementations
+            .get(&(name.to_owned(), desc.to_owned()))
+            .is_some_and(|f| f.len() > 1)
     }
 
     /// Calls `owner.name desc`, its receiver (if any) and arguments on the
@@ -289,42 +536,64 @@ impl Plan<'_> {
     ) -> Result<()> {
         let in_jar = self.classes.contains_key(owner);
         match call {
-            Call::Static if in_jar => {
-                let (declaring, f) = self
-                    .resolve(owner, name, desc)
-                    .ok_or_else(|| format!("{owner}.{name}{desc} has no code"))?;
-                if within != Some(declaring.as_str()) {
-                    out.push(W::Call(self.ensure[&declaring]));
+            Call::Static if in_jar => match self.resolve(owner, name, desc) {
+                Some((declaring, f)) => {
+                    if within != Some(declaring.as_str()) {
+                        out.push(W::Call(self.ensure[&declaring]));
+                    }
+                    out.push(W::Call(f));
                 }
-                out.push(W::Call(f));
-            }
+                // A static method of the game that the class inherits
+                // (Block.simpleCodec through a mod's block).
+                None => out.push(W::Call(self.host_method(
+                    "invokestatic",
+                    &self.game_owner(owner),
+                    name,
+                    desc,
+                )?)),
+            },
             Call::Static => out.push(W::Call(self.host_method(
                 "invokestatic",
                 owner,
                 name,
                 desc,
             )?)),
-            Call::Virtual | Call::Interface | Call::Special if in_jar => {
-                match self.resolve(owner, name, desc) {
-                    Some((declaring, f)) => {
-                        if call != Call::Special && self.overridden(&declaring, name, desc) {
-                            return Err(format!(
-                                "{owner}.{name}{desc} is overridden: virtual calls between \
-                                 classes of the jar are not compiled yet"
-                            ));
-                        }
-                        out.push(W::Call(f));
+            Call::Special if in_jar => match self.resolve(owner, name, desc) {
+                Some((_, f)) => out.push(W::Call(f)),
+                // A game method the class inherits (`super.m()`).
+                None => out.push(W::Call(self.host_method(
+                    "invokespecial",
+                    &self.game_owner(owner),
+                    name,
+                    desc,
+                )?)),
+            },
+            Call::Virtual | Call::Interface if in_jar => {
+                let direct = match self.resolve(owner, name, desc) {
+                    Some((_, f)) if call == Call::Virtual => {
+                        (!self.overridden(name, desc)).then_some(f)
                     }
-                    // Inherited from the host (java/lang/Object's methods).
-                    None if call != Call::Special => {
-                        out.push(W::Call(self.host_method(
-                            "invokevirtual",
-                            owner,
-                            name,
-                            desc,
-                        )?));
-                    }
-                    None => return Err(format!("{owner}.{name}{desc} has no code")),
+                    _ => None,
+                };
+                if let Some(f) = direct {
+                    out.push(W::Call(f));
+                } else if self.virtuals.contains(&(name.to_owned(), desc.to_owned())) {
+                    out.push(W::Call(
+                        self.late(Late::Virtual(name.to_owned(), desc.to_owned())),
+                    ));
+                } else {
+                    // Only the game has it (a Block method on a mod block).
+                    let op = if call == Call::Virtual {
+                        "invokevirtual"
+                    } else {
+                        "invokeinterface"
+                    };
+                    out.push(W::Call(self.host_method(
+                        op,
+                        &self.game_owner(owner),
+                        name,
+                        desc,
+                    )?));
                 }
             }
             Call::Special if base_class(owner) && name == "<init>" => {
@@ -332,10 +601,17 @@ impl Plan<'_> {
                 // (or Record, whose constructor does nothing either).
                 out.push(W::Drop);
             }
+            Call::Special if name == "<init>" => {
+                return Err(format!("{owner}.<init>: a game constructor out of place"));
+            }
             Call::Special => {
-                return Err(format!(
-                    "{owner}.{name}{desc}: classes that extend game classes are not compiled yet"
-                ));
+                // `super.m()` of a game method, on a mod object.
+                out.push(W::Call(self.host_method(
+                    "invokespecial",
+                    owner,
+                    name,
+                    desc,
+                )?));
             }
             Call::Virtual | Call::Interface => {
                 let op = if call == Call::Virtual {
@@ -356,15 +632,9 @@ impl Plan<'_> {
         if c.access & 0x0600 != 0 {
             return Err(format!("{class} is abstract or an interface"));
         }
-        if let Some(s) = self.superclass(class)
-            && !base_class(s)
-            && !self.classes.contains_key(s)
-        {
-            return Err(format!(
-                "{class} extends the game class {s}: not compiled yet"
-            ));
-        }
         out.push(W::I32Const(self.ids[class] as i32));
+        // The peer: set by the superclass constructor, if it is the game's.
+        out.push(W::RefNull(HeapType::ANY));
         for (_, _, k) in fields {
             out.push(zero(*k));
         }
@@ -380,7 +650,7 @@ impl Plan<'_> {
         let mut c = Some(owner);
         while let Some(class) = c {
             if let Some(i) = fields.iter().position(|(d, n, _)| d == class && n == name) {
-                return Some((*ty, i as u32 + 1));
+                return Some((*ty, i as u32 + 2));
             }
             c = self.superclass(class);
         }
@@ -398,11 +668,20 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
         inits: BTreeMap::new(),
         ensure: BTreeMap::new(),
         structs: BTreeMap::new(),
-        types: RefCell::new(vec![TypeDef::Struct(u32::MAX, Vec::new())]),
+        types: RefCell::new(
+            std::iter::once(TypeDef::Struct(u32::MAX, Vec::new()))
+                .chain((0..7).map(|k| TypeDef::Array(storage(k))))
+                .collect(),
+        ),
         imports: RefCell::new(Vec::new()),
         globals: RefCell::new(Vec::new()),
         constants: RefCell::new(Vec::new()),
         sites: RefCell::new(Vec::new()),
+        late: RefCell::new(Vec::new()),
+        virtuals: BTreeSet::new(),
+        vtables: HashMap::new(),
+        implementations: HashMap::new(),
+        ancestors: HashMap::new(),
     };
     let mut names = Vec::new();
     for class in classes {
@@ -412,11 +691,14 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
         names.push(name);
     }
     // Functions: every method with code, then for each class its `ensure`
-    // and its allocator, then the lambdas.
+    // and its allocator, then the lambdas, then the late functions.
     let mut bodies = Vec::new();
     for class in classes {
         let owner = class.name().map_err(|e| e.to_string())?.to_owned();
         for m in &class.methods {
+            if m.access & STATIC == 0 && m.name != "<init>" {
+                plan.virtuals.insert((m.name.clone(), m.descriptor.clone()));
+            }
             if m.code().is_none() {
                 continue;
             }
@@ -465,6 +747,7 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
     for (i, owner) in names.iter().enumerate() {
         plan.ensure.insert(owner.clone(), base + i as u32);
     }
+    plan.tables();
     // Struct types, each class after its superclass.
     fn layout(plan: &mut Plan, class: &str) -> Result<()> {
         if plan.structs.contains_key(class) {
@@ -566,13 +849,45 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
         exports.push((format!("lambda {n}"), functions.len() as u32));
         functions.push((ty, locals, body));
     }
+    let lambda_base = functions.len() as u32 - sites as u32;
 
+    // The dispatchers of every method the jar declares and every lambda's
+    // interface method are exported, for the game to call.
+    let mut exported = plan.virtuals.clone();
+    for (l, _) in plan.sites.borrow().iter() {
+        exported.insert((l.method.clone(), l.descriptor.clone()));
+    }
+    for (name, desc) in &exported {
+        plan.late(Late::Virtual(name.clone(), desc.clone()));
+    }
+    let late_base = functions.len() as u32;
+    let mut done = 0;
+    while done < plan.late.borrow().len() {
+        let l = plan.late.borrow()[done].clone();
+        let f = match &l {
+            Late::Virtual(name, desc) => {
+                let f = dispatcher(&plan, &names, lambda_base, name, desc)?;
+                if exported.contains(&(name.clone(), desc.clone())) {
+                    exports.push((format!("virtual {name} {desc}"), functions.len() as u32));
+                }
+                f
+            }
+            Late::InstanceOf(class) => instance_of(&plan, &names, class),
+            Late::MultiArray(desc, dims) => multi_array(&plan, desc, *dims),
+        };
+        functions.push(f);
+        done += 1;
+    }
+
+    let throwable_ty = plan.type_index(vec![ANY], Vec::new());
     // Now the imports are known: they come first.
     let imports = plan.imports.borrow();
     let shift = imports.len() as u32;
     let fix = |i: u32| {
         if i & IMPORT != 0 {
             i & !IMPORT
+        } else if i & LATE != 0 {
+            late_base + (i & !LATE) + shift
         } else {
             i + shift
         }
@@ -585,11 +900,20 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
                     .ty()
                     .function(params.iter().copied(), results.iter().copied());
             }
+            TypeDef::Array(element) => {
+                types.ty().array(element, true);
+            }
             TypeDef::Struct(supertype, fields) => {
-                let mut all = vec![FieldType {
-                    element_type: StorageType::Val(ValType::I32),
-                    mutable: false,
-                }];
+                let mut all = vec![
+                    FieldType {
+                        element_type: StorageType::Val(ValType::I32),
+                        mutable: false,
+                    },
+                    FieldType {
+                        element_type: StorageType::Val(ANY),
+                        mutable: true,
+                    },
+                ];
                 all.extend(fields.iter().map(|(v, mutable)| FieldType {
                     element_type: StorageType::Val(*v),
                     mutable: *mutable,
@@ -609,6 +933,11 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
             }
         }
     }
+    let mut tags = wasm_encoder::TagSection::new();
+    tags.tag(wasm_encoder::TagType {
+        kind: wasm_encoder::TagKind::Exception,
+        func_type_idx: throwable_ty,
+    });
     let mut import_section = ImportSection::new();
     for (name, ty) in imports.iter() {
         import_section.import("host", name, EntityType::Function(*ty));
@@ -652,12 +981,28 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
     module.section(&types);
     module.section(&import_section);
     module.section(&function_section);
+    module.section(&tags);
     module.section(&global_section);
     module.section(&export_section);
     module.section(&code);
+    let info = names
+        .iter()
+        .map(|n| ClassInfo {
+            name: n.clone(),
+            superclass: plan.superclass(n).map(str::to_owned),
+            interfaces: plan.interfaces(n),
+            game_superclass: plan.game_superclass(n),
+            fields: plan.structs[n]
+                .1
+                .iter()
+                .map(|(_, f, _)| f.clone())
+                .collect(),
+        })
+        .collect();
     Ok(Compiled {
         wasm: module.finish(),
         skipped,
+        info,
         classes: names,
         lambdas: plan.sites.borrow().iter().map(|(l, _)| l.clone()).collect(),
         constants: plan
@@ -667,6 +1012,177 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
             .map(|(c, _)| c.clone())
             .collect(),
     })
+}
+
+/// The dispatcher of `name desc`: (object, arguments) → the result.
+fn dispatcher(
+    plan: &Plan,
+    names: &[String],
+    lambda_base: u32,
+    name: &str,
+    desc: &str,
+) -> Result<(u32, Vec<ValType>, Vec<W<'static>>)> {
+    let m = Method::parse(desc).ok_or("a bad descriptor")?;
+    let mut params = vec![ANY];
+    params.extend(m.param_kinds().into_iter().map(val));
+    let results: Vec<ValType> = m.return_kind().map(val).into_iter().collect();
+    let ty = plan.type_index(params.clone(), results);
+    let id = params.len() as u32;
+    // The implementations, with the ids of the objects that run each.
+    let mut targets = plan
+        .implementations
+        .get(&(name.to_owned(), desc.to_owned()))
+        .cloned()
+        .unwrap_or_default();
+    for (n, (l, _)) in plan.sites.borrow().iter().enumerate() {
+        if l.method == name && l.descriptor == desc {
+            targets
+                .entry(lambda_base + n as u32)
+                .or_default()
+                .push((names.len() + 1 + n) as i32);
+        }
+    }
+    let args = |out: &mut Vec<W<'static>>| {
+        for i in 0..params.len() as u32 {
+            out.push(W::LocalGet(i));
+        }
+    };
+    let mut out = vec![
+        W::Block(BlockType::Empty),
+        W::LocalGet(0),
+        W::RefTestNonNull(STRUCT_REF),
+        W::I32Eqz,
+        W::BrIf(0),
+        W::LocalGet(0),
+        W::RefCastNonNull(HeapType::Concrete(OBJECT)),
+        W::StructGet {
+            struct_type_index: OBJECT,
+            field_index: 0,
+        },
+        W::LocalSet(id),
+    ];
+    for (f, ids) in &targets {
+        for (j, i) in ids.iter().enumerate() {
+            out.extend([W::LocalGet(id), W::I32Const(*i), W::I32Eq]);
+            if j > 0 {
+                out.push(W::I32Or);
+            }
+        }
+        out.push(W::If(BlockType::Empty));
+        args(&mut out);
+        out.extend([W::Call(*f), W::Return, W::End]);
+    }
+    // A mod object whose class does not have it: its game superclass's.
+    args(&mut out);
+    out.push(W::Call(plan.host_method(
+        "super",
+        "java/lang/Object",
+        name,
+        desc,
+    )?));
+    out.push(W::Return);
+    out.push(W::End);
+    // An object of the host (or an array, or null): the host's method.
+    args(&mut out);
+    out.push(W::Call(plan.host_method(
+        "invokevirtual",
+        "java/lang/Object",
+        name,
+        desc,
+    )?));
+    out.push(W::End);
+    Ok((ty, vec![ValType::I32], out))
+}
+
+/// `multianewarray`: (lengths) → an array of arrays of `desc`, as deep as
+/// the lengths go (deeper levels stay null).
+fn multi_array(plan: &Plan, desc: &str, dims: u32) -> (u32, Vec<ValType>, Vec<W<'static>>) {
+    let ty = plan.type_index(vec![ValType::I32; dims as usize], vec![ANY]);
+    let component = &desc[1..];
+    if dims <= 1 {
+        let out = vec![
+            W::LocalGet(0),
+            W::ArrayNewDefault(ARRAYS[array_kind(component)]),
+            W::End,
+        ];
+        return (ty, Vec::new(), out);
+    }
+    let inner = plan.late(Late::MultiArray(component.to_owned(), dims - 1));
+    let refs = ARRAYS[6];
+    let (array, i) = (dims, dims + 1);
+    let mut out = vec![
+        W::LocalGet(0),
+        W::ArrayNewDefault(refs),
+        W::LocalSet(array),
+        W::Block(BlockType::Empty),
+        W::Loop(BlockType::Empty),
+        W::LocalGet(i),
+        W::LocalGet(0),
+        W::I32GeS,
+        W::BrIf(1),
+        W::LocalGet(array),
+        W::RefCastNonNull(HeapType::Concrete(refs)),
+        W::LocalGet(i),
+    ];
+    for d in 1..dims {
+        out.push(W::LocalGet(d));
+    }
+    out.extend([
+        W::Call(inner),
+        W::ArraySet(refs),
+        W::LocalGet(i),
+        W::I32Const(1),
+        W::I32Add,
+        W::LocalSet(i),
+        W::Br(0),
+        W::End,
+        W::End,
+        W::LocalGet(array),
+        W::End,
+    ]);
+    (ty, vec![ANY, ValType::I32], out)
+}
+
+/// `instanceof` a class or interface of the jar: (object) → 0 or 1.
+fn instance_of(
+    plan: &Plan,
+    names: &[String],
+    target: &str,
+) -> (u32, Vec<ValType>, Vec<W<'static>>) {
+    let ty = plan.type_index(vec![ANY], vec![ValType::I32]);
+    let mut ids: Vec<i32> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| plan.is_subtype(c, target))
+        .map(|(i, _)| i as i32 + 1)
+        .collect();
+    for (n, (l, _)) in plan.sites.borrow().iter().enumerate() {
+        if plan.is_subtype(&l.interface, target) {
+            ids.push((names.len() + 1 + n) as i32);
+        }
+    }
+    let mut out = vec![
+        W::LocalGet(0),
+        W::RefTestNonNull(STRUCT_REF),
+        W::I32Eqz,
+        W::If(BlockType::Empty),
+        W::I32Const(0),
+        W::Return,
+        W::End,
+        W::LocalGet(0),
+        W::RefCastNonNull(HeapType::Concrete(OBJECT)),
+        W::StructGet {
+            struct_type_index: OBJECT,
+            field_index: 0,
+        },
+        W::LocalSet(1),
+        W::I32Const(0),
+    ];
+    for i in ids {
+        out.extend([W::LocalGet(1), W::I32Const(i), W::I32Eq, W::I32Or]);
+    }
+    out.push(W::End);
+    (ty, vec![ValType::I32], out)
 }
 
 /// The wrapper class of a primitive descriptor, for boxing.
@@ -775,7 +1291,7 @@ fn lambda(plan: &Plan, n: usize) -> Result<(u32, Vec<ValType>, Vec<W<'static>>)>
             out.push(W::RefCastNullable(HeapType::Concrete(site.ty)));
             out.push(W::StructGet {
                 struct_type_index: site.ty,
-                field_index: f,
+                field_index: f + 1,
             });
         }
         adapt(plan, &mut out, &from, to)?;
@@ -845,9 +1361,17 @@ fn stack_kinds(
     class: &ClassFile,
     insns: &[Instruction],
     at: &HashMap<u32, usize>,
+    handlers: &[crate::classfile::Handler],
 ) -> Result<Vec<Option<Vec<Slot>>>> {
     let mut before: Vec<Option<Vec<Slot>>> = vec![None; insns.len()];
     let mut work = vec![(0usize, Vec::new())];
+    // A handler starts with the exception alone on the stack.
+    for h in handlers {
+        let i = *at
+            .get(&u32::from(h.handler))
+            .ok_or("a handler at no instruction")?;
+        work.push((i, vec![Slot::from(Kind::Ref)]));
+    }
     while let Some((i, stack)) = work.pop() {
         if i >= insns.len() {
             continue;
@@ -1115,6 +1639,22 @@ fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Slot>) -> Result<()
                 push(s, k);
             }
         }
+        0xBC | 0xBD => {
+            pop(s)?;
+            push(s, Ref)
+        }
+        0xBE | 0xC1 => {
+            pop(s)?;
+            push(s, Int)
+        }
+        0xBF | 0xC2 | 0xC3 => pops(s, 1)?,
+        0xC5 => {
+            let Operand::Dimensions(_, dims) = insn.operand else {
+                unreachable!()
+            };
+            pops(s, usize::from(dims))?;
+            push(s, Ref)
+        }
         0xBB => s.push(Slot {
             kind: Ref,
             new: Some(insn.at),
@@ -1126,6 +1666,9 @@ fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Slot>) -> Result<()
     }
     Ok(())
 }
+
+/// The exception tag: its one value is the Throwable.
+const THROWABLE: u32 = 0;
 
 struct MethodCompiler<'a> {
     plan: &'a Plan<'a>,
@@ -1143,9 +1686,6 @@ struct MethodCompiler<'a> {
 impl<'a> MethodCompiler<'a> {
     fn new(plan: &'a Plan<'a>, class: &'a ClassFile, method: &'a Member) -> Result<Self> {
         let code = method.code().ok_or("no code")?;
-        if !code.handlers.is_empty() {
-            return Err("exception handlers are not compiled yet".into());
-        }
         let insns = decode(&code.code).map_err(|e| e.to_string())?;
         let sig = Method::parse(&method.descriptor).ok_or("a bad method descriptor")?;
         let mut locals = BTreeMap::new();
@@ -1213,7 +1753,12 @@ impl<'a> MethodCompiler<'a> {
             .enumerate()
             .map(|(i, insn)| (insn.at, i))
             .collect();
-        let before = stack_kinds(self.class, &self.insns, &at)?;
+        let handlers = self
+            .method
+            .code()
+            .map(|c| c.handlers.clone())
+            .unwrap_or_default();
+        let before = stack_kinds(self.class, &self.insns, &at, &handlers)?;
         // Basic blocks: the first instruction, every target, and every
         // instruction after a jump or an end.
         let mut leaders = BTreeSet::from([0usize]);
@@ -1227,6 +1772,14 @@ impl<'a> MethodCompiler<'a> {
                 leaders.extend(succ.iter().copied().filter(|&t| t < self.insns.len()));
                 if i + 1 < self.insns.len() {
                     leaders.insert(i + 1);
+                }
+            }
+        }
+        // A try range's ends and its handler start blocks too.
+        for h in &handlers {
+            for pc in [h.start, h.end, h.handler] {
+                if let Some(&i) = at.get(&u32::from(pc)) {
+                    leaders.insert(i);
                 }
             }
         }
@@ -1261,11 +1814,69 @@ impl<'a> MethodCompiler<'a> {
                 self.emit(W::Unreachable);
                 continue;
             }
+            // The handlers whose range has this block, in the table's order.
+            let pc = self.insns[start].at;
+            let covering: Vec<_> = handlers
+                .iter()
+                .filter(|h| u32::from(h.start) <= pc && pc < u32::from(h.end))
+                .copied()
+                .collect();
+            if covering.is_empty() {
+                for i in start..end {
+                    let stack = before[i].clone().expect("reachable within a block");
+                    let insn = self.insns[i].clone();
+                    self.instruction(&insn, &stack, &block_of, &at, loop_depth)?;
+                }
+                continue;
+            }
+            // block $done { block $caught (anyref) { try_table (catch $caught)
+            // { code } br $done } the handler that matches, else rethrow }
+            self.emit(W::Block(BlockType::Empty));
+            self.emit(W::Block(BlockType::Result(ANY)));
+            self.out.push(W::TryTable(
+                BlockType::Empty,
+                vec![wasm_encoder::Catch::One {
+                    tag: THROWABLE,
+                    label: 0,
+                }]
+                .into(),
+            ));
             for i in start..end {
                 let stack = before[i].clone().expect("reachable within a block");
                 let insn = self.insns[i].clone();
-                self.instruction(&insn, &stack, &block_of, &at, loop_depth)?;
+                self.instruction(&insn, &stack, &block_of, &at, loop_depth + 3)?;
             }
+            self.emit(W::End);
+            self.emit(W::Br(1));
+            self.emit(W::End);
+            let exception = self.st(2000, Kind::Ref);
+            self.emit(W::LocalSet(exception));
+            for h in covering {
+                let target = *at
+                    .get(&u32::from(h.handler))
+                    .ok_or("a handler at no instruction")?;
+                if h.catch_type == 0 {
+                    self.emit(W::LocalGet(exception));
+                    self.set(0, Kind::Ref);
+                    self.jump(target, &block_of, loop_depth + 1)?;
+                    break;
+                }
+                let class = self
+                    .class
+                    .class_name(h.catch_type)
+                    .map_err(|e| e.to_string())?
+                    .to_owned();
+                self.emit(W::LocalGet(exception));
+                self.instance_of(&class);
+                self.emit(W::If(BlockType::Empty));
+                self.emit(W::LocalGet(exception));
+                self.set(0, Kind::Ref);
+                self.jump(target, &block_of, loop_depth + 2)?;
+                self.emit(W::End);
+            }
+            self.emit(W::LocalGet(exception));
+            self.emit(W::Throw(THROWABLE));
+            self.emit(W::End);
             // Falling through to the next block needs nothing: its code
             // follows the end of its block.
         }
@@ -1582,9 +2193,9 @@ impl<'a> MethodCompiler<'a> {
                 };
                 let (owner, name, desc) = self.class.member_ref(i).map_err(|e| e.to_string())?;
                 let k = Kind::of(desc).ok_or("a bad field descriptor")?;
-                match self.plan.statics.get(&(owner.to_owned(), name.to_owned())) {
-                    Some(&(g, _)) => {
-                        self.ensure(owner);
+                match self.plan.static_field(owner, name) {
+                    Some((declaring, g, _)) => {
+                        self.ensure(&declaring);
                         if op == 0xB2 {
                             self.emit(W::GlobalGet(g));
                             self.set(d, k);
@@ -1593,16 +2204,17 @@ impl<'a> MethodCompiler<'a> {
                             self.emit(W::GlobalSet(g));
                         }
                     }
-                    None if self.plan.classes.contains_key(owner) => {
-                        return Err(format!("the static field {owner}.{name} is inherited"));
-                    }
+                    // The game's: one the class inherits (Block.FACING) is
+                    // asked of its game superclass.
                     None if op == 0xB2 => {
-                        let f = self.plan.host_field("getstatic", owner, name, k, desc);
+                        let owner = self.plan.game_owner(owner);
+                        let f = self.plan.host_field("getstatic", &owner, name, k, desc);
                         self.emit(W::Call(f));
                         self.set(d, k);
                     }
                     None => {
-                        let f = self.plan.host_field("putstatic", owner, name, k, desc);
+                        let owner = self.plan.game_owner(owner);
+                        let f = self.plan.host_field("putstatic", &owner, name, k, desc);
                         self.get(d - 1, k);
                         self.emit(W::Call(f));
                     }
@@ -1633,16 +2245,16 @@ impl<'a> MethodCompiler<'a> {
                             });
                         }
                     }
-                    None if self.plan.classes.contains_key(owner) => {
-                        return Err(format!("the field {owner}.{name} is the game's"));
-                    }
+                    // The game's: of the peer, for a mod object.
                     None if op == 0xB4 => {
-                        let f = self.plan.host_field("getfield", owner, name, k, desc);
+                        let owner = self.plan.game_owner(owner);
+                        let f = self.plan.host_field("getfield", &owner, name, k, desc);
                         self.emit(W::Call(f));
                         self.set(d - 1, k);
                     }
                     None => {
-                        let f = self.plan.host_field("putfield", owner, name, k, desc);
+                        let owner = self.plan.game_owner(owner);
+                        let f = self.plan.host_field("putfield", &owner, name, k, desc);
                         self.get(d - 1, k);
                         self.emit(W::Call(f));
                     }
@@ -1655,8 +2267,59 @@ impl<'a> MethodCompiler<'a> {
                 let base = d - kinds.len();
                 let receiver = (op != 0xB8).then(|| base - 1);
                 let within = self.within().map(str::to_owned);
+                // An array's clone: a copy of the same type.
+                if owner.starts_with('[') && name == "clone" {
+                    let ty = ARRAYS[array_kind(&owner[1..])];
+                    let r = base - 1;
+                    let (src, len) = (self.st(r, Ref), self.st(r + 1, Int));
+                    let dst = self.st(r + 2, Ref);
+                    self.emit(W::LocalGet(src));
+                    self.emit(W::RefCastNonNull(HeapType::Concrete(ty)));
+                    self.emit(W::ArrayLen);
+                    self.emit(W::LocalSet(len));
+                    self.emit(W::LocalGet(len));
+                    self.emit(W::ArrayNewDefault(ty));
+                    self.emit(W::LocalSet(dst));
+                    self.emit(W::LocalGet(dst));
+                    self.emit(W::RefCastNonNull(HeapType::Concrete(ty)));
+                    self.emit(W::I32Const(0));
+                    self.emit(W::LocalGet(src));
+                    self.emit(W::RefCastNonNull(HeapType::Concrete(ty)));
+                    self.emit(W::I32Const(0));
+                    self.emit(W::LocalGet(len));
+                    self.emit(W::ArrayCopy {
+                        array_type_index_dst: ty,
+                        array_type_index_src: ty,
+                    });
+                    self.emit(W::LocalGet(dst));
+                    self.set(r, Ref);
+                    return Ok(());
+                }
                 // A game class's constructor on an object from `new`: the
                 // host makes the object, which replaces every copy.
+                if op == 0xB7
+                    && name == "<init>"
+                    && !self.plan.classes.contains_key(&owner)
+                    && !base_class(&owner)
+                    && slots[base - 1].new.is_none()
+                {
+                    // The superclass constructor of a mod object whose class
+                    // extends a game class: the host makes its peer.
+                    let r = base - 1;
+                    self.get(r, Ref);
+                    self.emit(W::RefCastNonNull(HeapType::Concrete(OBJECT)));
+                    self.get(r, Ref);
+                    for (j, k) in kinds.iter().enumerate() {
+                        self.get(base + j, *k);
+                    }
+                    let f = self.plan.host_method("extend", &owner, &name, &desc)?;
+                    self.emit(W::Call(f));
+                    self.emit(W::StructSet {
+                        struct_type_index: OBJECT,
+                        field_index: 1,
+                    });
+                    return Ok(());
+                }
                 if op == 0xB7 && name == "<init>" && !self.plan.classes.contains_key(&owner) {
                     let r = base - 1;
                     if let Some(new) = slots[r].new {
@@ -1716,11 +2379,125 @@ impl<'a> MethodCompiler<'a> {
                 self.set(d, Ref);
             }
             0xC0 => {}
+            0xC1 => {
+                let Operand::Constant(i) = insn.operand else {
+                    unreachable!()
+                };
+                let class = self
+                    .class
+                    .class_name(i)
+                    .map_err(|e| e.to_string())?
+                    .to_owned();
+                self.get(d - 1, Ref);
+                self.instance_of(&class);
+                self.set(d - 1, Int);
+            }
+            0xBF => {
+                self.get(d - 1, Ref);
+                self.emit(W::Throw(THROWABLE));
+            }
+            0xC2 | 0xC3 => {}
+            0xC5 => {
+                let Operand::Dimensions(i, dims) = insn.operand else {
+                    unreachable!()
+                };
+                let class = self.class.class_name(i).map_err(|e| e.to_string())?;
+                let f = self
+                    .plan
+                    .late(Late::MultiArray(class.to_owned(), u32::from(dims)));
+                let base = d - usize::from(dims);
+                for j in 0..usize::from(dims) {
+                    self.get(base + j, Int);
+                }
+                self.emit(W::Call(f));
+                self.set(base, Ref);
+            }
+            0xBC | 0xBD => {
+                let ty = match &insn.operand {
+                    Operand::ArrayType(t) => {
+                        ARRAYS[match t {
+                            4 | 8 => 0,
+                            5 | 9 => 1,
+                            10 => 2,
+                            11 => 3,
+                            6 => 4,
+                            _ => 5,
+                        }]
+                    }
+                    _ => ARRAYS[6],
+                };
+                self.get(d - 1, Int);
+                self.emit(W::ArrayNewDefault(ty));
+                self.set(d - 1, Ref);
+            }
+            0xBE => {
+                self.get(d - 1, Ref);
+                self.emit(W::RefCastNullable(ARRAY_REF));
+                self.emit(W::ArrayLen);
+                self.set(d - 1, Int);
+            }
+            0x2E..=0x35 => {
+                let (kind, k, get) = match op {
+                    0x2E => (2, Int, W::ArrayGet(ARRAYS[2])),
+                    0x2F => (3, Long, W::ArrayGet(ARRAYS[3])),
+                    0x30 => (4, Float, W::ArrayGet(ARRAYS[4])),
+                    0x31 => (5, Double, W::ArrayGet(ARRAYS[5])),
+                    0x32 => (6, Ref, W::ArrayGet(ARRAYS[6])),
+                    0x33 => (0, Int, W::ArrayGetS(ARRAYS[0])),
+                    0x34 => (1, Int, W::ArrayGetU(ARRAYS[1])),
+                    _ => (1, Int, W::ArrayGetS(ARRAYS[1])),
+                };
+                self.get(d - 2, Ref);
+                self.emit(W::RefCastNullable(HeapType::Concrete(ARRAYS[kind])));
+                self.get(d - 1, Int);
+                self.emit(get);
+                self.set(d - 2, k);
+            }
+            0x4F..=0x56 => {
+                let (kind, k) = match op {
+                    0x4F => (2, Int),
+                    0x50 => (3, Long),
+                    0x51 => (4, Float),
+                    0x52 => (5, Double),
+                    0x53 => (6, Ref),
+                    0x54 => (0, Int),
+                    _ => (1, Int),
+                };
+                self.get(d - 3, Ref);
+                self.emit(W::RefCastNullable(HeapType::Concrete(ARRAYS[kind])));
+                self.get(d - 2, Int);
+                self.get(d - 1, k);
+                self.emit(W::ArraySet(ARRAYS[kind]));
+            }
             _ => {
                 return Err(format!("{} is not compiled yet", crate::bytecode::name(op)));
             }
         }
         Ok(())
+    }
+
+    /// `instanceof class` of the reference on top of the WASM stack: 0 or 1.
+    fn instance_of(&mut self, class: &str) {
+        if let Some(component) = class.strip_prefix('[') {
+            let ty = ARRAYS[array_kind(component)];
+            let v = self.st(2001, Kind::Ref);
+            self.emit(W::LocalTee(v));
+            self.emit(W::RefTestNonNull(ARRAY_REF));
+            self.emit(W::If(BlockType::Result(ValType::I32)));
+            self.emit(W::LocalGet(v));
+            self.emit(W::RefTestNonNull(HeapType::Concrete(ty)));
+            self.emit(W::Else);
+            self.emit(W::I32Const(0));
+            self.emit(W::End);
+        } else if self.plan.classes.contains_key(class) {
+            let f = self.plan.late(Late::InstanceOf(class.to_owned()));
+            self.emit(W::Call(f));
+        } else {
+            let f = self
+                .plan
+                .import(format!("instanceof {class}"), vec![ANY], vec![ValType::I32]);
+            self.emit(W::Call(f));
+        }
     }
 
     /// Pushes a host constant to the stack local `d` (the caller sets it).
@@ -1762,6 +2539,55 @@ impl<'a> MethodCompiler<'a> {
             _ => Err("a bad method handle".to_owned()),
         };
         let (_, bo, bn, _) = handle(bootstrap.method_handle)?;
+        let site_desc = Method::parse(desc).ok_or("a bad descriptor")?;
+        let base = d - site_desc.params.len();
+        let string = |index: u16| -> Result<String> {
+            match self.class.constants.get(usize::from(index)) {
+                Some(Constant::String(s)) => Ok(self.class.utf8(*s).map_err(e)?.to_owned()),
+                Some(Constant::Class(_)) => Ok(self.class.class_name(index).map_err(e)?.to_owned()),
+                _ => Err("a bad bootstrap argument".to_owned()),
+            }
+        };
+        // String concatenation and a record's methods: the host's.
+        let host = match (bo.as_str(), bn.as_str()) {
+            ("java/lang/invoke/StringConcatFactory", "makeConcatWithConstants") => {
+                let mut args = bootstrap.arguments.iter();
+                let recipe = string(*args.next().ok_or("a bad concatenation")?)?;
+                // The recipe's constants (\u{2}) go in it.
+                let mut text = String::new();
+                for c in recipe.chars() {
+                    match c {
+                        '\u{2}' => text.push_str(&string(*args.next().ok_or("a bad recipe")?)?),
+                        c => text.push(c),
+                    }
+                }
+                Some(format!("concat {desc} {text}"))
+            }
+            ("java/lang/invoke/StringConcatFactory", "makeConcat") => Some(format!(
+                "concat {desc} {}",
+                "\u{1}".repeat(site_desc.params.len())
+            )),
+            ("java/lang/runtime/ObjectMethods", "bootstrap") => {
+                let class = string(bootstrap.arguments[0])?;
+                Some(format!("record {class}.{method} {desc}"))
+            }
+            _ => None,
+        };
+        if let Some(import) = host {
+            let params = site_desc.param_kinds();
+            let results: Vec<ValType> = site_desc.return_kind().map(val).into_iter().collect();
+            let f = self
+                .plan
+                .import(import, params.iter().map(|k| val(*k)).collect(), results);
+            for (j, k) in params.iter().enumerate() {
+                self.get(base + j, *k);
+            }
+            self.emit(W::Call(f));
+            if let Some(k) = site_desc.return_kind() {
+                self.set(base, k);
+            }
+            return Ok(());
+        }
         if bo != "java/lang/invoke/LambdaMetafactory" || bn != "metafactory" {
             return Err(format!(
                 "invokedynamic through {bo}.{bn} is not compiled yet"
@@ -1775,7 +2601,6 @@ impl<'a> MethodCompiler<'a> {
         };
         let sam = self.class.utf8(*sam).map_err(e)?.to_owned();
         let target = handle(target)?;
-        let site_desc = Method::parse(desc).ok_or("a bad descriptor")?;
         let interface = site_desc
             .ret
             .strip_prefix('L')
@@ -1805,8 +2630,8 @@ impl<'a> MethodCompiler<'a> {
             sites.len() - 1
         };
         let id = self.plan.classes.len() + 1 + n;
-        let base = d - captures.len();
         self.emit(W::I32Const(id as i32));
+        self.emit(W::RefNull(HeapType::ANY));
         for (j, k) in captures.iter().enumerate() {
             self.get(base + j, *k);
         }

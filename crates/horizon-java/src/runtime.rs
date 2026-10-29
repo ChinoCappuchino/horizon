@@ -55,6 +55,25 @@ pub struct Import {
 impl Import {
     pub fn parse(name: &str) -> Import {
         let (op, rest) = name.split_once(' ').unwrap_or((name, ""));
+        // `concat <descriptor> <recipe>`: the recipe (as `name`) may have
+        // spaces. `instanceof <class>`: the class is the owner.
+        if op == "concat" {
+            let (descriptor, recipe) = rest.split_once(' ').unwrap_or((rest, ""));
+            return Import {
+                op: op.to_owned(),
+                owner: String::new(),
+                name: recipe.to_owned(),
+                descriptor: descriptor.to_owned(),
+            };
+        }
+        if op == "instanceof" {
+            return Import {
+                op: op.to_owned(),
+                owner: rest.to_owned(),
+                name: String::new(),
+                descriptor: String::new(),
+            };
+        }
         let (member, descriptor) = rest.rsplit_once(' ').unwrap_or((rest, ""));
         let (owner, name) = member.rsplit_once('.').unwrap_or(("", member));
         Import {
@@ -168,6 +187,87 @@ impl Context<'_> {
         self.call(&format!("lambda {n}"), &all)
     }
 
+    /// The peer of an object of the jar: the game object that stands for
+    /// it (null if its class does not extend a game class).
+    pub fn peer(&mut self, v: &Value) -> Result<Value> {
+        self.field(v, 1)
+    }
+
+    /// Field `index` of an object of the jar (0 the class id, 1 the peer,
+    /// then [`crate::compile::ClassInfo::fields`]).
+    pub fn field(&mut self, v: &Value, index: usize) -> Result<Value> {
+        let Value::Mod(r) = v else {
+            bail!("not an object of the jar")
+        };
+        let mut scope = RootScope::new(&mut self.cx);
+        let r = r.to_rooted(&mut scope);
+        let s = r.unwrap_struct(&scope)?;
+        let f = s.field(&mut scope, index)?;
+        from_val(&mut scope, &f)
+    }
+
+    /// Calls the method `name desc` of an object of the jar, through its
+    /// dispatcher; None if no class of the jar has such a method.
+    pub fn call_virtual(
+        &mut self,
+        object: &Value,
+        name: &str,
+        desc: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>> {
+        let export = format!("virtual {name} {desc}");
+        let Some(instance) = self.cx.data().instance else {
+            bail!("the jar is not running");
+        };
+        if instance.get_func(&mut self.cx, &export).is_none() {
+            return Ok(None);
+        }
+        let mut all = vec![object.clone()];
+        all.extend_from_slice(args);
+        self.call(&export, &all).map(Some)
+    }
+
+    /// The elements of an array (of the jar or made by the host).
+    pub fn array(&mut self, v: &Value) -> Result<Option<Vec<Value>>> {
+        let Value::Mod(r) = v else { return Ok(None) };
+        let mut scope = RootScope::new(&mut self.cx);
+        let r = r.to_rooted(&mut scope);
+        let Some(a) = r.as_array(&scope)? else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
+        for i in 0..a.len(&scope)? {
+            let e = a.get(&mut scope, i)?;
+            out.push(from_val(&mut scope, &e)?);
+        }
+        Ok(Some(out))
+    }
+
+    /// A new array for the jar, of a component descriptor (`I`, `B`,
+    /// `Ljava/lang/String;`...).
+    pub fn new_array(&mut self, component: &str, values: &[Value]) -> Result<Value> {
+        use wasmtime::{ArrayRef, ArrayRefPre, ArrayType, FieldType, Mutability, StorageType};
+        let (storage, ty) = match component.as_bytes().first() {
+            Some(b'Z' | b'B') => (StorageType::I8, ValType::I32),
+            Some(b'C' | b'S') => (StorageType::I16, ValType::I32),
+            Some(b'I') => (StorageType::ValType(ValType::I32), ValType::I32),
+            Some(b'J') => (StorageType::ValType(ValType::I64), ValType::I64),
+            Some(b'F') => (StorageType::ValType(ValType::F32), ValType::F32),
+            Some(b'D') => (StorageType::ValType(ValType::F64), ValType::F64),
+            _ => (StorageType::ValType(ValType::ANYREF), ValType::ANYREF),
+        };
+        let engine = self.cx.engine().clone();
+        let array_ty = ArrayType::new(&engine, FieldType::new(Mutability::Var, storage));
+        let mut scope = RootScope::new(&mut self.cx);
+        let pre = ArrayRefPre::new(&mut scope, array_ty);
+        let mut elems = Vec::new();
+        for v in values {
+            elems.push(to_val(&mut scope, v, &ty)?);
+        }
+        let a = ArrayRef::new_fixed(&mut scope, &pre, &elems)?;
+        Ok(Value::Mod(a.to_anyref().to_owned_rooted(&mut scope)?))
+    }
+
     /// Java's `==` on references.
     pub fn same(&mut self, a: &Value, b: &Value) -> Result<bool> {
         Ok(match (a, b) {
@@ -203,7 +303,7 @@ fn from_val(mut cx: impl AsContextMut<Data = State>, v: &Val) -> Result<Value> {
         Val::F64(f) => Value::Double(f64::from_bits(*f)),
         Val::AnyRef(None) => Value::Null,
         Val::AnyRef(Some(a)) => {
-            if a.is_struct(&cx)? {
+            if a.is_struct(&cx)? || a.is_array(&cx)? {
                 Value::Mod(a.to_owned_rooted(&mut cx)?)
             } else {
                 let e = ExternRef::convert_any(&mut cx, *a)?;
