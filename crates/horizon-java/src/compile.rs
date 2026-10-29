@@ -58,6 +58,11 @@ fn val(kind: Kind) -> ValType {
     }
 }
 
+/// The JDK classes a class of the jar can extend as if it extended nothing.
+fn base_class(class: &str) -> bool {
+    matches!(class, "java/lang/Object" | "java/lang/Record")
+}
+
 fn zero(kind: Kind) -> W<'static> {
     match kind {
         Kind::Int => W::I32Const(0),
@@ -322,8 +327,9 @@ impl Plan<'_> {
                     None => return Err(format!("{owner}.{name}{desc} has no code")),
                 }
             }
-            Call::Special if owner == "java/lang/Object" && name == "<init>" => {
-                // The superclass constructor of a class that extends Object.
+            Call::Special if base_class(owner) && name == "<init>" => {
+                // The superclass constructor of a class that extends Object
+                // (or Record, whose constructor does nothing either).
                 out.push(W::Drop);
             }
             Call::Special => {
@@ -351,7 +357,7 @@ impl Plan<'_> {
             return Err(format!("{class} is abstract or an interface"));
         }
         if let Some(s) = self.superclass(class)
-            && s != "java/lang/Object"
+            && !base_class(s)
             && !self.classes.contains_key(s)
         {
             return Err(format!(
@@ -546,7 +552,17 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
     // The lambdas: closure and arguments in, the target method called.
     let sites = plan.sites.borrow().len();
     for n in 0..sites {
-        let (ty, locals, body) = lambda(&plan, n).map_err(|e| format!("lambda {n}: {e}"))?;
+        let (ty, locals, body) = match lambda(&plan, n) {
+            Ok(f) => f,
+            Err(e) => {
+                skipped.push((format!("lambda {n}"), e));
+                (
+                    lambda_type(&plan, n)?,
+                    Vec::new(),
+                    vec![W::Unreachable, W::End],
+                )
+            }
+        };
         exports.push((format!("lambda {n}"), functions.len() as u32));
         functions.push((ty, locals, body));
     }
@@ -701,16 +717,23 @@ fn adapt(plan: &Plan, out: &mut Vec<W<'static>>, from: &str, to: &str) -> Result
     Ok(())
 }
 
-/// The function behind lambda site `n`: (closure, interface arguments) →
+/// The function type of lambda site `n`: (closure, interface arguments) →
 /// the interface method's result.
-fn lambda(plan: &Plan, n: usize) -> Result<(u32, Vec<ValType>, Vec<W<'static>>)> {
-    let sites = plan.sites.borrow();
-    let site = &sites[n].1;
-    let sam = Method::parse(&site.sam).ok_or("a bad descriptor")?;
+fn lambda_type(plan: &Plan, n: usize) -> Result<u32> {
+    let sam = Method::parse(&plan.sites.borrow()[n].1.sam).ok_or("a bad descriptor")?;
     let mut params = vec![ANY];
     params.extend(sam.param_kinds().into_iter().map(val));
     let results: Vec<ValType> = sam.return_kind().map(val).into_iter().collect();
-    let ty = plan.type_index(params.clone(), results);
+    Ok(plan.type_index(params, results))
+}
+
+/// The function behind lambda site `n`.
+fn lambda(plan: &Plan, n: usize) -> Result<(u32, Vec<ValType>, Vec<W<'static>>)> {
+    let ty = lambda_type(plan, n)?;
+    let sites = plan.sites.borrow();
+    let site = &sites[n].1;
+    let sam = Method::parse(&site.sam).ok_or("a bad descriptor")?;
+    let params = 1 + sam.params.len();
 
     let (kind, owner, name, desc) = &site.target;
     let target = Method::parse(desc).ok_or("a bad descriptor")?;
@@ -738,7 +761,7 @@ fn lambda(plan: &Plan, n: usize) -> Result<(u32, Vec<ValType>, Vec<W<'static>>)>
     let mut out = Vec::new();
     let in_jar = plan.classes.contains_key(owner.as_str());
     // A constructor of the jar's class (`Foo::new`): allocate first.
-    let object = params.len() as u32;
+    let object = params as u32;
     let mut locals = Vec::new();
     if *kind == 8 && in_jar {
         locals.push(ANY);
