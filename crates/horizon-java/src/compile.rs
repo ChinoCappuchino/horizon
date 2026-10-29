@@ -919,7 +919,20 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
         }
     };
     let mut types = TypeSection::new();
-    for t in plan.types.borrow().iter() {
+    // The struct types no other type extends: final, so a cast to one is a
+    // single compare of the object's type (a cast to a type with subtypes
+    // calls the runtime when the object is of a subtype). The jar's classes
+    // are all known here, so a class nothing extends is a leaf.
+    let extended: std::collections::HashSet<u32> = plan
+        .types
+        .borrow()
+        .iter()
+        .filter_map(|t| match t {
+            TypeDef::Struct(supertype, _) if *supertype != u32::MAX => Some(*supertype),
+            _ => None,
+        })
+        .collect();
+    for (index, t) in plan.types.borrow().iter().enumerate() {
         match t {
             TypeDef::Func(params, results) => {
                 types
@@ -945,7 +958,7 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
                     mutable: *mutable,
                 }));
                 types.ty().subtype(&SubType {
-                    is_final: false,
+                    is_final: !extended.contains(&(index as u32)),
                     supertype_idx: (*supertype != u32::MAX).then_some(*supertype),
                     composite_type: CompositeType {
                         inner: CompositeInnerType::Struct(StructType {
