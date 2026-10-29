@@ -447,14 +447,15 @@ pub struct Trades {
     /// potion tags, ordered (`set_random_potion` options).
     pub potion_tags: HashMap<String, Vec<String>>,
 }
-fn walk(dir: &Path, base: &Path, out: &mut HashMap<String, Value>) {
+/// Reads the JSON files under `dir`, as `ns:path` from `base`.
+fn walk(dir: &Path, base: &Path, ns: &str, out: &mut HashMap<String, Value>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            walk(&p, base, out);
+            walk(&p, base, ns, out);
         } else if p.extension().is_some_and(|x| x == "json")
             && let Ok(rel) = p.strip_prefix(base)
             && let Ok(bytes) = fs::read(&p)
@@ -462,7 +463,7 @@ fn walk(dir: &Path, base: &Path, out: &mut HashMap<String, Value>) {
         {
             out.insert(
                 format!(
-                    "minecraft:{}",
+                    "{ns}:{}",
                     rel.with_extension("").to_string_lossy().replace('\\', "/")
                 ),
                 v,
@@ -472,25 +473,30 @@ fn walk(dir: &Path, base: &Path, out: &mut HashMap<String, Value>) {
 }
 impl Trades {
     pub fn load(root: &Path) -> Self {
-        let data = root.join("data/minecraft");
         let (mut trades, mut raw_tags, mut sets) = (HashMap::new(), HashMap::new(), HashMap::new());
-        walk(
-            &data.join("villager_trade"),
-            &data.join("villager_trade"),
-            &mut trades,
-        );
-        walk(
-            &data.join("tags/villager_trade"),
-            &data.join("tags/villager_trade"),
-            &mut raw_tags,
-        );
-        walk(&data.join("trade_set"), &data.join("trade_set"), &mut sets);
         let mut raw_potions = HashMap::new();
-        walk(
-            &data.join("tags/potion"),
-            &data.join("tags/potion"),
-            &mut raw_potions,
-        );
+        // Every namespace's: a mod's profession has its trade sets in its
+        // own (`chefsdelight:chef/level_1`).
+        let mut namespaces: Vec<_> = fs::read_dir(root.join("data"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        namespaces.sort();
+        for data in namespaces {
+            let Some(ns) = data.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            for (folder, out) in [
+                ("villager_trade", &mut trades),
+                ("tags/villager_trade", &mut raw_tags),
+                ("trade_set", &mut sets),
+                ("tags/potion", &mut raw_potions),
+            ] {
+                walk(&data.join(folder), &data.join(folder), &ns, out);
+            }
+        }
         let values = |v: Value| -> Vec<String> {
             v["values"]
                 .as_array()
