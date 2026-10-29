@@ -7,6 +7,7 @@ publish = false
 description = "Java mod compatibility (fork afterwinter): reads JVM class files and decodes their bytecode, for the compiler that turns original mod jars into Horizon WASM mods"
 
 [dependencies]
+wasm-encoder = "0.254"
 
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }

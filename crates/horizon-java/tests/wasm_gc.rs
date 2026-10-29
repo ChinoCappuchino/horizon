@@ -34,13 +34,20 @@ const MODULE: &str = r#"
 #[test]
 fn wasm_gc_objects_arrays_and_exceptions_run() {
     let mut config = Config::new();
-    config.wasm_gc(true).wasm_function_references(true).wasm_exceptions(true);
+    config
+        .wasm_gc(true)
+        .wasm_function_references(true)
+        .wasm_exceptions(true);
     let engine = Engine::new(&config).unwrap();
     let module = Module::new(&engine, wat::parse_str(MODULE).unwrap()).unwrap();
     let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module, &[]).unwrap();
-    let objects = instance.get_typed_func::<i32, i32>(&mut store, "objects").unwrap();
+    let objects = instance
+        .get_typed_func::<i32, i32>(&mut store, "objects")
+        .unwrap();
     assert_eq!(objects.call(&mut store, 41).unwrap(), 45);
-    let throws = instance.get_typed_func::<i32, i32>(&mut store, "throws").unwrap();
+    let throws = instance
+        .get_typed_func::<i32, i32>(&mut store, "throws")
+        .unwrap();
     assert_eq!(throws.call(&mut store, 1).unwrap(), 7);
 }

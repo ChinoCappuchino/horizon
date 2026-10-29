@@ -7,6 +7,8 @@
 //! the clean-room boundary.
 pub mod bytecode;
 pub mod classfile;
+pub mod compile;
+pub mod descriptor;
 
 pub use bytecode::{Instruction, decode};
 pub use classfile::{ClassFile, Constant, Error};
