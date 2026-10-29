@@ -19,6 +19,7 @@ use crate::{
     classfile::{ClassFile, Constant, Member},
     decode,
     descriptor::Method,
+    rt,
     types::{Classes, Frame, Options, Stepper, THIS_SITE, Ty, infer_with, successors},
 };
 use cranelift_codegen::{
@@ -41,8 +42,6 @@ const OBJECT: &str = "java/lang/Object";
 /// The trap of code the prototype does not compile.
 const UNSUPPORTED: TrapCode = TrapCode::unwrap_user(1);
 const NULL: TrapCode = TrapCode::unwrap_user(2);
-const BOUNDS: TrapCode = TrapCode::unwrap_user(3);
-const CAST: TrapCode = TrapCode::unwrap_user(4);
 const ARENA: TrapCode = TrapCode::unwrap_user(5);
 
 /// A class's layout.
@@ -107,10 +106,38 @@ fn jdk_super(class: &str) -> Option<&'static str> {
     })
 }
 
-/// Whether `class` is a JDK exception class this backend knows.
-fn jdk_throwable(class: &str) -> bool {
-    jdk_super(class).is_some()
-}
+/// The JDK exception classes of [`jdk_super`] (Throwable itself is in rt.rs).
+const JDK_EXCEPTIONS: &[&str] = &[
+    "java/lang/Exception",
+    "java/lang/Error",
+    "java/lang/RuntimeException",
+    "java/io/IOException",
+    "java/lang/InterruptedException",
+    "java/lang/ReflectiveOperationException",
+    "java/lang/CloneNotSupportedException",
+    "java/lang/IllegalStateException",
+    "java/lang/IllegalArgumentException",
+    "java/lang/NullPointerException",
+    "java/lang/UnsupportedOperationException",
+    "java/lang/IndexOutOfBoundsException",
+    "java/lang/ClassCastException",
+    "java/lang/ArithmeticException",
+    "java/lang/NegativeArraySizeException",
+    "java/lang/ArrayStoreException",
+    "java/lang/SecurityException",
+    "java/lang/MatchException",
+    "java/util/ConcurrentModificationException",
+    "java/util/NoSuchElementException",
+    "java/io/UncheckedIOException",
+    "java/lang/NumberFormatException",
+    "java/lang/ArrayIndexOutOfBoundsException",
+    "java/lang/StringIndexOutOfBoundsException",
+    "java/lang/ClassNotFoundException",
+    "java/lang/NoSuchMethodException",
+    "java/lang/AssertionError",
+    "java/lang/StackOverflowError",
+    "java/lang/OutOfMemoryError",
+];
 
 extern "C" fn host_catches(exc: u64, catch: u32) -> u32 {
     if exc == 0 {
@@ -145,6 +172,10 @@ pub struct Native {
     #[allow(clippy::vec_box)]
     _singletons: Vec<Box<u64>>,
     _strings: HashMap<String, Box<[u64]>>,
+    /// The runtime library's view of the program (installed for this
+    /// thread), and the cached boxes it hands out.
+    _rt: Box<rt::Rt>,
+    _boxes: Vec<Box<[u64]>>,
 }
 
 fn kind_type(t: &Ty) -> Option<Type> {
@@ -248,7 +279,7 @@ impl Native {
         let hierarchy = Classes::new(classes);
         let mut names: Vec<&str> = by_name.keys().copied().collect();
         names.sort_unstable();
-        let ids: HashMap<&str, u32> = names
+        let mut ids: HashMap<&str, u32> = names
             .iter()
             .enumerate()
             .map(|(i, n)| (*n, i as u32 + 1))
@@ -256,6 +287,22 @@ impl Native {
         let superclass = |c: &str| -> Option<&str> { by_name.get(c)?.super_name().ok().flatten() };
 
         let (lambdas, lambda_at, called) = prepass(classes);
+        // The built-in classes (rt.rs), and the JDK's exception classes (all
+        // with Throwable's fields), unless the program has its own.
+        let mut builtin_list = rt::builtins();
+        for &n in JDK_EXCEPTIONS {
+            builtin_list.push(rt::Builtin {
+                name: n,
+                super_name: jdk_super(n),
+                interfaces: &[],
+                size: 24,
+                is_final: false,
+                methods: Vec::new(),
+            });
+        }
+        builtin_list.retain(|b| !by_name.contains_key(b.name));
+        let builtin: HashMap<&'static str, &rt::Builtin> =
+            builtin_list.iter().map(|b| (b.name, b)).collect();
         // Virtual selectors: every instance method that dispatches, every
         // method called virtually, every lambda's interface method.
         let mut selectors: BTreeMap<(String, String), usize> = BTreeMap::new();
@@ -276,6 +323,16 @@ impl Native {
                 }
             }
         }
+        for b in &builtin_list {
+            for m in &b.methods {
+                if !m.is_static && m.name != "<init>" {
+                    let n = selectors.len();
+                    selectors
+                        .entry((m.name.to_owned(), m.desc.to_owned()))
+                        .or_insert(n);
+                }
+            }
+        }
         // Implementations per selector (for direct calls when only one).
         let mut implementations: HashMap<(String, String), usize> = HashMap::new();
         for c in classes {
@@ -292,6 +349,17 @@ impl Native {
                 .entry((l.name.clone(), l.sam.clone()))
                 .or_default() += 1;
         }
+        for b in &builtin_list {
+            for m in &b.methods {
+                if !m.is_static && m.name != "<init>" {
+                    *implementations
+                        .entry((m.name.to_owned(), m.desc.to_owned()))
+                        .or_default() += 1;
+                }
+            }
+        }
+        let builtin_size: HashMap<&str, i32> =
+            builtin_list.iter().map(|b| (b.name, b.size)).collect();
 
         // Layouts.
         let mut layouts: HashMap<String, Layout> = HashMap::new();
@@ -300,6 +368,7 @@ impl Native {
             c: &'a str,
             by_name: &HashMap<&'a str, &'a ClassFile>,
             ids: &HashMap<&str, u32>,
+            builtin_size: &HashMap<&str, i32>,
             layouts: &mut HashMap<String, Layout>,
             vtables: &mut Vec<Vec<u64>>,
             selectors: usize,
@@ -310,10 +379,13 @@ impl Native {
             let Some(class) = by_name.get(c) else { return };
             let (mut fields, mut size) = (HashMap::new(), 8);
             if let Some(s) = class.super_name().ok().flatten() {
-                layout_of(s, by_name, ids, layouts, vtables, selectors);
+                layout_of(s, by_name, ids, builtin_size, layouts, vtables, selectors);
                 if let Some(l) = layouts.get(s) {
                     fields = l.fields.clone();
                     size = l.size;
+                } else if let Some(&b) = builtin_size.get(s) {
+                    // A built-in superclass's fields come first.
+                    size = b;
                 }
             }
             for f in &class.fields {
@@ -341,6 +413,7 @@ impl Native {
                 n,
                 &by_name,
                 &ids,
+                &builtin_size,
                 &mut layouts,
                 &mut vtables,
                 selectors.len(),
@@ -364,43 +437,25 @@ impl Native {
                 None
             });
         }
-        // The JDK exception classes the code makes (`new IllegalStateException`):
-        // built in, with no fields (the message is not kept yet).
-        let mut builtins: Vec<String> = vec!["java/lang/String".to_owned()];
-        for c in classes {
-            for m in &c.methods {
-                let Some(code) = m.code() else { continue };
-                let Ok(insns) = decode(&code.code) else {
-                    continue;
-                };
-                for x in &insns {
-                    if x.opcode == 0xBB
-                        && let Operand::Constant(i) = x.operand
-                        && let Ok(n) = c.class_name(i)
-                        && !by_name.contains_key(n)
-                        && jdk_throwable(n)
-                        && !builtins.iter().any(|b| b == n)
-                    {
-                        builtins.push(n.to_owned());
-                    }
-                }
-            }
-        }
+        // The built-in classes: ids after the lambdas', vtables, layouts.
         let builtin_base = names.len() + 1 + lambdas.len();
-        for (k, n) in builtins.iter().enumerate() {
+        for (k, b) in builtin_list.iter().enumerate() {
+            let id = (builtin_base + k) as u32;
+            ids.insert(b.name, id);
             let mut vt = vec![0u64; 1 + selectors.len()];
-            vt[0] = (builtin_base + k) as u64;
+            vt[0] = u64::from(id);
             vtables.push(vt);
             let vtable = vtables.last_mut().expect("just pushed").as_mut_ptr();
             layouts.insert(
-                n.clone(),
+                b.name.to_owned(),
                 Layout {
                     fields: HashMap::new(),
-                    size: 8,
+                    size: b.size,
                     vtable,
                 },
             );
         }
+        let builtins: Vec<&str> = builtin_list.iter().map(|b| b.name).collect();
         // Ancestors by name, for catch clauses.
         let mut names_of: Vec<HashSet<String>> =
             vec![HashSet::new(); builtin_base + builtins.len()];
@@ -420,7 +475,13 @@ impl Native {
                                 .filter_map(|&i| cf.class_name(i).ok().map(str::to_owned)),
                         );
                     }
-                    None => todo.extend(jdk_super(&c).map(str::to_owned)),
+                    None => match builtin.get(c.as_str()) {
+                        Some(b) => {
+                            todo.extend(b.super_name.map(str::to_owned));
+                            todo.extend(b.interfaces.iter().map(|i| (*i).to_owned()));
+                        }
+                        None => todo.extend(jdk_super(&c).map(str::to_owned)),
+                    },
                 }
             }
             set
@@ -435,8 +496,15 @@ impl Native {
             names_of[builtin_base + k] = chain(n);
         }
         ANCESTOR_NAMES.with(|a| *a.borrow_mut() = names_of);
-        // Ancestors, for instanceof and checkcast.
+        // Ancestors, for instanceof and checkcast: by id, built-ins too.
         let mut ancestors: Vec<HashSet<u32>> = vec![HashSet::new(); builtin_base + builtins.len()];
+        for b in &builtins {
+            let set: HashSet<u32> = chain(b)
+                .iter()
+                .filter_map(|c| ids.get(c.as_str()).copied())
+                .collect();
+            ancestors[ids[b] as usize] = set;
+        }
         for (i, l) in lambdas.iter().enumerate() {
             let id = (names.len() + 1 + i) as u32;
             let mut set: HashSet<u32> = ancestors_of(&l.interface, &by_name)
@@ -447,17 +515,10 @@ impl Native {
             ancestors[id as usize] = set;
         }
         for n in &names {
-            let mut set = HashSet::new();
-            let mut todo = vec![*n];
-            while let Some(c) = todo.pop() {
-                if let Some(&id) = ids.get(c)
-                    && set.insert(id)
-                    && let Some(cf) = by_name.get(c)
-                {
-                    todo.extend(cf.super_name().ok().flatten());
-                    todo.extend(cf.interfaces.iter().filter_map(|&i| cf.class_name(i).ok()));
-                }
-            }
+            let set: HashSet<u32> = chain(n)
+                .iter()
+                .filter_map(|c| ids.get(c.as_str()).copied())
+                .collect();
             ancestors[ids[n] as usize] = set;
         }
         ANCESTORS.with(|a| *a.borrow_mut() = ancestors);
@@ -600,6 +661,7 @@ impl Native {
             catches: std::cell::RefCell::new(Vec::new()),
             strings: std::cell::RefCell::new(HashMap::new()),
             string_vt: layouts["java/lang/String"].vtable as i64,
+            builtin: &builtin,
         };
         let mut unsupported = Vec::new();
         let mut ctx = module.make_context();
@@ -715,8 +777,37 @@ impl Native {
         }
         module.finalize_definitions().map_err(|e| e.to_string())?;
 
+        // A built-in implementation of `name desc` from built-in class `start`
+        // up.
+        let builtin_impl = |start: &str, name: &str, desc: &str| -> Option<u64> {
+            let mut x = Some(start);
+            while let Some(c) = x {
+                let b = builtin.get(c)?;
+                if let Some(m) = b
+                    .methods
+                    .iter()
+                    .find(|m| !m.is_static && m.name == name && m.desc == desc)
+                {
+                    return Some(m.f as u64);
+                }
+                x = b.super_name;
+            }
+            None
+        };
+        // The first ancestor of a class of the program that is not one.
+        let first_outside = |start: &str| -> String {
+            let mut c = start.to_owned();
+            while let Some(cf) = by_name.get(c.as_str()) {
+                match cf.super_name().ok().flatten() {
+                    Some(s) => c = s.to_owned(),
+                    None => return OBJECT.to_owned(),
+                }
+            }
+            c
+        };
         // Fill the vtables: each selector's implementation in the class or
-        // its superclasses (or an interface's default method).
+        // its superclasses (or an interface's default method, or a built-in
+        // superclass's).
         for n in &names {
             let l = &layouts[*n];
             for ((mname, mdesc), &sel) in &selectors {
@@ -748,6 +839,18 @@ impl Native {
                     let p = module.get_finalized_function(f);
                     // SAFETY: the vtable has 1 + selectors entries.
                     unsafe { *l.vtable.add(1 + sel) = p as u64 };
+                } else if let Some(p) = builtin_impl(&first_outside(n), mname, mdesc) {
+                    // SAFETY: as above.
+                    unsafe { *l.vtable.add(1 + sel) = p };
+                }
+            }
+        }
+        for b in &builtins {
+            let l = &layouts[*b];
+            for ((mname, mdesc), &sel) in &selectors {
+                if let Some(p) = builtin_impl(b, mname, mdesc) {
+                    // SAFETY: as above.
+                    unsafe { *l.vtable.add(1 + sel) = p };
                 }
             }
         }
@@ -760,10 +863,15 @@ impl Native {
                 // SAFETY: the vtable has 1 + selectors entries.
                 unsafe { *vt.add(1 + sel) = p as u64 };
             }
-            // The interface's default methods for its other selectors.
+            // The interface's default methods for its other selectors, and
+            // Object's.
             for ((mname, mdesc), &sel) in &selectors {
                 if *mname == l.name && *mdesc == l.sam {
                     continue;
+                }
+                if let Some(p) = builtin_impl(OBJECT, mname, mdesc) {
+                    // SAFETY: the vtable has 1 + selectors entries.
+                    unsafe { *vt.add(1 + sel) = p };
                 }
                 let found = ancestors_of(&l.interface, &by_name)
                     .iter()
@@ -784,6 +892,35 @@ impl Native {
             }
         }
         let strings = world.strings.take();
+        // The runtime library: the class names, the built-in vtables, the
+        // selectors it calls back through, the cached boxes.
+        let mut class_names = vec![String::new(); builtin_base + builtins.len()];
+        for n in &names {
+            class_names[ids[n] as usize] = (*n).to_owned();
+        }
+        for (i, l) in lambdas.iter().enumerate() {
+            class_names[names.len() + 1 + i] = format!("{}$$Lambda", l.interface);
+        }
+        for b in &builtins {
+            class_names[ids[b] as usize] = (*b).to_owned();
+        }
+        let builtin_vtables: HashMap<&'static str, u64> = builtin_list
+            .iter()
+            .map(|b| (b.name, layouts[b.name].vtable as u64))
+            .collect();
+        let mut boxes = Vec::new();
+        let cache = rt::make_caches(&builtin_vtables, &mut boxes);
+        let sel = |n: &str, d: &str| selectors.get(&(n.to_owned(), d.to_owned())).copied();
+        let runtime = Box::new(rt::Rt {
+            globals: globals_at as *mut u64,
+            vtables: builtin_vtables,
+            names: class_names,
+            to_string: sel("toString", "()Ljava/lang/String;"),
+            hash_code: sel("hashCode", "()I"),
+            equals: sel("equals", "(Ljava/lang/Object;)Z"),
+            cache,
+        });
+        rt::install(&runtime);
         let exports = funcs;
         Ok(Native {
             module,
@@ -795,6 +932,8 @@ impl Native {
             _vtables: vtables,
             _singletons: singletons,
             _strings: strings,
+            _rt: runtime,
+            _boxes: boxes,
         })
     }
 
@@ -1011,6 +1150,8 @@ struct World<'a> {
     /// the String vtable, the length, the UTF-16 units.
     strings: std::cell::RefCell<HashMap<String, Box<[u64]>>>,
     string_vt: i64,
+    /// The built-in classes, by name.
+    builtin: &'a HashMap<&'static str, &'a rt::Builtin>,
 }
 
 impl World<'_> {
@@ -1027,6 +1168,31 @@ impl World<'_> {
                 return Some(c);
             }
             x = cf.super_name().ok().flatten().map(str::to_owned);
+        }
+        None
+    }
+    /// The built-in method `name desc` that a call on `owner` reaches (its
+    /// address), when no class of the program has it: (address, static,
+    /// the class it is in is final).
+    fn builtin_method(&self, owner: &str, name: &str, desc: &str) -> Option<(usize, bool, bool)> {
+        let mut x = owner.to_owned();
+        // Up through the program's classes to a built-in one.
+        while let Some(cf) = self.by_name.get(x.as_str()) {
+            x = cf.super_name().ok().flatten()?.to_owned();
+        }
+        let mut y = Some(x.as_str());
+        let mut first = true;
+        let mut fin = false;
+        while let Some(c) = y {
+            let b = self.builtin.get(c)?;
+            if first {
+                fin = b.is_final;
+                first = false;
+            }
+            if let Some(m) = b.methods.iter().find(|m| m.name == name && m.desc == desc) {
+                return Some((m.f, m.is_static, fin));
+            }
+            y = b.super_name;
         }
         None
     }
@@ -1164,12 +1330,17 @@ fn bridge(
     if args.len() != want.len() {
         return Err("arguments do not match the target".into());
     }
-    if args
-        .iter()
-        .zip(&want)
-        .any(|(a, t)| b.func.dfg.value_type(*a) != *t)
-    {
-        return Err("boxing between the interface and the target (not in the prototype)".into());
+    // The interface's arguments as the target takes them: boxed, unboxed or
+    // widened, as LambdaMetafactory adapts them.
+    let mut have: Vec<String> = l.captures.clone();
+    have.extend(sam.params.iter().cloned());
+    let mut need: Vec<String> = Vec::new();
+    if matches!(l.kind, 5 | 7 | 9) {
+        need.push(format!("L{};", l.owner));
+    }
+    need.extend(target.params.iter().cloned());
+    for k in 0..args.len() {
+        args[k] = adapt(&mut b, module, args[k], &have[k], &need[k])?;
     }
     let result = match l.kind {
         6 | 7 => {
@@ -1217,16 +1388,17 @@ fn bridge(
         }
         k => return Err(format!("method handle kind {k}")),
     };
+    let made = if l.kind == 8 {
+        format!("L{};", l.owner)
+    } else {
+        target.ret.clone()
+    };
     if sam.ret == "V" {
         b.ins().return_(&[]);
     } else {
-        let want = desc_type(&sam.ret).ok_or("a bad return")?;
-        match result {
-            Some(v) if b.func.dfg.value_type(v) == want => {
-                b.ins().return_(&[v]);
-            }
-            _ => return Err("boxing of the result (not in the prototype)".into()),
-        }
+        let v = result.ok_or("no result for the interface")?;
+        let v = adapt(&mut b, module, v, &made, &sam.ret)?;
+        b.ins().return_(&[v]);
     }
     b.finalize(module.target_config());
     Ok(())
@@ -1440,6 +1612,52 @@ fn stays(w: &World<'_>, h: &Classes, class: &str, name: &str, desc: &str, depth:
 /// `new` position.
 type SiteKey = (u32, u32);
 
+/// Value `v` of descriptor `from` as descriptor `to`: boxed, unboxed or
+/// widened, or as it is.
+fn adapt(
+    b: &mut FunctionBuilder<'_>,
+    module: &mut JITModule,
+    v: Value,
+    from: &str,
+    to: &str,
+) -> Result<Value, String> {
+    let is_ref = |d: &str| d.starts_with('L') || d.starts_with('[');
+    let call =
+        |b: &mut FunctionBuilder<'_>, module: &mut JITModule, f: usize, desc: &str, v: Value| {
+            let sig = signature(module, false, desc).expect("a runtime signature");
+            let sr = b.import_signature(sig);
+            let fp = b.ins().iconst(types::I64, f as i64);
+            let call = b.ins().call_indirect(sr, fp, &[v]);
+            b.inst_results(call)[0]
+        };
+    Ok(match (is_ref(from), is_ref(to)) {
+        (true, true) => v,
+        (false, true) => {
+            let (_, of, _) = rt::boxing(from).ok_or("boxing of an unknown type")?;
+            call(b, module, of, &format!("({from})Ljava/lang/Object;"), v)
+        }
+        (true, false) => {
+            let (_, _, un) = rt::boxing(to).ok_or("unboxing to an unknown type")?;
+            b.ins().trapz(v, NULL);
+            call(b, module, un, &format!("(Ljava/lang/Object;){to}"), v)
+        }
+        (false, false) if from == to => v,
+        (false, false) => {
+            let (ft, tt) = (
+                desc_type(from).ok_or("a bad type")?,
+                desc_type(to).ok_or("a bad type")?,
+            );
+            match (ft, tt) {
+                (a, c) if a == c => v,
+                (types::I32, types::I64) => b.ins().sextend(types::I64, v),
+                (types::I32 | types::I64, types::F32 | types::F64) => b.ins().fcvt_from_sint(tt, v),
+                (types::F32, types::F64) => b.ins().fpromote(types::F64, v),
+                _ => return Err(format!("no conversion from {from} to {to}")),
+            }
+        }
+    })
+}
+
 struct MethodGen<'a, 'b, 'f> {
     w: &'a World<'a>,
     h: &'a Classes,
@@ -1473,6 +1691,8 @@ struct MethodGen<'a, 'b, 'f> {
     unwind: Option<Block>,
     /// Exception dispatch blocks, by body and covering handlers.
     dispatches: HashMap<(u32, Vec<usize>), Block>,
+    /// The instruction being compiled (where implicit exceptions go from).
+    cur: usize,
 }
 
 impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
@@ -1530,6 +1750,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             fields: HashMap::new(),
             unwind: None,
             dispatches: HashMap::new(),
+            cur: 0,
         })
     }
 
@@ -1747,6 +1968,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             for i in start..end {
                 let f = self.frames[i].clone().ok_or("unreachable within a block")?;
                 let insn = self.insns[i].clone();
+                self.cur = i;
                 ended = self.insn(&insn, &f, i)?;
                 if ended {
                     break;
@@ -1905,6 +2127,147 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         Ok(())
     }
 
+    /// String concatenation (`invokedynamic` through StringConcatFactory):
+    /// a StringBuilder, one append per piece, its string. Whether it was one.
+    fn concat(&mut self, insn: &Instruction, f: &Frame, i: usize) -> Result<bool, String> {
+        let me = |e: crate::classfile::Error| e.to_string();
+        let Operand::Constant(c) = insn.operand else {
+            return Ok(false);
+        };
+        let Some(Constant::InvokeDynamic(bsm, nat)) = self.class.constants.get(usize::from(c))
+        else {
+            return Ok(false);
+        };
+        let (_, desc) = self.class.name_and_type(*nat).map_err(me)?;
+        let bootstrap = self
+            .class
+            .bootstrap_methods()
+            .get(usize::from(*bsm))
+            .ok_or("a bad bootstrap method")?;
+        let Some(Constant::MethodHandle(_, r)) = self
+            .class
+            .constants
+            .get(usize::from(bootstrap.method_handle))
+        else {
+            return Ok(false);
+        };
+        let (bo, bn, _) = self.class.member_ref(*r).map_err(me)?;
+        if bo != "java/lang/invoke/StringConcatFactory" {
+            return Ok(false);
+        }
+        let m = Method::parse(desc).ok_or("a bad concatenation")?;
+        let n = m.params.len();
+        let class = self.class;
+        let constant = |index: u16| -> Result<String, String> {
+            match class.constants.get(usize::from(index)) {
+                Some(Constant::String(u)) => Ok(class.utf8(*u).map_err(me)?.to_owned()),
+                Some(Constant::Integer(v)) => Ok(v.to_string()),
+                Some(Constant::Long(v)) => Ok(v.to_string()),
+                Some(Constant::Float(v)) => Ok(rt::java_float(*v)),
+                Some(Constant::Double(v)) => Ok(rt::java_double(*v)),
+                _ => Err("a bad concatenation constant".into()),
+            }
+        };
+        // The recipe: text, \u{1} for each argument, \u{2} for a constant.
+        let recipe = if bn == "makeConcatWithConstants" {
+            let mut args = bootstrap.arguments.iter();
+            let first = *args.next().ok_or("a concatenation without a recipe")?;
+            let mut text = String::new();
+            for ch in constant(first)?.chars() {
+                match ch {
+                    '\u{2}' => text.push_str(&constant(*args.next().ok_or("a bad recipe")?)?),
+                    ch => text.push(ch),
+                }
+            }
+            text
+        } else {
+            "\u{1}".repeat(n)
+        };
+        let d = f.stack.len();
+        let base = d - n;
+        let sb = self
+            .call_builtin(
+                rt::concat::new as *const () as usize,
+                "()Ljava/lang/Object;",
+                false,
+                &[],
+            )?
+            .ok_or("no builder")?;
+        let mut text = String::new();
+        let mut k = 0;
+        for ch in recipe.chars().chain(std::iter::once('\u{1}')) {
+            if ch != '\u{1}' {
+                text.push(ch);
+                continue;
+            }
+            if !text.is_empty() {
+                let lit = self.string(&text);
+                let lit = self.b.ins().iconst(types::I64, lit);
+                self.call_builtin(
+                    rt::concat::append_string as *const () as usize,
+                    "(Ljava/lang/String;)Ljava/lang/Object;",
+                    true,
+                    &[sb, lit],
+                )?;
+                text.clear();
+            }
+            if k == n {
+                break;
+            }
+            let p = m.params[k].as_str();
+            let t = kind_type(&f.stack[base + k]).unwrap_or(types::I64);
+            let v = self.get(base + k, t);
+            let (fp, pdesc) = match p {
+                "I" | "S" | "B" => (
+                    rt::concat::append_int as *const () as usize,
+                    "(I)Ljava/lang/Object;",
+                ),
+                "Z" => (
+                    rt::concat::append_bool as *const () as usize,
+                    "(Z)Ljava/lang/Object;",
+                ),
+                "C" => (
+                    rt::concat::append_char as *const () as usize,
+                    "(C)Ljava/lang/Object;",
+                ),
+                "J" => (
+                    rt::concat::append_long as *const () as usize,
+                    "(J)Ljava/lang/Object;",
+                ),
+                "F" => (
+                    rt::concat::append_float as *const () as usize,
+                    "(F)Ljava/lang/Object;",
+                ),
+                "D" => (
+                    rt::concat::append_double as *const () as usize,
+                    "(D)Ljava/lang/Object;",
+                ),
+                "Ljava/lang/String;" => (
+                    rt::concat::append_string as *const () as usize,
+                    "(Ljava/lang/String;)Ljava/lang/Object;",
+                ),
+                _ => (
+                    rt::concat::append_object as *const () as usize,
+                    "(Ljava/lang/Object;)Ljava/lang/Object;",
+                ),
+            };
+            self.call_builtin(fp, pdesc, true, &[sb, v])?;
+            k += 1;
+        }
+        let out = self
+            .call_builtin(
+                rt::concat::finish as *const () as usize,
+                "()Ljava/lang/String;",
+                true,
+                &[sb],
+            )?
+            .ok_or("no string")?;
+        // An argument's toString() may have thrown.
+        self.after_call(i)?;
+        self.set(base, types::I64, out);
+        Ok(true)
+    }
+
     /// The object of string literal `text` (the same for each use).
     fn string(&mut self, text: &str) -> i64 {
         let mut strings = self.w.strings.borrow_mut();
@@ -1912,13 +2275,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             return o.as_ptr() as i64;
         }
         let units: Vec<u16> = text.encode_utf16().collect();
-        let mut o = vec![0u64; 2 + units.len().div_ceil(4)];
-        o[0] = self.w.string_vt as u64;
-        o[1] = units.len() as u64;
-        for (k, u) in units.iter().enumerate() {
-            o[2 + k / 4] |= u64::from(*u) << (16 * (k % 4));
-        }
-        let o = o.into_boxed_slice();
+        let o = rt::literal(&units, self.w.string_vt as u64);
         let at = o.as_ptr() as i64;
         strings.insert(text.to_owned(), o);
         at
@@ -1954,7 +2311,47 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
     }
 
     fn null_check(&mut self, obj: Value) {
-        self.b.ins().trapz(obj, NULL);
+        let null = self.b.ins().icmp_imm_s(IntCC::Equal, obj, 0);
+        self.throw_if(null, "java/lang/NullPointerException");
+    }
+
+    /// Throws a new `class` (a built-in exception) when `cond` is nonzero.
+    fn throw_if(&mut self, cond: Value, class: &str) {
+        let Some(vt) = self.w.layouts.get(class).map(|l| l.vtable as i64) else {
+            self.b.ins().trapnz(cond, UNSUPPORTED);
+            return;
+        };
+        let throw = self.b.create_block();
+        let on = self.b.create_block();
+        self.b.set_cold_block(throw);
+        self.b.ins().brif(cond, throw, &[], on, &[]);
+        self.b.switch_to_block(throw);
+        let v = self.b.ins().iconst(types::I64, vt);
+        let _ = self.call_builtin(rt::throw_new as *const () as usize, "(J)V", false, &[v]);
+        match self.dispatch(self.cur) {
+            Ok(go) => {
+                self.b.ins().jump(go, &[]);
+            }
+            Err(_) => {
+                self.b.ins().trap(UNSUPPORTED);
+            }
+        }
+        self.b.switch_to_block(on);
+    }
+
+    /// A call to a runtime method at address `f` with descriptor `desc`.
+    fn call_builtin(
+        &mut self,
+        f: usize,
+        desc: &str,
+        instance: bool,
+        args: &[Value],
+    ) -> Result<Option<Value>, String> {
+        let sig = signature(self.module, instance, desc).ok_or("a bad signature")?;
+        let sr = self.b.import_signature(sig);
+        let fp = self.b.ins().iconst(types::I64, f as i64);
+        let call = self.b.ins().call_indirect(sr, fp, args);
+        Ok(self.b.inst_results(call).first().copied())
     }
 
     fn host(&mut self, name: &str, args: &[Value]) -> Option<Value> {
@@ -2335,6 +2732,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 }
             }
             0xB6..=0xB9 => return self.invoke(insn, f, i),
+            0xBA if self.concat(insn, f, i)? => {}
             0xBA => {
                 let site = self
                     .w
@@ -2411,7 +2809,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 };
                 let len = self.get(d - 1, i32t);
                 let neg = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, len, 0);
-                self.b.ins().trapnz(neg, BOUNDS);
+                self.throw_if(neg, "java/lang/NegativeArraySizeException");
                 let len64 = self.b.ins().uextend(i64t, len);
                 let bytes = self.b.ins().imul_imm_s(len64, elem);
                 let size = self.b.ins().iadd_imm_s(bytes, 16);
@@ -2457,7 +2855,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         let null = self.b.ins().icmp_imm_s(IntCC::Equal, obj, 0);
                         let null = self.b.ins().uextend(i32t, null);
                         let pass = self.b.ins().bor(ok, null);
-                        self.b.ins().trapz(pass, CAST);
+                        let fail = self.b.ins().icmp_imm_s(IntCC::Equal, pass, 0);
+                        self.throw_if(fail, "java/lang/ClassCastException");
                     }
                 } else {
                     let r = match r {
@@ -2491,7 +2890,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             .b
             .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
-        self.b.ins().trapnz(out, BOUNDS);
+        self.throw_if(out, "java/lang/ArrayIndexOutOfBoundsException");
         let (size, _) = element(array_ty);
         let i = self.b.ins().uextend(types::I64, idx);
         let off = self.b.ins().imul_imm_s(i, i64::from(size));
@@ -2609,7 +3008,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             }
             0x6C..=0x73 => {
                 // Java: division by zero throws; MIN / -1 is MIN, MIN % -1 is 0.
-                self.b.ins().trapz(b, TrapCode::INTEGER_DIVISION_BY_ZERO);
+                let zero_div = self.b.ins().icmp_imm_s(IntCC::Equal, b, 0);
+                self.throw_if(zero_div, "java/lang/ArithmeticException");
                 let minus = self.b.ins().icmp_imm_s(IntCC::Equal, b, -1);
                 let one = self.b.ins().iconst(t, 1);
                 let safe = self.b.ins().select(minus, one, b);
@@ -2704,7 +3104,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             return Ok(false);
         }
         // Object's constructor does nothing; nor (for now) a JDK exception's.
-        if op == 0xB7 && name == "<init>" && (owner == OBJECT || jdk_throwable(&owner)) {
+        if op == 0xB7 && name == "<init>" && owner == OBJECT {
             return Ok(false);
         }
         // A call on an object kept in variables: its code, here.
@@ -2726,8 +3126,25 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         let result = match op {
             0xB8 | 0xB7 => {
                 let Some(declaring) = self.w.resolve(&owner, &name, &desc) else {
-                    self.b.ins().trap(UNSUPPORTED);
-                    return Ok(true);
+                    // A runtime library method (String.valueOf, a constructor
+                    // of a JDK class, super() into one).
+                    match self.w.builtin_method(&owner, &name, &desc) {
+                        Some((f, is_static, _)) if is_static == (op == 0xB8) => {
+                            if op == 0xB7 {
+                                self.null_check(args[0]);
+                            }
+                            let r = self.call_builtin(f, &desc, op == 0xB7, &args)?;
+                            self.after_call(i)?;
+                            if let (Some(t), Some(v)) = (ret, r) {
+                                self.set(base, t, v);
+                            }
+                            return Ok(false);
+                        }
+                        _ => {
+                            self.b.ins().trap(UNSUPPORTED);
+                            return Ok(true);
+                        }
+                    }
                 };
                 if op == 0xB8 {
                     self.init(&declaring);
@@ -2738,6 +3155,20 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 let fr = self.module.declare_func_in_func(id, self.b.func);
                 let call = self.b.ins().call(fr, &args);
                 self.b.inst_results(call).first().copied()
+            }
+            _ if self.w.resolve(&owner, &name, &desc).is_none()
+                && matches!(
+                    self.w.builtin_method(&owner, &name, &desc),
+                    Some((_, false, true))
+                ) =>
+            {
+                // A method of a final runtime class (String, a box): direct.
+                let (f, _, _) = self
+                    .w
+                    .builtin_method(&owner, &name, &desc)
+                    .expect("matched");
+                self.null_check(args[0]);
+                self.call_builtin(f, &desc, true, &args)?
             }
             _ => {
                 self.null_check(args[0]);

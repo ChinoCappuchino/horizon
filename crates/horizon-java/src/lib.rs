@@ -12,6 +12,8 @@ pub mod compile;
 pub mod descriptor;
 #[cfg(feature = "native")]
 pub mod native;
+#[cfg(feature = "native")]
+pub mod rt;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 pub mod types;
