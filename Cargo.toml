@@ -23,6 +23,7 @@ members = [
     "crates/horizon-relay",
     "crates/horizon-mod-sdk",
     "crates/horizon-mods",
+    "crates/horizon-java",
     "crates/horizon-mods/tests/guest",
     "crates/horizon-mods/tests/ui_guest",
     "crates/horizon-mods/tests/worldgen_guest",

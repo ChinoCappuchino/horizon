@@ -1,0 +1,15 @@
+[package]
+name = "horizon-java"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Java mod compatibility (fork afterwinter): reads JVM class files and decodes their bytecode, for the compiler that turns original mod jars into Horizon WASM mods"
+
+[dependencies]
+
+[dev-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[lints]
+workspace = true

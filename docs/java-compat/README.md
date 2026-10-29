@@ -74,6 +74,68 @@ action:
 The hook table is common to all mod packs. When one person adds a line, all mods
 that use that target get it.
 
+### 2.5 Versions of Minecraft and loaders
+
+The system is not only for NeoForge 1.21.1. It must also run old mods, back to
+Minecraft 1.12.2 and earlier. This gives the classic mods a second life in a new
+engine.
+
+The parts that change with the version:
+
+| Part | Same for all versions? | Why |
+|---|---|---|
+| Compiler | Yes | JVM bytecode has the same format from Java 6 to Java 21. |
+| Compatibility layer | No | Each loader version has a different API. The layer has one profile for each version. |
+| Names | No | Before Minecraft 1.14, mods use obfuscated names (for example `func_71410_x`). A mapping table gives the related profile member. |
+| Block data | No | Before Minecraft 1.13, blocks have numeric ids and metadata. The "Flattening" tables of Minecraft change them into block states. |
+
+All profiles use the same Horizon world. The world is always Minecraft 26.3 in
+Horizon.
+
+#### 2.5.1 Profile data: get it when a mod needs it
+
+A profile needs data: name mappings, the Flattening tables and hook-table lines.
+Horizon does not keep all of it on the disk. These are the rules:
+
+1. Horizon has only the data of the most common profiles, in a compact form.
+2. When a mod needs other data, Horizon gets it from a Git repository or from
+   its original source.
+3. Horizon gets only the tables that the installed mods need.
+4. Horizon verifies each table with its hash before it uses it.
+5. Horizon keeps each table in its cache. The next start does not download it.
+
+CAUTION: Some mapping tables (for example Forge's SRG and MCP names, and
+Mojang's official mappings) have terms that do not let you redistribute them
+complete. Get these tables from their original source on the computer that
+uses them. Do not put them in a Horizon download.
+
+The sequence of profiles:
+
+| Profile | Reason |
+|---|---|
+| NeoForge 1.21.1 | The Afterwinter pack |
+| Forge 1.20.1 | The largest modern set of mods |
+| Forge 1.16.5 | Many large mod packs |
+| Forge 1.12.2 | The classic mods |
+| Forge 1.7.10 | The oldest large set of mods (for example GregTech: New Horizons) |
+
+Fabric can be an additional profile at a later time.
+
+### 2.6 Why the compiler is written in Rust
+
+The compiler is a part of Horizon. It is written in Rust. These are the reasons:
+
+1. Players do not need Java. Each computer can compile mods without a JVM.
+2. The compiler compiles each jar separately. Thus the cache has one entry for
+   each jar.
+3. The compiler controls reflection, annotations and dynamic loading.
+4. The compiler applies Mixins in the same step.
+5. The compatibility layer is Rust. It calls Horizon directly.
+6. Wasmtime changes the WASM into native code.
+
+This is not a copy of Forge or NeoForge. Java and Rust do not work in the same
+way. The compiler makes native WASM, with glue that is specific to Minecraft.
+
 ## 3. Comparison to Proton (Valve)
 
 The design follows the method that Valve uses for Windows games on Linux:

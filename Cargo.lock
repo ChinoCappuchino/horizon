@@ -1482,6 +1482,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-java"
+version = "0.1.0"
+dependencies = [
+ "zip",
+]
+
+[[package]]
 name = "horizon-mod-sdk"
 version = "0.1.0"
 dependencies = [

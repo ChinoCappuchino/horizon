@@ -12,6 +12,10 @@ Writing standard: ASD-STE100 rules (see [README.md](README.md#writing-rules-for-
 | 3 | Mixins and the hook table | The Mixins of the content mods are applied or skipped by the table |
 | 4 | Client code: renderers and screens | Custom block renderers and machine screens show |
 | 5 | Large mods | Create, Mekanism, Applied Energistics 2 run |
+| 6 | Older profiles: Forge 1.20.1, 1.16.5, 1.12.2, 1.7.10 | A classic mod of each profile runs |
+
+Phase 6 can start early for the compiler and the name mappings. The compiler is
+the same for all profiles.
 
 Do the phases in this sequence. A phase can start before the last phase is
 complete, if the work does not depend on it.
@@ -42,8 +46,9 @@ Mixins).
 
 ### 2.3 Steps
 
-1. Select the compiler (TeaVM, or a translator in Rust). Record the reason in
-   this document.
+1. Write the class-file reader of the Rust compiler. Test it on all 44,751
+   classes of the Afterwinter pack. (Decision 2026-10-29: the compiler is Rust,
+   not TeaVM. See [README.md section 2.6](README.md#26-why-the-compiler-is-written-in-rust).)
 2. Write the compatibility classes for the 51 members.
 3. Compile the jar.
 4. Load the result as a Horizon WASM mod.
@@ -54,7 +59,18 @@ Mixins).
 
 ### 2.4 Results
 
-(Not done yet.)
+Step 1 (2026-10-29): the class-file reader and the bytecode decoder
+(`crates/horizon-java`) read all classes of the Afterwinter pack:
+
+| Item | Quantity |
+|---|---:|
+| Jars | 113 |
+| Classes | 44,751 (0 errors) |
+| Methods with code | 337,977 (0 errors) |
+| Instructions | 7,307,157 |
+| Class file versions | 49 to 65 (Java 5 to Java 21) |
+
+Steps 2 to 7: not done yet.
 
 ## 3. The order of mods for the Afterwinter pack
 
