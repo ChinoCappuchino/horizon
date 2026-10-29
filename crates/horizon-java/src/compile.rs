@@ -1755,6 +1755,84 @@ fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Slot>) -> Result<()
 /// The exception tag: its one value is the Throwable.
 const THROWABLE: u32 = 0;
 
+/// What a structured method's code is inside, innermost last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Nest {
+    /// A WASM block that join block `n` follows.
+    Block(usize),
+    /// The WASM loop of loop header `n`.
+    Loop(usize),
+    /// An arm of an `if`.
+    If,
+}
+
+/// The facts the nesting needs about a control-flow graph.
+struct Shape {
+    /// Each block's position in reverse postorder.
+    order: Vec<usize>,
+    /// The blocks each block immediately dominates, in reverse postorder.
+    children: Vec<Vec<usize>>,
+    /// Blocks reached by more than one forward branch (or by a switch, or
+    /// by both ways of a conditional branch): they follow a WASM block.
+    join: Vec<bool>,
+    /// Loop headers.
+    header: Vec<bool>,
+}
+
+impl Shape {
+    fn new(cfg: &crate::cfg::Cfg, insns: &[Instruction], at: &HashMap<u32, usize>) -> Shape {
+        let n = cfg.blocks.len();
+        let mut order = vec![usize::MAX; n];
+        for (i, &b) in cfg.rpo.iter().enumerate() {
+            order[b] = i;
+        }
+        let mut children = vec![Vec::new(); n];
+        for &b in cfg.rpo.iter().skip(1) {
+            let d = cfg.idom[b];
+            if d != usize::MAX && d != b {
+                children[d].push(b);
+            }
+        }
+        let mut forward = vec![0usize; n];
+        let mut join = vec![false; n];
+        for &b in &cfg.rpo {
+            let last = &insns[cfg.blocks[b].end - 1];
+            let targets: Vec<usize> = crate::types::successors(insns, cfg.blocks[b].end - 1, at)
+                .into_iter()
+                .map(|i| cfg.block_of[i])
+                .collect();
+            let switch = matches!(last.opcode, 0xAA | 0xAB);
+            let mut seen = Vec::new();
+            for t in targets {
+                if order[t] > order[b] {
+                    if switch || seen.contains(&t) {
+                        join[t] = true;
+                    }
+                    if !seen.contains(&t) {
+                        forward[t] += 1;
+                    }
+                }
+                seen.push(t);
+            }
+        }
+        for b in 0..n {
+            if forward[b] > 1 {
+                join[b] = true;
+            }
+        }
+        let mut header = vec![false; n];
+        for (h, _) in &cfg.loops {
+            header[*h] = true;
+        }
+        Shape {
+            order,
+            children,
+            join,
+            header,
+        }
+    }
+}
+
 struct MethodCompiler<'a> {
     plan: &'a Plan<'a>,
     class: &'a ClassFile,
@@ -1907,6 +1985,22 @@ impl<'a> MethodCompiler<'a> {
             let e = self.plan.ensure[&self.owner];
             self.emit(W::Call(e));
         }
+        // A method without exception handlers: nested blocks and loops from
+        // its control-flow graph (javac's graphs are reducible), so each
+        // branch is a direct one. With handlers: a block-number loop, below.
+        // HORIZON_JAVA_FLAT=1: the block-number loop for every method (to
+        // compare).
+        if handlers.is_empty() && std::env::var_os("HORIZON_JAVA_FLAT").is_none() {
+            let cfg = crate::cfg::Cfg::new(&self.insns, &handlers);
+            if cfg.reducible {
+                let shape = Shape::new(&cfg, &self.insns, &at);
+                let mut ctx = Vec::new();
+                self.tree(&cfg, &shape, &before, &at, 0, &mut ctx)?;
+                self.emit(W::Unreachable);
+                self.emit(W::End);
+                return Ok((self.extra, self.out));
+            }
+        }
         self.emit(W::Loop(BlockType::Empty));
         for _ in 0..n {
             self.emit(W::Block(BlockType::Empty));
@@ -1994,6 +2088,211 @@ impl<'a> MethodCompiler<'a> {
         self.emit(W::Unreachable);
         self.emit(W::End);
         Ok((self.extra, self.out))
+    }
+
+    /// Block `x` and the blocks it dominates that join paths, nested (Ramsey,
+    /// "Beyond Relooper", 2022): each join block follows a WASM block that
+    /// its branches leave; a loop header's code is in a WASM loop.
+    fn tree(
+        &mut self,
+        cfg: &crate::cfg::Cfg,
+        shape: &Shape,
+        before: &[Option<Vec<Slot>>],
+        at: &HashMap<u32, usize>,
+        x: usize,
+        ctx: &mut Vec<Nest>,
+    ) -> Result<()> {
+        let joins: Vec<usize> = shape.children[x]
+            .iter()
+            .copied()
+            .filter(|&c| shape.join[c])
+            .collect();
+        if shape.header[x] {
+            self.emit(W::Loop(BlockType::Empty));
+            ctx.push(Nest::Loop(x));
+            self.nest(cfg, shape, before, at, x, &joins, ctx)?;
+            ctx.pop();
+            self.emit(W::End);
+        } else {
+            self.nest(cfg, shape, before, at, x, &joins, ctx)?;
+        }
+        Ok(())
+    }
+
+    /// `x`'s code inside a WASM block for each join it dominates (the last in
+    /// reverse postorder outermost), each join's code after its block.
+    #[allow(clippy::too_many_arguments)]
+    fn nest(
+        &mut self,
+        cfg: &crate::cfg::Cfg,
+        shape: &Shape,
+        before: &[Option<Vec<Slot>>],
+        at: &HashMap<u32, usize>,
+        x: usize,
+        joins: &[usize],
+        ctx: &mut Vec<Nest>,
+    ) -> Result<()> {
+        let Some((&y, rest)) = joins.split_last() else {
+            return self.block_code(cfg, shape, before, at, x, ctx);
+        };
+        self.emit(W::Block(BlockType::Empty));
+        ctx.push(Nest::Block(y));
+        self.nest(cfg, shape, before, at, x, rest, ctx)?;
+        ctx.pop();
+        self.emit(W::End);
+        self.tree(cfg, shape, before, at, y, ctx)
+    }
+
+    /// The instructions of block `x`, and its way out.
+    fn block_code(
+        &mut self,
+        cfg: &crate::cfg::Cfg,
+        shape: &Shape,
+        before: &[Option<Vec<Slot>>],
+        at: &HashMap<u32, usize>,
+        x: usize,
+        ctx: &mut Vec<Nest>,
+    ) -> Result<()> {
+        let (start, end) = (cfg.blocks[x].start, cfg.blocks[x].end);
+        let none = HashMap::new();
+        for i in start..end - 1 {
+            let stack = before[i].clone().expect("reachable within a block");
+            let insn = self.insns[i].clone();
+            self.instruction(&insn, &stack, &none, at, 0)?;
+        }
+        let last = end - 1;
+        let insn = self.insns[last].clone();
+        let stack = before[last].clone().expect("reachable within a block");
+        let d = stack.len();
+        let block_at = |pc: u32| -> Result<usize> {
+            at.get(&pc)
+                .map(|&i| cfg.block_of[i])
+                .ok_or_else(|| "a bad branch target".to_owned())
+        };
+        match (insn.opcode, &insn.operand) {
+            (0x99..=0xA6 | 0xC6 | 0xC7, Operand::Target(t)) => {
+                let (to, next) = (block_at(*t)?, cfg.block_of[end]);
+                self.branch_condition(insn.opcode, d);
+                self.emit(W::If(BlockType::Empty));
+                ctx.push(Nest::If);
+                self.branch(cfg, shape, before, at, x, to, ctx)?;
+                self.emit(W::Else);
+                self.branch(cfg, shape, before, at, x, next, ctx)?;
+                ctx.pop();
+                self.emit(W::End);
+            }
+            (0xA7 | 0xC8, Operand::Target(t)) => {
+                let to = block_at(*t)?;
+                self.branch(cfg, shape, before, at, x, to, ctx)?;
+            }
+            (0xAA | 0xAB, operand) => {
+                let (default, pairs): (u32, Vec<(i32, u32)>) = match operand {
+                    Operand::Table {
+                        default,
+                        low,
+                        targets,
+                    } => (
+                        *default,
+                        targets
+                            .iter()
+                            .enumerate()
+                            .map(|(i, t)| (low + i as i32, *t))
+                            .collect(),
+                    ),
+                    Operand::Lookup { default, pairs } => (*default, pairs.clone()),
+                    _ => unreachable!(),
+                };
+                for (key, t) in pairs {
+                    let to = block_at(t)?;
+                    self.get(d - 1, Kind::Int);
+                    self.emit(W::I32Const(key));
+                    self.emit(W::I32Eq);
+                    self.emit(W::If(BlockType::Empty));
+                    ctx.push(Nest::If);
+                    self.branch(cfg, shape, before, at, x, to, ctx)?;
+                    ctx.pop();
+                    self.emit(W::End);
+                }
+                let to = block_at(default)?;
+                self.branch(cfg, shape, before, at, x, to, ctx)?;
+            }
+            (0xAC..=0xB1 | 0xBF, _) => self.instruction(&insn, &stack, &none, at, 0)?,
+            _ => {
+                // Falls through to the next block.
+                self.instruction(&insn, &stack, &none, at, 0)?;
+                let next = *cfg.block_of.get(end).ok_or("code falls off its end")?;
+                self.branch(cfg, shape, before, at, x, next, ctx)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// From block `from` to block `to`: back to a loop's start, out of the
+    /// block a join follows, or (the only way in) `to`'s code here.
+    #[allow(clippy::too_many_arguments)]
+    fn branch(
+        &mut self,
+        cfg: &crate::cfg::Cfg,
+        shape: &Shape,
+        before: &[Option<Vec<Slot>>],
+        at: &HashMap<u32, usize>,
+        from: usize,
+        to: usize,
+        ctx: &mut Vec<Nest>,
+    ) -> Result<()> {
+        let depth = |want: Nest| {
+            ctx.iter()
+                .rev()
+                .position(|n| *n == want)
+                .map(|i| i as u32)
+                .ok_or_else(|| format!("no enclosing {want:?}"))
+        };
+        if shape.order[to] <= shape.order[from] {
+            let d = depth(Nest::Loop(to))?;
+            self.emit(W::Br(d));
+        } else if shape.join[to] {
+            let d = depth(Nest::Block(to))?;
+            self.emit(W::Br(d));
+        } else {
+            self.tree(cfg, shape, before, at, to, ctx)?;
+        }
+        Ok(())
+    }
+
+    /// The condition of conditional branch `op` (stack depth `d`), as an
+    /// i32 on the WASM stack: nonzero when it jumps.
+    fn branch_condition(&mut self, op: u8, d: usize) {
+        use Kind::*;
+        match op {
+            0x99..=0x9E => {
+                self.get(d - 1, Int);
+                self.emit(W::I32Const(0));
+                self.emit(int_compare(op - 0x99));
+            }
+            0x9F..=0xA4 => {
+                self.get(d - 2, Int);
+                self.get(d - 1, Int);
+                self.emit(int_compare(op - 0x9F));
+            }
+            0xA5 | 0xA6 => {
+                self.get(d - 2, Ref);
+                self.get(d - 1, Ref);
+                let same = self
+                    .plan
+                    .import("same".into(), vec![ANY, ANY], vec![ValType::I32]);
+                self.emit(W::Call(same));
+                if op == 0xA6 {
+                    self.emit(W::I32Eqz);
+                }
+            }
+            _ => {
+                self.get(d - 1, Ref);
+                self.emit(W::RefIsNull);
+                if op == 0xC7 {
+                    self.emit(W::I32Eqz);
+                }
+            }
+        }
     }
 
     /// Jumps to the block at instruction `target`.
@@ -2224,36 +2523,7 @@ impl<'a> MethodCompiler<'a> {
                 let Operand::Target(t) = insn.operand else {
                     unreachable!()
                 };
-                match op {
-                    0x99..=0x9E => {
-                        self.get(d - 1, Int);
-                        self.emit(W::I32Const(0));
-                        self.emit(int_compare(op - 0x99));
-                    }
-                    0x9F..=0xA4 => {
-                        self.get(d - 2, Int);
-                        self.get(d - 1, Int);
-                        self.emit(int_compare(op - 0x9F));
-                    }
-                    0xA5 | 0xA6 => {
-                        self.get(d - 2, Ref);
-                        self.get(d - 1, Ref);
-                        let same =
-                            self.plan
-                                .import("same".into(), vec![ANY, ANY], vec![ValType::I32]);
-                        self.emit(W::Call(same));
-                        if op == 0xA6 {
-                            self.emit(W::I32Eqz);
-                        }
-                    }
-                    _ => {
-                        self.get(d - 1, Ref);
-                        self.emit(W::RefIsNull);
-                        if op == 0xC7 {
-                            self.emit(W::I32Eqz);
-                        }
-                    }
-                }
+                self.branch_condition(op, d);
                 self.emit(W::If(BlockType::Empty));
                 let target = target_of(t)?;
                 self.jump(target, block_of, loop_depth + 1)?;
