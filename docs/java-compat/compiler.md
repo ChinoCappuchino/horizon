@@ -205,6 +205,13 @@ Loaders and their versions are settings of the install (a file like
 `server.properties`); the default order is NeoForge 1.21.1, Fabric 26.x,
 NeoForge 26.x, Fabric 1.21.1, Quilt, Forge 1.20.1, then older.
 
+Target versions (decision 2026-10-29, owner):
+
+1. Now: 1.21.1 (the proof of concept, with the Afterwinter pack).
+2. After the proof of concept is merged with upstream and accepted:
+   1.12.2 and 1.8.
+3. Then the versions between them.
+
 ## 5. Steps
 
 Do the steps in this sequence. Each step keeps all tests correct (Farmer's
