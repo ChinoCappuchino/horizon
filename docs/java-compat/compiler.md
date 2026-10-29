@@ -108,6 +108,33 @@ In all other conditions the compiled vanilla method runs, with the hooks of
 the mods. All classes are known at install, so the decision is exact and has
 no cost at run time.
 
+Decision 2026-10-29 (owner): a Mixin on a method that Horizon replaces must
+not always remove the Rust code. Each Rust replacement declares the vanilla
+methods and call sites that it stands for (a correspondence map, made from
+the bytecode by tools). When a Mixin injects at a point of the map (the start
+or the end of a method, before or after a call), the Rust code calls the
+compiled Mixin handler at that point, with the same cancel and return value
+rules as Mixin. Only a Mixin change that the map cannot express (a change to
+a local variable, an expression that is replaced, an `@Overwrite` of a method
+with no hook) makes that one method use the compiled vanilla code. The install
+report lists these methods. The list shows which hook points to add next.
+
+### 4.3 Memory
+
+Decision 2026-10-29 (owner): memory is managed by Horizon, not as in the JVM.
+Remove the allocations that cost most, then collect the remainder only between
+ticks.
+
+| Part | Work |
+|---|---|
+| Escape analysis | An object that does not leave its method becomes local values. No allocation. This is correct for all classes. |
+| Value types | An immutable class (for example `Vec3`, `BlockPos`, `AABB`) becomes a Rust value type when no code of the installed game uses its identity (`==` on two references, `synchronized`, identity hash). Vanilla uses identity on these classes only in their own `equals` (the `this == other` test), which is safe. The installed mods decide: in the Afterwinter pack, Create, Immersive Engineering, AE2 and other mods use `==` on `BlockPos` and `Vec3` (about 50 places), so these stay objects there. Tool: `examples/alloc_census.rs`. |
+| Tick regions | Objects made in a tick go into a region. At the end of the tick, the objects that are still referenced move out; the region is then empty again. There is no collection during a tick. |
+| Rust world state | Chunks, block states, entities and inventories stay in Horizon's Rust data. Java code gets handles to them. |
+| Last tracer | A tracer for the long-lived objects of mods (their maps and caches), between ticks. |
+
+`ItemStack` is not a value type: vanilla uses its identity in 31 places.
+
 ## 5. Steps
 
 Do the steps in this sequence. Each step keeps all tests correct (Farmer's
