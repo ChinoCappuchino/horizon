@@ -1758,8 +1758,10 @@ mod bucket_use_tests {
 /// tests: the block registry and facts as the client's `Assets::load` reads them.
 #[cfg(test)]
 pub(crate) fn prepared_items() -> Option<Items> {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/horizon-client/26.3");
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../.local/horizon-client/{}",
+        horizon_core::VANILLA_VERSION
+    ));
     if !root.join("items.json").exists() {
         return None;
     }

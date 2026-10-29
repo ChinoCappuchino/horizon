@@ -4,8 +4,10 @@ use super::*;
 /// `colorAsTerrainParticle` (#1034: grass blocks crumbled as tinted grass tops).
 #[test]
 fn terrain_particles_use_the_particle_sprite_and_vanilla_tint_sources() {
-    let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../.local/horizon-client/{}",
+        horizon_core::VANILLA_VERSION
+    ));
     if !root.join("horizon-resources.json").exists() {
         return;
     }

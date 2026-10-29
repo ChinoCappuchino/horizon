@@ -4,7 +4,7 @@
 //! cargo run --profile fast -p horizon-client --example portal_scan_bench -- RESOURCES
 use horizon_client::{
     blocks::BlockFacts,
-    chunk::{Chunk, MIN_Y, SECTIONS, Section},
+    chunk::{Chunk, MIN_Y, Section},
     fast_hash::FxHashMap,
     portal_sections::PortalSections,
 };
@@ -31,7 +31,7 @@ fn reach(from: Vec3, to: Vec3, width: f32, height: f32) -> Aabb {
 fn sections(reach: Aabb) -> (i64, i32, i32, i32, i32, i32, i32) {
     let (min, max) = (reach.min_position(), reach.max_position());
     let (min, max) = (BlockPos::containing(min), BlockPos::containing(max));
-    let top = SECTIONS as i32 - 1;
+    let top = horizon_client::chunk::sections() as i32 - 1;
     let (x0, x1) = (min.x >> 4, max.x >> 4);
     let (z0, z1) = (min.z >> 4, max.z >> 4);
     let (y0, y1) = (
@@ -83,7 +83,7 @@ fn may_hold_portal_cached(
     if count > 64 {
         return true;
     }
-    let mut y_mask = 0u32;
+    let mut y_mask = 0u128;
     for sy in y0..=y1 {
         y_mask |= 1 << sy;
     }

@@ -1515,8 +1515,10 @@ mod tests {
     /// prepared resources: a missing one draws nothing.
     #[test]
     fn villager_layers_name_textures_that_exist() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.local/horizon-client/26.3");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../.local/horizon-client/{}",
+            horizon_core::VANILLA_VERSION
+        ));
         if !root.join("entity-models.json").exists() {
             return;
         }
@@ -1550,8 +1552,10 @@ mod tests {
 
     #[test]
     fn sulfur_cube_opaque_core_is_submitted_before_its_translucent_shell() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.local/horizon-client/26.3");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../.local/horizon-client/{}",
+            horizon_core::VANILLA_VERSION
+        ));
         if !root.join("entity-models.json").exists() {
             return;
         }
@@ -1637,8 +1641,10 @@ mod tests {
     /// vanilla shows. It was drawn at the full size, like a zombie's.
     #[test]
     fn the_vex_holds_its_item_at_the_small_scale() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.local/horizon-client/26.3");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../.local/horizon-client/{}",
+            horizon_core::VANILLA_VERSION
+        ));
         if !root.join("entity-models.json").exists() {
             return;
         }

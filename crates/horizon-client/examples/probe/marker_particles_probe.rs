@@ -24,7 +24,8 @@ use std::{
 
 pub fn main() -> Result<()> {
     let args: Vec<String> = crate::args().collect();
-    let root = Path::new(".local/horizon-client/26.3");
+    let root = format!(".local/horizon-client/{}", horizon_core::VANILLA_VERSION);
+    let root = Path::new(&root);
     let assets = Assets::load(root)?;
     let facts = BlockFacts::load(root, assets.registry)?;
     let biomes = Biomes::load(root)?;

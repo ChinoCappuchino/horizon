@@ -8,7 +8,7 @@ use horizon_client::{
     assets::Assets,
     biome::Biomes,
     blocks::BlockFacts,
-    chunk::{Chunk, MIN_Y, SECTIONS, index},
+    chunk::{Chunk, MIN_Y, index},
     light::{LightTables, apply_lighting, light_chunk},
     save,
 };
@@ -137,7 +137,11 @@ pub fn main() -> horizon_client::Result<()> {
         let vanilla = &arrays[&(x, z)];
         let center = &chunks[&(x, z)];
         let (mut s_bad, mut b_bad) = (0, 0);
-        for (si, section) in lit.iter().enumerate().take(SECTIONS) {
+        for (si, section) in lit
+            .iter()
+            .enumerate()
+            .take(horizon_client::chunk::sections())
+        {
             let sy = (MIN_Y >> 4) + si as i32;
             let (sky, block) = vanilla.get(&sy).cloned().unwrap_or((None, None));
             for i in 0..4096 {
@@ -152,7 +156,7 @@ pub fn main() -> horizon_client::Result<()> {
                 let vs = match &sky {
                     Some(_) => nibble(&sky, 0),
                     None if !sky_light || !center.sections[si].is_uniform(0) => 0,
-                    None => ((sy + 1)..=(MIN_Y >> 4) + SECTIONS as i32)
+                    None => ((sy + 1)..=(MIN_Y >> 4) + horizon_client::chunk::sections() as i32)
                         .find_map(|y| vanilla.get(&y).and_then(|(s, _)| s.as_ref()))
                         .map_or(15, |a| (a[(i & 255) >> 1] >> ((i & 1) * 4)) & 15),
                 };

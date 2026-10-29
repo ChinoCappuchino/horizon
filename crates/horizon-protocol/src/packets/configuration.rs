@@ -279,7 +279,7 @@ mod tests {
                 packs: vec![KnownPack {
                     namespace: "minecraft".into(),
                     id: "core".into(),
-                    version: "26.3".into(),
+                    version: horizon_core::VANILLA_VERSION.into(),
                 }],
             }),
             Clientbound::CodeOfConduct(CodeOfConduct {

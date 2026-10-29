@@ -123,7 +123,7 @@ pub fn game_files(root: &Path, game_version: &str) -> PathBuf {
 
 /// Whether the servers' game files are there.
 pub fn game_files_ready() -> bool {
-    game_files(&runtime_root(), "26.3")
+    game_files(&runtime_root(), crate::browser::GAME)
         .join("horizon-resources.json")
         .is_file()
 }

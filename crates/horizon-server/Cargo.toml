@@ -7,6 +7,7 @@ rust-version = "1.90"
 description = "Host a Horizon server: server.toml, the CLI and the supervisor that runs the game headless (docs/server.md)"
 
 [dependencies]
+horizon-core = { path = "../horizon-core" }
 horizon-server-files = { path = "../horizon-server-files" }
 # The game process's RAM and CPU (the same probes the benchmark reports use).
 horizon-bench = { path = "../horizon-bench" }

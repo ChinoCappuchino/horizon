@@ -16,7 +16,6 @@ use horizon_client::{
     assets::Assets,
     biome::Biomes,
     blocks::BlockFacts,
-    chunk::HEIGHT,
     light::LightTables,
     mesher::{MeshTables, Mesher, Region, borrow},
     models,
@@ -127,7 +126,9 @@ fn main() -> Result<(), Error> {
                 .all(Option::is_some)
                 .then_some(region)
         })
-        .flat_map(|region| (0..HEIGHT / 16).map(move |sy| (region.clone(), sy)))
+        .flat_map(|region| {
+            (0..horizon_client::chunk::height() / 16).map(move |sy| (region.clone(), sy))
+        })
         .collect();
     let mut best = Duration::MAX;
     let (mut vertices, mut checksum) = (0, 0);

@@ -51,7 +51,10 @@ fn tags_merge_without_repeats() {
 fn prepared() -> Option<PathBuf> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     [
-        manifest.join("../../.local/horizon-client/26.3"),
+        manifest.join(format!(
+            "../../.local/horizon-client/{}",
+            horizon_core::VANILLA_VERSION
+        )),
         manifest.join("../../../../.local/horizon-client/26.3"),
     ]
     .into_iter()

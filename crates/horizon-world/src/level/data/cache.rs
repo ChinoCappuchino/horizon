@@ -789,7 +789,10 @@ mod tests {
         let source = std::env::var_os("HORIZON_RESOURCES")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                    "../../.local/horizon-client/{}",
+                    horizon_core::VANILLA_VERSION
+                ))
             });
         if !source.join("block-behaviours.json").exists() {
             eprintln!("skipping behaviour cache tests: no client resources");

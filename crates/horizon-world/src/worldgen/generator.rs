@@ -3156,7 +3156,10 @@ mod tests {
         let root = std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                    "../../.local/horizon-client/{}",
+                    horizon_core::VANILLA_VERSION
+                ))
             });
         if !root.join("worldgen/world_presets.json").exists() {
             eprintln!("skipping: no worldgen bundle at {}", root.display());
@@ -3344,7 +3347,10 @@ mod tests {
             .or_else(|| std::env::var_os("HORIZON_RESOURCES"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                    "../../.local/horizon-client/{}",
+                    horizon_core::VANILLA_VERSION
+                ))
             });
         if !root.join("worldgen/world_presets.json").exists() {
             eprintln!("skipping: no worldgen bundle at {}", root.display());
@@ -3444,7 +3450,10 @@ mod tests {
         let root = std::env::var_os("HORIZON_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                    "../../.local/horizon-client/{}",
+                    horizon_core::VANILLA_VERSION
+                ))
             });
         if !root.join("worldgen/world_presets.json").exists() {
             eprintln!("skipping: no worldgen bundle at {}", root.display());
@@ -3495,7 +3504,10 @@ mod tests {
         let root = std::env::var_os("HORIZON_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                    "../../.local/horizon-client/{}",
+                    horizon_core::VANILLA_VERSION
+                ))
             });
         if !root.join("worldgen/world_presets.json").exists() {
             eprintln!("skipping: no worldgen bundle at {}", root.display());
@@ -3738,7 +3750,10 @@ mod tests {
         let root = std::env::var_os("HORIZON_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                    "../../.local/horizon-client/{}",
+                    horizon_core::VANILLA_VERSION
+                ))
             });
         if !root.join("worldgen/world_presets.json").exists() {
             eprintln!("skipping: no worldgen bundle at {}", root.display());

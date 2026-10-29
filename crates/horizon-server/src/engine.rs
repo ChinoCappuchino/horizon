@@ -119,7 +119,7 @@ pub fn resource_candidates(config: &Config, dir: &Path, program: Option<&Path>) 
     if !config.engine.resources.is_empty() {
         return vec![dir.join(&config.engine.resources)];
     }
-    let version = "26.3";
+    let version = horizon_core::VANILLA_VERSION;
     let mut out = vec![dir.join("resources")];
     // A release folder or a checkout: .local/horizon-client/<version> beside the program or above it.
     if let Some(program) = program {
