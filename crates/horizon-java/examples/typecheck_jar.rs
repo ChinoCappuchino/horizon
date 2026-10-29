@@ -4,7 +4,9 @@
 //!
 //!     typecheck_jar <jar>...
 use horizon_java::{
-    ClassFile, decode,
+    ClassFile,
+    cfg::Cfg,
+    decode,
     types::{Agreement, Classes, check, infer, stack_map},
 };
 use std::{collections::BTreeMap, io::Read};
@@ -25,6 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hierarchy = Classes::new(&classes);
     let started = std::time::Instant::now();
     let (mut methods, mut typed, mut mapped, mut clean) = (0usize, 0usize, 0usize, 0usize);
+    let (mut blocks, mut loops, mut irreducible, mut with_handlers) =
+        (0usize, 0usize, 0usize, 0usize);
     let mut total = Agreement::default();
     let mut failures: BTreeMap<String, usize> = BTreeMap::new();
     let mut examples: Vec<String> = Vec::new();
@@ -34,6 +38,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(code) = m.code() else { continue };
             methods += 1;
             let insns = decode(&code.code)?;
+            let cfg = Cfg::new(&insns, &code.handlers);
+            blocks += cfg.blocks.len();
+            loops += cfg.loops.len();
+            if !cfg.reducible {
+                irreducible += 1;
+            }
+            if !code.handlers.is_empty() {
+                with_handlers += 1;
+            }
             let frames = match infer(&hierarchy, c, m, &insns) {
                 Ok(f) => f,
                 Err(e) => {
@@ -70,6 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{mapped} with a StackMapTable: {clean} agree in every slot; slots {} agree, {} disagree, {} unknown",
         total.agree, total.disagree, total.unknown
+    );
+    println!(
+        "control flow: {blocks} blocks, {loops} loops; {irreducible} methods irreducible; {with_handlers} with exception handlers"
     );
     for (reason, n) in &failures {
         println!("  not typed ({n}): {reason}");

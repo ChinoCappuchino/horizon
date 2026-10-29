@@ -6,6 +6,7 @@
 //! Mod code is processed, never read by a person or an agent: this crate is
 //! the clean-room boundary.
 pub mod bytecode;
+pub mod cfg;
 pub mod classfile;
 pub mod compile;
 pub mod descriptor;
