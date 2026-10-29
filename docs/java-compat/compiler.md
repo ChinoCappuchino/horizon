@@ -74,7 +74,41 @@ an object header with a class pointer, vtables, interface tables, allocation by
 a bump pointer, and a garbage collector that uses Cranelift stack maps. It calls
 Horizon's Rust code directly.
 
-## 4. Steps
+## 4. Mixins and native replacements (at install)
+
+### 4.1 Mixins
+
+Mixins change the bytecode of a class when it loads. In Horizon they change
+it one time, at install:
+
+1. Load the vanilla classes and the classes of the mods.
+2. Apply the Mixins of the mods to the bytecode. Use the real Mixin library
+   (MIT license) and its ASM library (BSD license), compiled by this compiler.
+   Do not write a second Mixin implementation.
+3. Compile the changed classes into the cache.
+
+When the game runs, there is no Mixin cost: the hooks are part of the
+compiled code.
+
+NeoForge is open source (LGPL) and is mostly changes to vanilla classes. The
+same steps can compile NeoForge from its jars. Then the mods use the real
+NeoForge, and `horizon-neoforge` becomes smaller.
+
+### 4.2 Native replacements
+
+The compiler can replace a vanilla method with Horizon's Rust code, as it
+replaces JDK methods with intrinsics (`Math.floor` and others). It does this
+for a method only when the two conditions are true:
+
+1. Horizon has an implementation that a differential test shows is equal to
+   the compiled vanilla method.
+2. No Mixin and no other mod change touches the method.
+
+In all other conditions the compiled vanilla method runs, with the hooks of
+the mods. All classes are known at install, so the decision is exact and has
+no cost at run time.
+
+## 5. Steps
 
 Do the steps in this sequence. Each step keeps all tests correct (Farmer's
 Delight and Chef's Delight equal to NeoForge, the apple pie test, the vanilla
@@ -91,7 +125,7 @@ Delight and Chef's Delight equal to NeoForge, the apple pie test, the vanilla
 | 7 | Native backend: garbage collector, exceptions | Vanilla `SimplexNoise` and the mod tests run natively |
 | 8 | Install-time cache of compiled code, keyed by the jar SHA-256 | The second start does not compile |
 
-## 5. Tools
+## 6. Tools
 
 - `examples/compile_jar.rs`: compile a jar and list what it imports.
 - `examples/jar_bench.rs`: run a benchmark class against the JVM numbers.
