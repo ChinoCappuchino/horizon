@@ -191,3 +191,20 @@ English):
 6. Write a procedure as numbered steps. Start each step with a verb.
 7. Put a warning or caution before the step that it is about.
 8. Use a table for data that has more than two attributes.
+
+## 6. How the compiler makes WASM
+
+Decisions of 2026-10-29. The test `crates/horizon-java/tests/wasm_gc.rs` shows
+that the wasmtime of Horizon (48) runs each part.
+
+| Java | WASM | Note |
+|---|---|---|
+| An object | A GC struct. The first field is the class id. | A subclass is a subtype of its superclass struct. |
+| An array | A GC array | One array type for each element type. |
+| `throw` and `catch` | Exception handling (`throw`, `try_table`) | One tag carries a `java/lang/Throwable`. |
+| A virtual call | A call through the class's table of methods | The compiler makes the table for each class. |
+| A call to Minecraft or NeoForge | An import from the compatibility layer | The layer is Rust in Horizon. |
+| The types of the stack at a branch | The `StackMapTable` of the method | Class files before Java 6 do not have it. The compiler calculates the types. |
+
+Each jar is one WASM module. A module imports the classes of other jars that
+it uses. Thus the cache keeps one module for each jar.
