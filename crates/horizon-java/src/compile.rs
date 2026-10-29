@@ -2370,6 +2370,9 @@ impl<'a> MethodCompiler<'a> {
                         return Ok(());
                     }
                 }
+                if op == 0xB8 && self.intrinsic(&owner, &name, &desc, base) {
+                    return Ok(());
+                }
                 if let Some(r) = receiver {
                     self.get(r, Ref);
                 }
@@ -2590,6 +2593,130 @@ impl<'a> MethodCompiler<'a> {
         self.emit(W::LocalGet(out));
         self.set(d - 2, Kind::Int);
         Ok(())
+    }
+
+    /// A JDK static method whose Java semantics are exactly a few WASM
+    /// instructions, inline (its arguments in slots `base..`, its result to
+    /// `base`): no call to the host. Only exact ones: `Math.sin` and the
+    /// like stay with the host. Whether it was one.
+    fn intrinsic(&mut self, owner: &str, name: &str, desc: &str, base: usize) -> bool {
+        use Kind::{Double as D, Float as F, Int as I, Long as J};
+        let math = matches!(owner, "java/lang/Math" | "java/lang/StrictMath");
+        // One instruction on the arguments as they are.
+        let unary: Option<(Kind, W<'static>, Kind)> = match (owner, name, desc) {
+            (_, "floor", "(D)D") if math => Some((D, W::F64Floor, D)),
+            (_, "ceil", "(D)D") if math => Some((D, W::F64Ceil, D)),
+            (_, "sqrt", "(D)D") if math => Some((D, W::F64Sqrt, D)),
+            (_, "rint", "(D)D") if math => Some((D, W::F64Nearest, D)),
+            (_, "abs", "(D)D") if math => Some((D, W::F64Abs, D)),
+            (_, "abs", "(F)F") if math => Some((F, W::F32Abs, F)),
+            ("java/lang/Double", "doubleToRawLongBits", "(D)J") => {
+                Some((D, W::I64ReinterpretF64, J))
+            }
+            ("java/lang/Double", "longBitsToDouble", "(J)D") => Some((J, W::F64ReinterpretI64, D)),
+            ("java/lang/Float", "floatToRawIntBits", "(F)I") => Some((F, W::I32ReinterpretF32, I)),
+            ("java/lang/Float", "intBitsToFloat", "(I)F") => Some((I, W::F32ReinterpretI32, F)),
+            _ => None,
+        };
+        if let Some((k, op, out)) = unary {
+            self.get(base, k);
+            self.emit(op);
+            self.set(base, out);
+            return true;
+        }
+        let binary: Option<(Kind, W<'static>)> = match (name, desc) {
+            // WASM's min and max are Java's: NaN wins, -0.0 below 0.0.
+            ("max", "(DD)D") if math => Some((D, W::F64Max)),
+            ("min", "(DD)D") if math => Some((D, W::F64Min)),
+            ("max", "(FF)F") if math => Some((F, W::F32Max)),
+            ("min", "(FF)F") if math => Some((F, W::F32Min)),
+            _ => None,
+        };
+        if let Some((k, op)) = binary {
+            self.get(base, k);
+            self.get(base + 1, k);
+            self.emit(op);
+            self.set(base, k);
+            return true;
+        }
+        // a, b, select(a, b, a <cmp> b).
+        let pick: Option<(Kind, W<'static>)> = match (name, desc) {
+            ("max", "(II)I") if math => Some((I, W::I32GtS)),
+            ("min", "(II)I") if math => Some((I, W::I32LtS)),
+            ("max", "(JJ)J") if math => Some((J, W::I64GtS)),
+            ("min", "(JJ)J") if math => Some((J, W::I64LtS)),
+            _ => None,
+        };
+        if let Some((k, cmp)) = pick {
+            self.get(base, k);
+            self.get(base + 1, k);
+            self.get(base, k);
+            self.get(base + 1, k);
+            self.emit(cmp);
+            self.emit(W::Select);
+            self.set(base, k);
+            return true;
+        }
+        match (owner, name, desc) {
+            // x, -x, select(x, -x, x >= 0): abs(MIN_VALUE) stays MIN_VALUE.
+            (_, "abs", "(I)I") if math => {
+                self.get(base, I);
+                self.emit(W::I32Const(0));
+                self.get(base, I);
+                self.emit(W::I32Sub);
+                self.get(base, I);
+                self.emit(W::I32Const(0));
+                self.emit(W::I32GeS);
+                self.emit(W::Select);
+                self.set(base, I);
+            }
+            (_, "abs", "(J)J") if math => {
+                self.get(base, J);
+                self.emit(W::I64Const(0));
+                self.get(base, J);
+                self.emit(W::I64Sub);
+                self.get(base, J);
+                self.emit(W::I64Const(0));
+                self.emit(W::I64GeS);
+                self.emit(W::Select);
+                self.set(base, J);
+            }
+            ("java/lang/Double", "isNaN", "(D)Z") => {
+                self.get(base, D);
+                self.get(base, D);
+                self.emit(W::F64Ne);
+                self.set(base, I);
+            }
+            ("java/lang/Float", "isNaN", "(F)Z") => {
+                self.get(base, F);
+                self.get(base, F);
+                self.emit(W::F32Ne);
+                self.set(base, I);
+            }
+            // Raw bits, but every NaN as the canonical one.
+            ("java/lang/Double", "doubleToLongBits", "(D)J") => {
+                self.get(base, D);
+                self.emit(W::I64ReinterpretF64);
+                self.emit(W::I64Const(0x7ff8_0000_0000_0000));
+                self.get(base, D);
+                self.get(base, D);
+                self.emit(W::F64Eq);
+                self.emit(W::Select);
+                self.set(base, J);
+            }
+            ("java/lang/Float", "floatToIntBits", "(F)I") => {
+                self.get(base, F);
+                self.emit(W::I32ReinterpretF32);
+                self.emit(W::I32Const(0x7fc0_0000));
+                self.get(base, F);
+                self.get(base, F);
+                self.emit(W::F32Eq);
+                self.emit(W::Select);
+                self.set(base, I);
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// `instanceof class` of the reference on top of the WASM stack: 0 or 1.
