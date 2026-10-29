@@ -19,6 +19,7 @@ wasmtime = { version = "48.0.7", default-features = false, features = ["runtime"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 wasmtime = { version = "48.0.7", default-features = false, features = ["runtime", "cranelift", "std", "gc-drc"] }
 wat = "1"
+serde_json = "1"
 
 [lints]
 workspace = true

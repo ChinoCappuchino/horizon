@@ -89,6 +89,9 @@ pub struct Lambda {
     pub interface: String,
     pub method: String,
     pub descriptor: String,
+    /// The method it calls: `owner.name descriptor`. NeoForge reads a
+    /// listener's event type from its parameter.
+    pub target: String,
 }
 
 /// A compiled jar.
@@ -1767,6 +1770,7 @@ impl<'a> MethodCompiler<'a> {
                     interface,
                     method: method.to_owned(),
                     descriptor: sam.clone(),
+                    target: format!("{}.{} {}", target.1, target.2, target.3),
                 },
                 Site {
                     sam,

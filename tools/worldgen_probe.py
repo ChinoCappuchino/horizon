@@ -193,7 +193,8 @@ def run(args):
             'horizon.probe.climate_radius': getattr(args, 'climate_radius', 0),
             'horizon.probe.climate_step': getattr(args, 'climate_step', 16),
             'horizon.probe.ores_radius': getattr(args, 'ores_radius', 0),
-            'horizon.probe.ores_dimension': getattr(args, 'ores_dimension', 'minecraft:overworld')}, timeout=args.timeout)
+            'horizon.probe.ores_dimension': getattr(args, 'ores_dimension', 'minecraft:overworld'),
+            'horizon.probe.content': getattr(args, 'content', '') or ''}, timeout=args.timeout)
     except subprocess.TimeoutExpired:
         sys.exit(f'timed out after {args.timeout} s (server log: {run_dir / "server.log"})')
     if error.exists():
@@ -547,6 +548,9 @@ def main():
     r.add_argument('--ores-radius', type=int, default=0,
                    help='also list every ore block of fully generated chunks this far out (chunks)')
     r.add_argument('--ores-dimension', default='minecraft:overworld')
+    r.add_argument('--content', metavar='NAMESPACE', default='',
+                   help="also dump a mod namespace's content (POI types, professions, trades, pool elements) "
+                        'to <out>.content.json, for tools/java_compat/neoforge_compare.py')
     r.add_argument('--starts-radius', type=int, default=0,
                    help='also list every structure start this far out (chunks), from STRUCTURE_STARTS only')
     r.add_argument('--timeout', type=int, default=1800)

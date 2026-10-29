@@ -73,6 +73,14 @@ impl Member {
             _ => None,
         })
     }
+
+    /// The member's annotations, visible and invisible at run time.
+    pub fn annotations(&self) -> impl Iterator<Item = &Annotation> {
+        self.attributes.iter().flat_map(|a| match a {
+            Attribute::Annotations(_, v) => v.as_slice(),
+            _ => &[],
+        })
+    }
 }
 
 /// An exception handler: `[start, end)` handled at `handler`; `catch_type`

@@ -70,7 +70,59 @@ Step 1 (2026-10-29): the class-file reader and the bytecode decoder
 | Instructions | 7,307,157 |
 | Class file versions | 49 to 65 (Java 5 to Java 21) |
 
-Steps 2 to 7: not done yet.
+Step 3 (2026-10-29): the compiler (`crates/horizon-java/src/compile.rs`)
+compiles all of the jar. It does not need a compatibility class to compile:
+each Minecraft, NeoForge or JDK member becomes a WASM import.
+
+| Item | Quantity |
+|---|---:|
+| Methods compiled | 79 of 79 |
+| Lambdas | 64 |
+| Imports (the members the layer must give) | 103 |
+| WASM module | 41 KB |
+| Compile time | 22 ms |
+
+Steps 2 and 5, first part (2026-10-29): a recording layer
+(`crates/horizon-java/examples/record.rs`) gives the 103 imports. It does the
+steps of the NeoForge loader in sequence: the `@Mod` constructor, the
+registrations, the config event, the setup event, the villager trades event
+for each profession, and the server-start event. The NeoForge probe
+(`tools/worldgen_probe.py run chefsdelight --content chefsdelight`) dumps the
+same data from the original jar on NeoForge 21.1.251.
+`tools/java_compat/neoforge_compare.py` compares the two results:
+
+| Data | Quantity | Result |
+|---|---:|---|
+| POI types (blocks, tickets, range) | 2 | Equal |
+| Villager professions (name, job site, sound) | 2 | Equal |
+| Trade offers (items, counts, uses, XP, price multiplier) | 52 | Equal |
+| Village house pools (elements and weights) | 5 | Equal |
+
+The recording layer does not model one call: `LogUtils.getLogger`.
+
+To do these steps again:
+
+```sh
+cargo run -p horizon-java --example record -- <pack>/mods/chefsdelight-1.0.6.jar record.json
+HORIZON_NEOFORGE=21.1.251 HORIZON_PACK_MODS=<pack>/mods \
+  tools/worldgen_probe.py run chefsdelight --radius 0 --content chefsdelight --accept-eula
+tools/java_compat/neoforge_compare.py record.json \
+  .local/worldgen-probe/chefsdelight/seed-1-order-0.content.json
+```
+
+Not done yet:
+
+- Step 2, second part: give the imports from Horizon's game objects, not from
+  a recording layer.
+- Step 4: load the compiled mod into Horizon. The professions, the trades and
+  the houses must then show in the game.
+- Step 6: the cache and the start time.
+
+What the compiler does not compile yet (it compiles the method as a stub
+that stops with an error, and it reports the method): exception handlers,
+arrays, `instanceof`, string concatenation through `invokedynamic`, virtual
+calls between classes of the jar that override a method, and classes of the
+jar that extend a game class.
 
 ## 3. Progress on the startup splash
 

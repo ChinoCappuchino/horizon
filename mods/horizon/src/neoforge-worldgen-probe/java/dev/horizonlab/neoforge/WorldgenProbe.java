@@ -18,6 +18,11 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.entity.ai.village.poi.PoiType;
+import net.minecraft.world.entity.npc.VillagerProfession;
+import net.minecraft.world.entity.npc.VillagerTrades;
+import net.minecraft.world.item.trading.MerchantOffer;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
@@ -29,6 +34,7 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.structure.BoundingBox;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModList;
 import net.neoforged.fml.common.Mod;
@@ -84,6 +90,14 @@ public final class WorldgenProbe {
                     writeOres(level, json, oresRadius, cx0, cz0);
                 }
             }
+            String content = System.getProperty("horizon.probe.content", "");
+            if (!content.isEmpty()) {
+                Path file = Path.of(out.toString().replaceFirst("\\.json$", "") + ".content.json");
+                try (Writer w = Files.newBufferedWriter(file, StandardCharsets.UTF_8);
+                        JsonWriter json = new JsonWriter(w)) {
+                    writeContent(server, json, content);
+                }
+            }
             if (startsRadius > 0) {
                 Path starts = Path.of(out.toString().replaceFirst("\\.json$", "") + ".starts.json");
                 try (Writer w = Files.newBufferedWriter(starts, StandardCharsets.UTF_8);
@@ -112,6 +126,155 @@ public final class WorldgenProbe {
         }
         System.out.println("horizon-worldgen-probe: wrote " + out);
         server.halt(false);
+    }
+
+    /**
+     * What one mod namespace adds to the game's content, in the form of the Java compatibility
+     * recorder (crates/horizon-java/examples/record.rs): its POI types, its villager professions
+     * with the POI types their job-site test accepts, every offer its professions' trade listings
+     * make, and the elements of its namespace in each template pool, by count (the weight).
+     */
+    private static void writeContent(MinecraftServer server, JsonWriter json, String namespace)
+            throws IOException {
+        json.setIndent(" ");
+        json.beginObject();
+        json.name("poi_types").beginObject();
+        java.util.List<Holder.Reference<PoiType>> pois = new java.util.ArrayList<>();
+        for (Holder.Reference<PoiType> poi : BuiltInRegistries.POINT_OF_INTEREST_TYPE.holders().toList()) {
+            if (!poi.key().location().getNamespace().equals(namespace)) {
+                continue;
+            }
+            pois.add(poi);
+            json.name(poi.key().location().toString()).beginObject();
+            java.util.TreeSet<String> blocks = new java.util.TreeSet<>();
+            for (BlockState state : poi.value().matchingStates()) {
+                blocks.add(BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+            }
+            json.name("blocks").beginArray();
+            for (String b : blocks) {
+                json.value(b);
+            }
+            json.endArray();
+            json.name("max_tickets").value(poi.value().maxTickets());
+            json.name("valid_range").value(poi.value().validRange());
+            json.endObject();
+        }
+        json.endObject();
+
+        json.name("professions").beginObject();
+        for (Map.Entry<net.minecraft.resources.ResourceKey<VillagerProfession>, VillagerProfession> e
+                : BuiltInRegistries.VILLAGER_PROFESSION.entrySet()) {
+            ResourceLocation id = e.getKey().location();
+            if (!id.getNamespace().equals(namespace)) {
+                continue;
+            }
+            VillagerProfession p = e.getValue();
+            json.name(id.toString()).beginObject();
+            json.name("name").value(p.name());
+            json.name("job_sites").beginArray();
+            for (Holder.Reference<PoiType> poi : pois) {
+                if (p.heldJobSite().test(poi)) {
+                    json.value(poi.key().location().toString());
+                }
+            }
+            json.endArray();
+            json.name("work_sound").value(p.workSound() == null ? null : p.workSound().getLocation().toString());
+            json.endObject();
+        }
+        json.endObject();
+
+        // NeoForge fills VillagerTrades.TRADES from VillagerTradesEvent when the server starts.
+        json.name("trades").beginObject();
+        RandomSource random = RandomSource.create(0);
+        for (Map.Entry<VillagerProfession, it.unimi.dsi.fastutil.ints.Int2ObjectMap<VillagerTrades.ItemListing[]>> e
+                : VillagerTrades.TRADES.entrySet()) {
+            ResourceLocation id = BuiltInRegistries.VILLAGER_PROFESSION.getKey(e.getKey());
+            if (!id.getNamespace().equals(namespace)) {
+                continue;
+            }
+            json.name(id.toString()).beginObject();
+            for (Map.Entry<Integer, VillagerTrades.ItemListing[]> level : new TreeMap<>(e.getValue()).entrySet()) {
+                if (level.getValue().length == 0) {
+                    continue;
+                }
+                json.name(String.valueOf(level.getKey())).beginArray();
+                for (VillagerTrades.ItemListing listing : level.getValue()) {
+                    MerchantOffer offer;
+                    try {
+                        offer = listing.getOffer(null, random);
+                    } catch (RuntimeException ex) {
+                        json.value("error: " + ex);
+                        continue;
+                    }
+                    if (offer == null) {
+                        json.nullValue();
+                        continue;
+                    }
+                    json.beginObject();
+                    json.name("cost");
+                    stack(json, offer.getItemCostA().item().value(), offer.getItemCostA().count());
+                    if (offer.getItemCostB().isPresent()) {
+                        json.name("cost_b");
+                        stack(json, offer.getItemCostB().get().item().value(), offer.getItemCostB().get().count());
+                    }
+                    json.name("result");
+                    stack(json, offer.getResult().getItem(), offer.getResult().getCount());
+                    json.name("max_uses").value(offer.getMaxUses());
+                    json.name("xp").value(offer.getXp());
+                    json.name("price_multiplier").value(offer.getPriceMultiplier());
+                    json.endObject();
+                }
+                json.endArray();
+            }
+            json.endObject();
+        }
+        json.endObject();
+
+        json.name("pools").beginObject();
+        java.util.regex.Pattern element = java.util.regex.Pattern.compile(
+                java.util.regex.Pattern.quote(namespace + ":") + "[a-z0-9_/.-]+");
+        Registry<StructureTemplatePool> pools = server.registryAccess().registryOrThrow(Registries.TEMPLATE_POOL);
+        // Public at run time through NeoForge's access transformer; private in the jar compiled against.
+        java.lang.reflect.Field templates;
+        try {
+            templates = StructureTemplatePool.class.getDeclaredField("templates");
+            templates.setAccessible(true);
+        } catch (NoSuchFieldException ex) {
+            throw new IOException(ex);
+        }
+        for (Map.Entry<net.minecraft.resources.ResourceKey<StructureTemplatePool>, StructureTemplatePool> e
+                : pools.entrySet()) {
+            TreeMap<String, Integer> counts = new TreeMap<>();
+            java.util.List<?> elements;
+            try {
+                elements = (java.util.List<?>) templates.get(e.getValue());
+            } catch (IllegalAccessException ex) {
+                throw new IOException(ex);
+            }
+            for (Object el : elements) {
+                java.util.regex.Matcher m = element.matcher(el.toString());
+                if (m.find()) {
+                    counts.merge(m.group(), 1, Integer::sum);
+                }
+            }
+            if (counts.isEmpty()) {
+                continue;
+            }
+            json.name(e.getKey().location().toString()).beginObject();
+            for (Map.Entry<String, Integer> c : counts.entrySet()) {
+                json.name(c.getKey()).value(c.getValue());
+            }
+            json.endObject();
+        }
+        json.endObject();
+        json.endObject();
+    }
+
+    private static void stack(JsonWriter json, net.minecraft.world.item.Item item, int count) throws IOException {
+        json.beginObject();
+        json.name("count").value(count);
+        json.name("item").value(BuiltInRegistries.ITEM.getKey(item).toString());
+        json.endObject();
     }
 
     private static void write(ServerLevel level, JsonWriter json, int radius, int cx0, int cz0)

@@ -109,3 +109,10 @@ mods = ["afterwinter_worldgen"]
 name = "farview-atlas"
 preset = "afterwinter_worldgen:atlas"
 mods = ["afterwinter_worldgen"]
+
+# Java compatibility, phase 0 (docs/java-compat/plan.md): the first mod through the compiler. Run with
+# --content chefsdelight; tools/java_compat/neoforge_compare.py compares the dump with the recorder.
+[[row]]
+name = "chefsdelight"
+preset = "minecraft:normal"
+mods = ["chefsdelight"]

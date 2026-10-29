@@ -1485,6 +1485,7 @@ dependencies = [
 name = "horizon-java"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "wasm-encoder",
  "wasmtime",
  "wat",
