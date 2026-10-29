@@ -428,6 +428,23 @@ impl Runtime {
             .wasm_gc(true)
             .wasm_function_references(true)
             .wasm_exceptions(true);
+        // A perf map (/tmp/perf-<pid>.map) names the compiled methods for a
+        // profiler (perf, samply).
+        if std::env::var_os("HORIZON_JAVA_PERFMAP").is_some() {
+            config.profiler(wasmtime::ProfilingStrategy::PerfMap);
+        }
+        // The copying collector allocates by bumping a pointer: 3.5 times
+        // the reference-counting one on allocation (SimplexNoise bench). The
+        // other stays to compare: HORIZON_JAVA_COLLECTOR=drc.
+        config.collector(match std::env::var("HORIZON_JAVA_COLLECTOR").as_deref() {
+            Ok("drc") => wasmtime::Collector::DeferredReferenceCounting,
+            _ => wasmtime::Collector::Copying,
+        });
+        // Small methods inlined into their callers (static calls 3 times
+        // faster); HORIZON_JAVA_INLINE=0 to compare.
+        if std::env::var("HORIZON_JAVA_INLINE").as_deref() != Ok("0") {
+            config.compiler_inlining(wasmtime::Inlining::Yes);
+        }
         let engine = Engine::new(&config)?;
         let state = State {
             host,

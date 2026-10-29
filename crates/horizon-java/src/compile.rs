@@ -1024,6 +1024,23 @@ pub fn compile(classes: &[ClassFile]) -> Result<Compiled> {
     module.section(&global_section);
     module.section(&export_section);
     module.section(&code);
+    // Function names (the exported ones, and the imports): traps and
+    // profiles name the Java method.
+    let mut function_names = wasm_encoder::NameMap::new();
+    let mut named: Vec<(u32, &str)> = imports
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _))| (i as u32, n.as_str()))
+        .chain(exports.iter().map(|(n, f)| (f + shift, n.as_str())))
+        .collect();
+    named.sort_by_key(|(i, _)| *i);
+    named.dedup_by_key(|(i, _)| *i);
+    for (i, n) in named {
+        function_names.append(i, n);
+    }
+    let mut name_section = wasm_encoder::NameSection::new();
+    name_section.functions(&function_names);
+    module.section(&name_section);
     let info = names
         .iter()
         .map(|n| ClassInfo {
@@ -1387,11 +1404,18 @@ fn lambda(plan: &Plan, n: usize) -> Result<(u32, Vec<ValType>, Vec<W<'static>>)>
 struct Slot {
     kind: Kind,
     new: Option<u32>,
+    /// The method's own object (`aload_0` of an instance method that never
+    /// stores to local 0): its class is known without a test.
+    this: bool,
 }
 
 impl From<Kind> for Slot {
     fn from(kind: Kind) -> Slot {
-        Slot { kind, new: None }
+        Slot {
+            kind,
+            new: None,
+            this: false,
+        }
     }
 }
 
@@ -1407,6 +1431,7 @@ fn stack_kinds(
     insns: &[Instruction],
     at: &HashMap<u32, usize>,
     handlers: &[crate::classfile::Handler],
+    this: bool,
 ) -> Result<Vec<Option<Vec<Slot>>>> {
     let mut before: Vec<Option<Vec<Slot>>> = vec![None; insns.len()];
     let mut work = vec![(0usize, Vec::new())];
@@ -1421,16 +1446,30 @@ fn stack_kinds(
         if i >= insns.len() {
             continue;
         }
+        let mut stack = stack;
         if let Some(seen) = &before[i] {
-            if *seen != stack {
+            let same = |a: &Slot, b: &Slot| a.kind == b.kind && a.new == b.new;
+            if seen.len() != stack.len() || seen.iter().zip(&stack).any(|(a, b)| !same(a, b)) {
                 return Err(format!("stack kinds differ at {}", insns[i].at));
             }
-            continue;
+            // A slot is the method's object only if it is on every path.
+            for (s, a) in stack.iter_mut().zip(seen) {
+                s.this &= a.this;
+            }
+            if *seen == stack {
+                continue;
+            }
         }
         before[i] = Some(stack.clone());
         let insn = &insns[i];
         let mut s = stack;
         effect(class, insn, &mut s)?;
+        if this
+            && insn.opcode == 0x2A
+            && let Some(top) = s.last_mut()
+        {
+            top.this = true;
+        }
         for t in successors(insn, i, at)? {
             work.push((t, s.clone()));
         }
@@ -1703,6 +1742,7 @@ fn effect(class: &ClassFile, insn: &Instruction, s: &mut Vec<Slot>) -> Result<()
         0xBB => s.push(Slot {
             kind: Ref,
             new: Some(insn.at),
+            this: false,
         }),
         0xC0 => {}
         _ => {
@@ -1726,6 +1766,8 @@ struct MethodCompiler<'a> {
     extra: Vec<ValType>,
     first_local: u32,
     out: Vec<W<'static>>,
+    /// The method's own object as its class's struct: (local, struct type).
+    this: Option<(u32, u32)>,
 }
 
 impl<'a> MethodCompiler<'a> {
@@ -1756,6 +1798,7 @@ impl<'a> MethodCompiler<'a> {
             extra: Vec::new(),
             first_local: index,
             out: Vec::new(),
+            this: None,
         })
     }
 
@@ -1803,7 +1846,18 @@ impl<'a> MethodCompiler<'a> {
             .code()
             .map(|c| c.handlers.clone())
             .unwrap_or_default();
-        let before = stack_kinds(self.class, &self.insns, &at, &handlers)?;
+        // An instance method that never stores to local 0 has its object
+        // there throughout: cast once, below, then used without tests.
+        // (Not an interface's default method: its object is of whatever
+        // class implements it.)
+        let this_ty = (self.method.access & STATIC == 0
+            && self.class.access & 0x0200 == 0
+            && !self.insns.iter().any(|i| {
+                i.opcode == 0x4B || (i.opcode == 0x3A && matches!(i.operand, Operand::Local(0)))
+            }))
+        .then(|| self.plan.structs.get(&self.owner).map(|(ty, _)| *ty))
+        .flatten();
+        let before = stack_kinds(self.class, &self.insns, &at, &handlers, this_ty.is_some())?;
         // Basic blocks: the first instruction, every target, and every
         // instruction after a jump or an end.
         let mut leaders = BTreeSet::from([0usize]);
@@ -1835,6 +1889,17 @@ impl<'a> MethodCompiler<'a> {
         let label = self.first_local;
         self.extra.push(ValType::I32);
         self.locals.insert((false, u16::MAX, Kind::Int), label);
+        if let Some(ty) = this_ty {
+            let l = self.first_local + self.extra.len() as u32;
+            self.extra.push(ValType::Ref(RefType {
+                nullable: true,
+                heap_type: HeapType::Concrete(ty),
+            }));
+            self.emit(W::LocalGet(0));
+            self.emit(W::RefCastNullable(HeapType::Concrete(ty)));
+            self.emit(W::LocalSet(l));
+            self.this = Some((l, ty));
+        }
 
         // A static method makes sure its class is initialized (the host may
         // call it first), as the JVM does on invokestatic.
@@ -2272,10 +2337,19 @@ impl<'a> MethodCompiler<'a> {
                 let (owner, name, desc) = self.class.member_ref(i).map_err(|e| e.to_string())?;
                 let k = Kind::of(desc).ok_or("a bad field descriptor")?;
                 let object = if op == 0xB4 { d - 1 } else { d - 2 };
-                self.get(object, Ref);
+                // The method's own object needs no test: its typed local.
+                let this = self
+                    .this
+                    .filter(|_| slots[object].this && self.plan.is_subtype(&self.owner, owner));
+                match this {
+                    Some((l, _)) => self.emit(W::LocalGet(l)),
+                    None => self.get(object, Ref),
+                }
                 match self.plan.field(owner, name) {
                     Some((ty, field)) => {
-                        self.emit(W::RefCastNullable(HeapType::Concrete(ty)));
+                        if this.is_none() {
+                            self.emit(W::RefCastNullable(HeapType::Concrete(ty)));
+                        }
                         if op == 0xB4 {
                             self.emit(W::StructGet {
                                 struct_type_index: ty,

@@ -13,11 +13,11 @@ runtime = ["dep:wasmtime"]
 
 [dependencies]
 wasm-encoder = "0.254"
-wasmtime = { version = "48.0.7", default-features = false, features = ["runtime", "cranelift", "std", "gc-drc"], optional = true }
+wasmtime = { version = "48.0.7", default-features = false, features = ["runtime", "cranelift", "std", "gc-drc", "gc-copying"], optional = true }
 
 [dev-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
-wasmtime = { version = "48.0.7", default-features = false, features = ["runtime", "cranelift", "std", "gc-drc"] }
+wasmtime = { version = "48.0.7", default-features = false, features = ["runtime", "cranelift", "std", "gc-drc", "gc-copying"] }
 wat = "1"
 serde_json = "1"
 
