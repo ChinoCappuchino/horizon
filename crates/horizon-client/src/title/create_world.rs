@@ -436,7 +436,7 @@ impl Title {
         let (x0, tw) = tabs(w);
         let right = x0 + tw * TABS.len() as f32;
         for (x, width) in [(0.0, x0), (right, w - right)] {
-            ui::tiled(
+            ui::tiled_sized(
                 batch,
                 atlas,
                 "gui/header_separator",
@@ -444,7 +444,7 @@ impl Title {
                 TAB_BAR - 2.0,
                 width,
                 2.0,
-                32.0,
+                [32.0, 2.0],
                 u32::MAX,
             );
         }
@@ -519,7 +519,7 @@ impl Title {
             _ => {}
         }
         // The footer separator, drawn over the screen.
-        ui::tiled(
+        ui::tiled_sized(
             batch,
             atlas,
             "gui/footer_separator",
@@ -527,7 +527,7 @@ impl Title {
             h - FOOTER - 2.0,
             w,
             2.0,
-            32.0,
+            [32.0, 2.0],
             u32::MAX,
         );
     }

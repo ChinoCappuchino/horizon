@@ -46,9 +46,10 @@ pub struct VanillaTerrain {
     /// Block state id -> the block entity type of its block, if it has one.
     block_entity_types: Vec<Option<&'static str>>,
     seed: i64,
-    dimension: String,
-    /// The world's preset (`horizon:preset`), for far decoration's generator.
+    /// The world preset the terrain was generated with (`minecraft:normal`
+    /// unless a saved world says otherwise); far decoration uses it too.
     preset: String,
+    dimension: String,
     /// A world-generation mod's terrain and biomes, for a preset it provides.
     provider: Option<Arc<dyn TerrainProvider>>,
     /// When the last proto chunk was generated, in milliseconds since
@@ -174,9 +175,9 @@ impl VanillaTerrain {
             true,
         )
     }
-    /// A dimension of a world whose `generate_structures` is `structures`
-    /// (`ChunkGenerator.createStructures` and `findNearestMapStructure` do
-    /// nothing without).
+    /// A dimension of a world preset (`worldgen/world_preset`) whose
+    /// `generate_structures` is `structures` (`ChunkGenerator.createStructures`
+    /// and `findNearestMapStructure` do nothing without).
     pub fn for_world(
         dir: &Path,
         registry: &'static BlockRegistry,
@@ -304,8 +305,8 @@ impl VanillaTerrain {
             tick_states,
             block_entity_types,
             seed,
-            dimension: dimension.to_owned(),
             preset: preset.to_owned(),
+            dimension: dimension.to_owned(),
             provider,
             last_proto: std::sync::atomic::AtomicU64::new(0),
             created: std::time::Instant::now(),

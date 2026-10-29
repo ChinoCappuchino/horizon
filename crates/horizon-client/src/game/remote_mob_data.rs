@@ -669,7 +669,7 @@ mod tests {
         let name = |m: &Mob| {
             (
                 VILLAGER_TYPES[m.extra.variant as usize],
-                PROFESSIONS[m.extra.variant2 as usize],
+                horizon_client::professions::name(m.extra.variant2).to_string(),
                 m.extra.variant3,
             )
         };
@@ -677,20 +677,20 @@ mod tests {
             &mut m,
             &[(19, s::VILLAGER_DATA, Value::Ids(vec![desert, farmer, 2]))],
         );
-        assert_eq!(name(&m), ("desert", "farmer", 2));
+        assert_eq!(name(&m), ("desert", "farmer".to_string(), 2));
         // A job taken later: only the profession and the level change.
         apply(
             &mut m,
             &[(19, s::VILLAGER_DATA, Value::Ids(vec![desert, librarian, 5]))],
         );
-        assert_eq!(name(&m), ("desert", "librarian", 5));
+        assert_eq!(name(&m), ("desert", "librarian".to_string(), 5));
         // A zombie villager's data comes after Zombie's three entries.
         let mut z = mob("minecraft:zombie_villager").unwrap();
         apply(
             &mut z,
             &[(20, s::VILLAGER_DATA, Value::Ids(vec![desert, farmer, 3]))],
         );
-        assert_eq!(name(&z), ("desert", "farmer", 3));
+        assert_eq!(name(&z), ("desert", "farmer".to_string(), 3));
     }
 
     #[test]

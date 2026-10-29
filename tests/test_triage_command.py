@@ -7,7 +7,7 @@ from tools.ci import triage_command as tc
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 10, 28, 12, tzinfo=timezone.utc)
-URL = "https://github.com/ludovic111/horizon/issues/5#issuecomment-1"
+URL = "https://github.com/horizon-rust/horizon/issues/5#issuecomment-1"
 LIST = ns.read_reviewers("kacpherek\nrdbtCVS\n")
 
 
@@ -104,7 +104,7 @@ class AllowTests(unittest.TestCase):
     def test_the_repos_list_is_the_nightlys(self):
         self.assertEqual(ns.REVIEWERS, ".github/trusted-reviewers.txt")
         listed = ns.read_reviewers((ROOT / ns.REVIEWERS).read_text())
-        self.assertEqual(listed.logins, {"kacpherek", "rdbtcvs", "online5277"})
+        self.assertEqual(listed.logins, {"kacpherek", "rdbtcvs", "online5277", "levzzz5154"})
         self.assertFalse(listed.paused)
 
 
