@@ -261,6 +261,8 @@ struct Own {
     shapes: Vec<Shapes>,
     /// Each property's values in order, for the model table's schema.
     properties: Vec<(String, Vec<String>, bool)>,
+    /// Each state's light, if a rule gives it.
+    light: Vec<Option<u8>>,
 }
 
 /// A state's shapes, in blocks.
@@ -348,6 +350,20 @@ impl Own {
                 })
             })
             .collect();
+        let light = all
+            .iter()
+            .map(|state| {
+                states
+                    .light
+                    .iter()
+                    .find(|r| {
+                        r.when
+                            .iter()
+                            .all(|(p, want)| state.iter().any(|(k, v)| k == p && want.contains(v)))
+                    })
+                    .map(|r| r.light)
+            })
+            .collect();
         Own {
             states: all,
             default,
@@ -355,6 +371,7 @@ impl Own {
             shape_of,
             shapes,
             properties,
+            light,
         }
     }
 
@@ -531,6 +548,9 @@ struct NewItem {
     rename: Rename,
     max_stack_size: Option<u8>,
     rarity: Option<Rarity>,
+    components: serde_json::Map<String, serde_json::Value>,
+    /// The block a declared item places.
+    places: Option<String>,
 }
 
 struct Plan<'a> {
@@ -663,6 +683,8 @@ impl<'a> Plan<'a> {
                     rename: Rename::new(item, &b.decl.id),
                     max_stack_size: None,
                     rarity: None,
+                    components: b.decl.item_components.clone(),
+                    places: None,
                 });
             }
         }
@@ -672,6 +694,8 @@ impl<'a> Plan<'a> {
                     rename: Rename::new(&i.template, &i.id),
                     max_stack_size: i.max_stack_size,
                     rarity: i.rarity,
+                    components: i.components.clone(),
+                    places: i.places.clone(),
                 });
             }
         }
@@ -757,6 +781,9 @@ impl<'a> Plan<'a> {
                     row.set("item", J::Str("minecraft:air".into()));
                 }
                 self.override_gameplay(b, row);
+                if let Some(l) = own.light[i] {
+                    row.set("emission", J::Num(l.into()));
+                }
                 if let Some(s) = shapes {
                     let full = full_cube(&s.collision);
                     let solid = s.occludes && full;
@@ -847,6 +874,11 @@ impl<'a> Plan<'a> {
                     };
                     v.set("minecraft:rarity", J::Str(r.into()));
                 }
+                for (k, c) in &i.components {
+                    if let Ok(j) = serde_json::from_value::<J>(c.clone()) {
+                        v.set(k, j);
+                    }
+                }
             }
             map.set(&i.rename.to, v);
         }
@@ -895,7 +927,23 @@ impl<'a> Plan<'a> {
                         blocks.push(v);
                     }
                 }
-                self.items(doc.at("items").ok_or("no items")?, false);
+                let items = doc.at("items").ok_or("no items")?;
+                self.items(items, false);
+                // A declared item that places a block is that block's item.
+                for i in &self.items {
+                    if let Some(block) = &i.places {
+                        items.set(
+                            &i.rename.to,
+                            J::Obj(vec![
+                                ("class".into(), J::Arr(vec![J::Str("BlockItem".into())])),
+                                (
+                                    "fields".into(),
+                                    J::Obj(vec![("block".into(), J::Str(block.clone()))]),
+                                ),
+                            ]),
+                        );
+                    }
+                }
                 for odds in ["fire/burnOdds", "fire/igniteOdds"] {
                     if let Some(map) = doc.at(odds) {
                         self.names(map, false);

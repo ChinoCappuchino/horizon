@@ -132,6 +132,28 @@ records, enums, string concatenation and pattern `switch`.
 | Farmer's Delight 1.3.4 | 62.4 % | 100 % (2,319 methods, 0.5 s) |
 | Time for the pack | | 53 s |
 
+Registration, Farmer's Delight (2026-10-29): `crates/horizon-neoforge` is the
+first part of the compatibility layer. It runs a NeoForge mod's constructor
+and its registers from the original jar, as NeoForge does. It asks each
+block for its states, shapes and light. A block that extends a game class
+(a crop, a fence gate, a sign) takes the shapes and states of that class
+from the game's data. It writes what the mod registered as a Horizon content
+mod (docs/mods.md). The port pack's harness compares the result with the
+original jar on NeoForge 21.1.251:
+
+| Check | Result |
+|---|---:|
+| Blocks | 132 of 132 |
+| Block states (properties, sounds, shapes) | 2,548 of 2,548 |
+| Items | 185 of 185 |
+| Drops | 11,692 of 11,795 |
+| Recipes | 93 of 304 (the mod's own recipe types need its code) |
+
+To do it again: `cargo run --release -p horizon-neoforge --example translate
+-- <jar> .local/horizon-client/26.3 <work>/mods/farmersdelight/carry`, then
+`HORIZON_CLIENT_FEATURES="--no-default-features --features mods"
+tools/mod_port_harness.py --work <work> --jars <jar folder> farmersdelight`.
+
 A compiled method is not a working method. It runs only if the
 compatibility layer gives the members that it uses. Farmer's Delight uses
 about 2,200 members of Minecraft and NeoForge.

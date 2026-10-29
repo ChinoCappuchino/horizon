@@ -102,6 +102,9 @@ struct BlockFile {
     item: bool,
     #[serde(default)]
     states: Option<BlockStates>,
+    /// Components of its item over the template item's (`item: true`).
+    #[serde(default)]
+    item_components: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A block's own states (fork `afterwinter`), in place of its template's:
@@ -120,6 +123,18 @@ pub struct BlockStates {
     /// whose `when` it matches; a state no rule matches has the template's.
     #[serde(default)]
     pub shapes: Vec<ShapeRule>,
+    /// Light emitted by state (`lightLevel`): the first rule that matches;
+    /// otherwise `properties.light` or the template's.
+    #[serde(default)]
+    pub light: Vec<LightRule>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LightRule {
+    #[serde(default)]
+    pub when: BTreeMap<String, OneOrMore>,
+    pub light: u8,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -198,6 +213,8 @@ pub struct Block {
     pub item: bool,
     /// Its own states, in place of the template's.
     pub states: Option<BlockStates>,
+    /// Components of its item over the template item's.
+    pub item_components: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -215,6 +232,13 @@ struct ItemFile {
     template: String,
     max_stack_size: Option<u8>,
     rarity: Option<Rarity>,
+    /// Item components set over the template's (fork `afterwinter`), as
+    /// the game's item data writes them: `{"minecraft:food": {...}}`.
+    #[serde(default)]
+    components: serde_json::Map<String, serde_json::Value>,
+    /// The block it places (a `BlockItem` of another id: seeds).
+    #[serde(default)]
+    places: Option<String>,
 }
 
 /// An item the mod adds: a vanilla template item's components under a new
@@ -226,6 +250,10 @@ pub struct Item {
     pub template: String,
     pub max_stack_size: Option<u8>,
     pub rarity: Option<Rarity>,
+    /// Components set over the template's.
+    pub components: serde_json::Map<String, serde_json::Value>,
+    /// The block it places, if it places one.
+    pub places: Option<String>,
 }
 
 #[derive(Debug)]
@@ -450,6 +478,7 @@ impl Content {
                 properties: file.properties,
                 item: file.item,
                 states: file.states,
+                item_components: file.item_components,
             });
         }
         for (item, name) in items {
@@ -472,6 +501,8 @@ impl Content {
                 template: file.template,
                 max_stack_size: file.max_stack_size,
                 rarity: file.rarity,
+                components: file.components,
+                places: file.places,
             });
         }
         Ok(())
@@ -520,9 +551,6 @@ fn check_states(states: &BlockStates) -> Result<(), String> {
             && n.bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
     };
-    if states.properties.is_empty() {
-        return Err("states: no properties".into());
-    }
     let mut count = 1usize;
     for (name, values) in &states.properties {
         if !name_ok(name) {
@@ -572,6 +600,20 @@ fn check_states(states: &BlockStates) -> Result<(), String> {
                 && b[2] < b[5];
             if !ok {
                 return Err(format!("states: box {b:?} is not min < max within -16..32"));
+            }
+        }
+    }
+    for rule in &states.light {
+        if rule.light > 15 {
+            return Err("states: light is 0 to 15".into());
+        }
+        for (p, v) in &rule.when {
+            let values = match v {
+                OneOrMore::One(x) => vec![x.clone()],
+                OneOrMore::More(xs) => xs.clone(),
+            };
+            if let Some(bad) = values.iter().find(|x| !has(p, x)) {
+                return Err(format!("states: light for {p}={bad}, not a value"));
             }
         }
     }
@@ -666,6 +708,7 @@ capabilities = ["registries"]
                 },
                 item: true,
                 states: None,
+                item_components: serde_json::Map::new(),
             }]
         );
         assert_eq!(content.items[0].id, "ruby:ruby");

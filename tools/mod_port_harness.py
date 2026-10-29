@@ -24,6 +24,7 @@ in WORK, outside the repository.
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -181,8 +182,11 @@ def main():
         subprocess.run(command, check=True)
     if not facts.exists():
         sys.exit(f'{facts}: no oracle facts (run with --jars, or tools/neoforge_oracle.py export)')
-    subprocess.run(['cargo', 'build', '--release', '-q', '-p', 'horizon-client', '--example', 'mod_port_probe'],
-                   cwd=ROOT, check=True)
+    # HORIZON_CLIENT_FEATURES (e.g. "--no-default-features --features mods") builds the probe without
+    # audio, on a machine without ALSA's headers.
+    features = os.environ.get('HORIZON_CLIENT_FEATURES', '').split()
+    subprocess.run(['cargo', 'build', '--release', '-q', '-p', 'horizon-client', *features,
+                    '--example', 'mod_port_probe'], cwd=ROOT, check=True)
     metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
                                                   cwd=ROOT, text=True))
     probe = Path(metadata['target_directory']) / 'release/examples/mod_port_probe'
