@@ -60,6 +60,75 @@ struct Globals {
     /// The next free byte of the arena, and its end.
     bump: u64,
     limit: u64,
+    /// The exception being thrown (0: none): set by `athrow`, tested after
+    /// each call (docs/java-compat/compiler.md: exceptions).
+    exception: u64,
+}
+
+/// The offset of [`Globals::exception`].
+const EXCEPTION: i32 = 16;
+
+/// The JDK's exception classes this backend knows (public API): each one's
+/// superclass. A class of the closed world that extends one of them is
+/// caught by a handler of any of its superclasses.
+fn jdk_super(class: &str) -> Option<&'static str> {
+    Some(match class {
+        "java/lang/Exception" | "java/lang/Error" => "java/lang/Throwable",
+        "java/lang/RuntimeException"
+        | "java/io/IOException"
+        | "java/lang/InterruptedException"
+        | "java/lang/ReflectiveOperationException"
+        | "java/lang/CloneNotSupportedException" => "java/lang/Exception",
+        "java/lang/IllegalStateException"
+        | "java/lang/IllegalArgumentException"
+        | "java/lang/NullPointerException"
+        | "java/lang/UnsupportedOperationException"
+        | "java/lang/IndexOutOfBoundsException"
+        | "java/lang/ClassCastException"
+        | "java/lang/ArithmeticException"
+        | "java/lang/NegativeArraySizeException"
+        | "java/lang/ArrayStoreException"
+        | "java/lang/SecurityException"
+        | "java/lang/MatchException"
+        | "java/util/ConcurrentModificationException"
+        | "java/util/NoSuchElementException"
+        | "java/io/UncheckedIOException" => "java/lang/RuntimeException",
+        "java/lang/NumberFormatException" => "java/lang/IllegalArgumentException",
+        "java/lang/ArrayIndexOutOfBoundsException"
+        | "java/lang/StringIndexOutOfBoundsException" => "java/lang/IndexOutOfBoundsException",
+        "java/lang/ClassNotFoundException" | "java/lang/NoSuchMethodException" => {
+            "java/lang/ReflectiveOperationException"
+        }
+        "java/lang/AssertionError"
+        | "java/lang/StackOverflowError"
+        | "java/lang/OutOfMemoryError" => "java/lang/Error",
+        "java/lang/Throwable" => "java/lang/Object",
+        _ => return None,
+    })
+}
+
+/// Whether `class` is a JDK exception class this backend knows.
+fn jdk_throwable(class: &str) -> bool {
+    jdk_super(class).is_some()
+}
+
+extern "C" fn host_catches(exc: u64, catch: u32) -> u32 {
+    if exc == 0 {
+        return 0;
+    }
+    // SAFETY: as in host_is_instance.
+    let id = unsafe { *(*(exc as *const *const u64)) } as usize;
+    CATCHES.with(|c| {
+        let c = c.borrow();
+        let Some(name) = c.get(catch as usize) else {
+            return 0;
+        };
+        ANCESTOR_NAMES.with(|a| a.borrow().get(id).is_some_and(|set| set.contains(name)) as u32)
+    })
+}
+
+extern "C" fn host_missing() {
+    panic!("a virtual method with no implementation in the compiled classes was called");
 }
 
 pub struct Native {
@@ -75,6 +144,7 @@ pub struct Native {
     /// Boxed: each one's address is baked into the code.
     #[allow(clippy::vec_box)]
     _singletons: Vec<Box<u64>>,
+    _strings: HashMap<String, Box<[u64]>>,
 }
 
 fn kind_type(t: &Ty) -> Option<Type> {
@@ -138,6 +208,14 @@ extern "C" fn host_is_instance(obj: u64, target: u32) -> u32 {
 }
 
 thread_local! {
+    /// Each class id's ancestors by name, the JDK's exception classes too.
+    static ANCESTOR_NAMES: std::cell::RefCell<Vec<HashSet<String>>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+    /// The classes `catch` clauses name, by index.
+    static CATCHES: std::cell::RefCell<Vec<String>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
     /// Each class id's ancestors (itself, superclasses, interfaces), by id.
     static ANCESTORS: std::cell::RefCell<Vec<HashSet<u32>>> = const {
         std::cell::RefCell::new(Vec::new())
@@ -158,6 +236,8 @@ impl Native {
         jb.symbol("host_fmod", host_fmod as *const u8);
         jb.symbol("host_fmodf", host_fmodf as *const u8);
         jb.symbol("host_is_instance", host_is_instance as *const u8);
+        jb.symbol("host_catches", host_catches as *const u8);
+        jb.symbol("host_missing", host_missing as *const u8);
         let mut module = JITModule::new(jb);
         let ptr = module.target_config().pointer_type();
 
@@ -284,9 +364,79 @@ impl Native {
                 None
             });
         }
+        // The JDK exception classes the code makes (`new IllegalStateException`):
+        // built in, with no fields (the message is not kept yet).
+        let mut builtins: Vec<String> = vec!["java/lang/String".to_owned()];
+        for c in classes {
+            for m in &c.methods {
+                let Some(code) = m.code() else { continue };
+                let Ok(insns) = decode(&code.code) else {
+                    continue;
+                };
+                for x in &insns {
+                    if x.opcode == 0xBB
+                        && let Operand::Constant(i) = x.operand
+                        && let Ok(n) = c.class_name(i)
+                        && !by_name.contains_key(n)
+                        && jdk_throwable(n)
+                        && !builtins.iter().any(|b| b == n)
+                    {
+                        builtins.push(n.to_owned());
+                    }
+                }
+            }
+        }
+        let builtin_base = names.len() + 1 + lambdas.len();
+        for (k, n) in builtins.iter().enumerate() {
+            let mut vt = vec![0u64; 1 + selectors.len()];
+            vt[0] = (builtin_base + k) as u64;
+            vtables.push(vt);
+            let vtable = vtables.last_mut().expect("just pushed").as_mut_ptr();
+            layouts.insert(
+                n.clone(),
+                Layout {
+                    fields: HashMap::new(),
+                    size: 8,
+                    vtable,
+                },
+            );
+        }
+        // Ancestors by name, for catch clauses.
+        let mut names_of: Vec<HashSet<String>> =
+            vec![HashSet::new(); builtin_base + builtins.len()];
+        let chain = |start: &str| -> HashSet<String> {
+            let mut set = HashSet::new();
+            let mut todo = vec![start.to_owned()];
+            while let Some(c) = todo.pop() {
+                if !set.insert(c.clone()) {
+                    continue;
+                }
+                match by_name.get(c.as_str()) {
+                    Some(cf) => {
+                        todo.extend(cf.super_name().ok().flatten().map(str::to_owned));
+                        todo.extend(
+                            cf.interfaces
+                                .iter()
+                                .filter_map(|&i| cf.class_name(i).ok().map(str::to_owned)),
+                        );
+                    }
+                    None => todo.extend(jdk_super(&c).map(str::to_owned)),
+                }
+            }
+            set
+        };
+        for n in &names {
+            names_of[ids[n] as usize] = chain(n);
+        }
+        for (i, l) in lambdas.iter().enumerate() {
+            names_of[names.len() + 1 + i] = chain(&l.interface);
+        }
+        for (k, n) in builtins.iter().enumerate() {
+            names_of[builtin_base + k] = chain(n);
+        }
+        ANCESTOR_NAMES.with(|a| *a.borrow_mut() = names_of);
         // Ancestors, for instanceof and checkcast.
-        let mut ancestors: Vec<HashSet<u32>> =
-            vec![HashSet::new(); names.len() + 1 + lambdas.len()];
+        let mut ancestors: Vec<HashSet<u32>> = vec![HashSet::new(); builtin_base + builtins.len()];
         for (i, l) in lambdas.iter().enumerate() {
             let id = (names.len() + 1 + i) as u32;
             let mut set: HashSet<u32> = ancestors_of(&l.interface, &by_name)
@@ -354,6 +504,7 @@ impl Native {
         let mut globals = Box::new(Globals {
             bump: arena.as_ptr() as u64,
             limit: arena.as_ptr() as u64 + arena_size as u64,
+            exception: 0,
         });
         let globals_at = (&mut *globals) as *mut Globals as i64;
 
@@ -410,6 +561,12 @@ impl Native {
                 vec![types::I64, types::I32],
                 Some(types::I32),
             ),
+            (
+                "host_catches",
+                vec![types::I64, types::I32],
+                Some(types::I32),
+            ),
+            ("host_missing", vec![], None),
         ] {
             let mut sig = module.make_signature();
             sig.params.extend(params.into_iter().map(AbiParam::new));
@@ -440,6 +597,9 @@ impl Native {
             lambda_vt: &lambda_vt,
             singleton_at: &singleton_at,
             stays: std::cell::RefCell::new(HashMap::new()),
+            catches: std::cell::RefCell::new(Vec::new()),
+            strings: std::cell::RefCell::new(HashMap::new()),
+            string_vt: layouts["java/lang/String"].vtable as i64,
         };
         let mut unsupported = Vec::new();
         let mut ctx = module.make_context();
@@ -474,6 +634,7 @@ impl Native {
                 module.clear_context(&mut ctx);
             }
         }
+        CATCHES.with(|c| *c.borrow_mut() = world.catches.borrow().clone());
         // The lambdas' bridges: captured values and the interface method's
         // arguments to the target.
         for (i, l) in lambdas.iter().enumerate() {
@@ -613,6 +774,16 @@ impl Native {
                 }
             }
         }
+        // Selectors nothing implements: a call stops with a message.
+        let missing = host_missing as *const u8 as u64;
+        for vt in &mut vtables {
+            for slot in vt.iter_mut().skip(1) {
+                if *slot == 0 {
+                    *slot = missing;
+                }
+            }
+        }
+        let strings = world.strings.take();
         let exports = funcs;
         Ok(Native {
             module,
@@ -623,6 +794,7 @@ impl Native {
             _statics: statics,
             _vtables: vtables,
             _singletons: singletons,
+            _strings: strings,
         })
     }
 
@@ -833,6 +1005,12 @@ struct World<'a> {
     /// Whether a method keeps its own object inside it (by method and the
     /// inlining depth left).
     stays: std::cell::RefCell<HashMap<(String, u32), bool>>,
+    /// The classes `catch` clauses name (indices for `host_catches`).
+    catches: std::cell::RefCell<Vec<String>>,
+    /// String literals, one object each (interned), made at compile time:
+    /// the String vtable, the length, the UTF-16 units.
+    strings: std::cell::RefCell<HashMap<String, Box<[u64]>>>,
+    string_vt: i64,
 }
 
 impl World<'_> {
@@ -1064,11 +1242,13 @@ const ESCAPE_SIZE: usize = 400;
 /// call other than one that keeps them (see [`stays`]), returned, thrown,
 /// compared by identity, locked, merged with another value, or made again
 /// while one of them is still held.
+#[allow(clippy::too_many_arguments)]
 fn escapes(
     w: &World<'_>,
     h: &Classes,
     class: &ClassFile,
     insns: &[Instruction],
+    handlers: &[crate::classfile::Handler],
     frames: &[Option<Frame>],
     opts: &Options,
     depth: u32,
@@ -1087,6 +1267,16 @@ fn escapes(
         let Some(f) = &frames[i] else { continue };
         for t in f.locals.iter().chain(&f.stack) {
             seen.extend(site(t));
+        }
+        // An object held in a local where an exception can arrive at a
+        // handler: kept in memory.
+        if handlers
+            .iter()
+            .any(|h| u32::from(h.start) <= insn.at && insn.at < u32::from(h.end))
+        {
+            for t in &f.locals {
+                out.extend(site(t));
+            }
         }
         let d = f.stack.len();
         let s = |k: usize| f.stack.get(d.wrapping_sub(1 + k)).and_then(site);
@@ -1238,7 +1428,7 @@ fn stays(w: &World<'_>, h: &Classes, class: &str, name: &str, desc: &str, depth:
             this_site: true,
         };
         let frames = infer_with(h, cf, m, &insns, &opts).ok()?;
-        let (_, out) = escapes(w, h, cf, &insns, &frames, &opts, depth);
+        let (_, out) = escapes(w, h, cf, &insns, &code.handlers, &frames, &opts, depth);
         Some(!out.contains(&THIS_SITE))
     })()
     .unwrap_or(false);
@@ -1279,6 +1469,10 @@ struct MethodGen<'a, 'b, 'f> {
     depth: u32,
     /// The fields of objects kept in variables.
     fields: HashMap<(SiteKey, i32, Type), Variable>,
+    /// In an inlined body: where an exception it does not catch goes.
+    unwind: Option<Block>,
+    /// Exception dispatch blocks, by body and covering handlers.
+    dispatches: HashMap<(u32, Vec<usize>), Block>,
 }
 
 impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
@@ -1292,16 +1486,22 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
     ) -> Result<Self, String> {
         let code = method.code().ok_or("no code")?;
         let insns = decode(&code.code).map_err(|e| e.to_string())?;
-        if !code.handlers.is_empty() {
-            return Err("exception handlers (not in the prototype)".into());
-        }
         let opts = Options {
             sites: true,
             this_site: false,
         };
         let frames = infer_with(h, class, method, &insns, &opts)?;
         let cfg = Cfg::new(&insns, &code.handlers);
-        let (seen, out) = escapes(w, h, class, &insns, &frames, &opts, ESCAPE_DEPTH);
+        let (seen, out) = escapes(
+            w,
+            h,
+            class,
+            &insns,
+            &code.handlers,
+            &frames,
+            &opts,
+            ESCAPE_DEPTH,
+        );
         let scalar = seen
             .difference(&out)
             .copied()
@@ -1328,6 +1528,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             ret: None,
             depth: ESCAPE_DEPTH,
             fields: HashMap::new(),
+            unwind: None,
+            dispatches: HashMap::new(),
         })
     }
 
@@ -1427,8 +1629,11 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         desc: &str,
         args: &[Value],
         ret: Option<Type>,
+        at: usize,
     ) -> Result<Option<Value>, String> {
         let w = self.w;
+        // What it does not catch goes to this call's handlers.
+        let unwind = self.dispatch(at)?;
         let cf: &'a ClassFile = w.by_name.get(class).copied().ok_or("no class to inline")?;
         let m: &'a Member = cf
             .methods
@@ -1444,7 +1649,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         let frames = infer_with(self.h, cf, m, &insns, &opts)?;
         let cfg = Cfg::new(&insns, &code.handlers);
         let depth = self.depth.checked_sub(1).ok_or("inlined too deep")?;
-        let (seen, out) = escapes(w, self.h, cf, &insns, &frames, &opts, depth);
+        let (seen, out) = escapes(w, self.h, cf, &insns, &code.handlers, &frames, &opts, depth);
         let scalar: HashSet<u32> = seen
             .difference(&out)
             .copied()
@@ -1471,7 +1676,9 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             self.ret,
             self.body,
             self.depth,
+            self.unwind,
         );
+        self.unwind = Some(unwind);
         self.class = cf;
         self.owner = owner;
         self.method = m;
@@ -1521,6 +1728,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             self.ret,
             self.body,
             self.depth,
+            self.unwind,
         ) = saved;
         r?;
         self.b.switch_to_block(cont);
@@ -1572,6 +1780,148 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             .get(i + 1)
             .and_then(|&b| self.blocks[b])
             .ok_or_else(|| "no block after a branch".into())
+    }
+
+    /// The block that sends the exception being thrown at instruction `i` to
+    /// the first handler covering `i` that catches it, else out (to the
+    /// caller, or to the caller's handlers for an inlined body).
+    fn dispatch(&mut self, i: usize) -> Result<Block, String> {
+        let at = self.insns[i].at;
+        let handlers: Vec<crate::classfile::Handler> = self
+            .method
+            .code()
+            .map(|c| c.handlers.clone())
+            .unwrap_or_default();
+        let covering: Vec<usize> = handlers
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| u32::from(h.start) <= at && at < u32::from(h.end))
+            .map(|(k, _)| k)
+            .collect();
+        if let Some(&b) = self.dispatches.get(&(self.body, covering.clone())) {
+            return Ok(b);
+        }
+        let here = self.b.current_block();
+        let d = self.b.create_block();
+        self.dispatches.insert((self.body, covering.clone()), d);
+        self.b.switch_to_block(d);
+        let g = self.b.ins().iconst(types::I64, self.w.globals_at);
+        let exc = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), g, EXCEPTION);
+        for k in covering {
+            let h = handlers[k];
+            let target = self
+                .insns
+                .iter()
+                .position(|x| x.at == u32::from(h.handler))
+                .and_then(|j| self.blocks[self.cfg.block_of[j]])
+                .ok_or("a handler at no block")?;
+            let catch = (h.catch_type != 0)
+                .then(|| self.class.class_name(h.catch_type).map(str::to_owned))
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .filter(|c| c != "java/lang/Throwable");
+            let take = self.b.create_block();
+            match catch {
+                None => {
+                    self.b.ins().jump(take, &[]);
+                }
+                Some(c) => {
+                    let index = {
+                        let mut list = self.w.catches.borrow_mut();
+                        match list.iter().position(|x| *x == c) {
+                            Some(p) => p,
+                            None => {
+                                list.push(c);
+                                list.len() - 1
+                            }
+                        }
+                    };
+                    let idx = self.b.ins().iconst(types::I32, index as i64);
+                    let yes = self
+                        .host("host_catches", &[exc, idx])
+                        .ok_or("host_catches")?;
+                    let next = self.b.create_block();
+                    self.b.ins().brif(yes, take, &[], next, &[]);
+                    self.b.switch_to_block(take);
+                    self.take(g, exc, target);
+                    self.b.switch_to_block(next);
+                    continue;
+                }
+            }
+            self.b.switch_to_block(take);
+            self.take(g, exc, target);
+            // A catch-all: nothing after it.
+            let dead = self.b.create_block();
+            self.b.switch_to_block(dead);
+        }
+        // Not caught here.
+        match self.unwind {
+            Some(u) => {
+                self.b.ins().jump(u, &[]);
+            }
+            None => {
+                let rets: Vec<Type> = self
+                    .b
+                    .func
+                    .signature
+                    .returns
+                    .iter()
+                    .map(|r| r.value_type)
+                    .collect();
+                let zeros: Vec<Value> = rets.into_iter().map(|t| zero(&mut self.b, t)).collect();
+                self.b.ins().return_(&zeros);
+            }
+        }
+        if let Some(h) = here {
+            self.b.switch_to_block(h);
+        }
+        Ok(d)
+    }
+
+    /// Takes the exception `exc` into handler block `target`: it is the
+    /// handler's stack, and no longer being thrown.
+    fn take(&mut self, g: Value, exc: Value, target: Block) {
+        let z = self.b.ins().iconst(types::I64, 0);
+        self.b.ins().store(MemFlagsData::trusted(), z, g, EXCEPTION);
+        let v = self.var(false, 0, types::I64);
+        self.b.def_var(v, exc);
+        self.b.ins().jump(target, &[]);
+    }
+
+    /// After a call at instruction `i`: on to the handlers if it threw.
+    fn after_call(&mut self, i: usize) -> Result<(), String> {
+        let g = self.b.ins().iconst(types::I64, self.w.globals_at);
+        let exc = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), g, EXCEPTION);
+        let go = self.dispatch(i)?;
+        let on = self.b.create_block();
+        self.b.ins().brif(exc, go, &[], on, &[]);
+        self.b.switch_to_block(on);
+        Ok(())
+    }
+
+    /// The object of string literal `text` (the same for each use).
+    fn string(&mut self, text: &str) -> i64 {
+        let mut strings = self.w.strings.borrow_mut();
+        if let Some(o) = strings.get(text) {
+            return o.as_ptr() as i64;
+        }
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut o = vec![0u64; 2 + units.len().div_ceil(4)];
+        o[0] = self.w.string_vt as u64;
+        o[1] = units.len() as u64;
+        for (k, u) in units.iter().enumerate() {
+            o[2 + k / 4] |= u64::from(*u) << (16 * (k % 4));
+        }
+        let o = o.into_boxed_slice();
+        let at = o.as_ptr() as i64;
+        strings.insert(text.to_owned(), o);
+        at
     }
 
     /// Calls the init function of `class` once in this block.
@@ -1681,6 +2031,11 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                     Some(Constant::Long(x)) => (self.b.ins().iconst(i64t, *x), i64t),
                     Some(Constant::Float(x)) => (self.b.ins().f32const(*x), f32t),
                     Some(Constant::Double(x)) => (self.b.ins().f64const(*x), f64t),
+                    Some(Constant::String(u)) => {
+                        let text = self.class.utf8(*u).map_err(me)?.to_owned();
+                        let at = self.string(&text);
+                        (self.b.ins().iconst(i64t, at), i64t)
+                    }
                     _ => {
                         self.b.ins().trap(UNSUPPORTED);
                         return Ok(true);
@@ -1979,7 +2334,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                     self.b.ins().store(MemFlagsData::trusted(), v, obj, at);
                 }
             }
-            0xB6..=0xB9 => return self.invoke(insn, f),
+            0xB6..=0xB9 => return self.invoke(insn, f, i),
             0xBA => {
                 let site = self
                     .w
@@ -2072,7 +2427,14 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 self.set(d - 1, i32t, len);
             }
             0xBF => {
-                self.b.ins().trap(UNSUPPORTED);
+                let exc = self.get(d - 1, i64t);
+                self.null_check(exc);
+                let g = self.b.ins().iconst(i64t, self.w.globals_at);
+                self.b
+                    .ins()
+                    .store(MemFlagsData::trusted(), exc, g, EXCEPTION);
+                let go = self.dispatch(i)?;
+                self.b.ins().jump(go, &[]);
                 return Ok(true);
             }
             0xC0 | 0xC1 => {
@@ -2314,7 +2676,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         Ok(())
     }
 
-    fn invoke(&mut self, insn: &Instruction, f: &Frame) -> Result<bool, String> {
+    fn invoke(&mut self, insn: &Instruction, f: &Frame, i: usize) -> Result<bool, String> {
         let op = insn.opcode;
         let d = f.stack.len();
         let (Operand::Constant(c) | Operand::Interface(c, _)) = insn.operand else {
@@ -2341,8 +2703,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             }
             return Ok(false);
         }
-        // Object's constructor does nothing.
-        if op == 0xB7 && name == "<init>" && owner == OBJECT {
+        // Object's constructor does nothing; nor (for now) a JDK exception's.
+        if op == 0xB7 && name == "<init>" && (owner == OBJECT || jdk_throwable(&owner)) {
             return Ok(false);
         }
         // A call on an object kept in variables: its code, here.
@@ -2355,7 +2717,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 .w
                 .resolve(&class, &name, &desc)
                 .ok_or("no method for a kept object")?;
-            let result = self.inline(key, &declaring, &name, &desc, &args[1..], ret)?;
+            let result = self.inline(key, &declaring, &name, &desc, &args[1..], ret, i)?;
             if let (Some(t), Some(v)) = (ret, result) {
                 self.set(base, t, v);
             }
@@ -2420,6 +2782,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 }
             }
         };
+        // It may have thrown.
+        self.after_call(i)?;
         if let (Some(t), Some(v)) = (ret, result) {
             self.set(base, t, v);
         }
