@@ -19,7 +19,7 @@ use crate::{
     classfile::{ClassFile, Constant, Member},
     decode,
     descriptor::Method,
-    types::{Classes, Frame, Ty, infer},
+    types::{Classes, Frame, Options, Stepper, THIS_SITE, Ty, infer_with, successors},
 };
 use cranelift_codegen::{
     ir::{
@@ -83,7 +83,7 @@ fn kind_type(t: &Ty) -> Option<Type> {
         Ty::Long => types::I64,
         Ty::Float => types::F32,
         Ty::Double => types::F64,
-        Ty::Null | Ty::Ref(_) | Ty::Uninit(_) | Ty::UninitThis => types::I64,
+        Ty::Null | Ty::Ref(_) | Ty::Uninit(_) | Ty::UninitThis | Ty::Site(..) => types::I64,
         Ty::Top => return None,
     })
 }
@@ -439,6 +439,7 @@ impl Native {
             lambda_at: &lambda_at,
             lambda_vt: &lambda_vt,
             singleton_at: &singleton_at,
+            stays: std::cell::RefCell::new(HashMap::new()),
         };
         let mut unsupported = Vec::new();
         let mut ctx = module.make_context();
@@ -829,6 +830,9 @@ struct World<'a> {
     lambda_at: &'a HashMap<(String, u32), usize>,
     lambda_vt: &'a [i64],
     singleton_at: &'a [Option<i64>],
+    /// Whether a method keeps its own object inside it (by method and the
+    /// inlining depth left).
+    stays: std::cell::RefCell<HashMap<(String, u32), bool>>,
 }
 
 impl World<'_> {
@@ -1050,6 +1054,202 @@ fn bridge(
     Ok(())
 }
 
+/// Inlining depth for objects kept in variables, and the largest method
+/// inlined for them.
+const ESCAPE_DEPTH: u32 = 4;
+const ESCAPE_SIZE: usize = 400;
+
+/// The objects of a method (its `new` sites, and [`THIS_SITE`]) and which of
+/// them escape it: stored in a field, an array or a static, passed to a
+/// call other than one that keeps them (see [`stays`]), returned, thrown,
+/// compared by identity, locked, merged with another value, or made again
+/// while one of them is still held.
+fn escapes(
+    w: &World<'_>,
+    h: &Classes,
+    class: &ClassFile,
+    insns: &[Instruction],
+    frames: &[Option<Frame>],
+    opts: &Options,
+    depth: u32,
+) -> (HashSet<u32>, HashSet<u32>) {
+    let mut seen = HashSet::new();
+    let mut out = HashSet::new();
+    // An object not yet constructed is its site too.
+    let site = |t: &Ty| match t {
+        Ty::Site(x, _) | Ty::Uninit(x) => Some(*x),
+        Ty::UninitThis if opts.this_site => Some(THIS_SITE),
+        _ => None,
+    };
+    let at: HashMap<u32, usize> = insns.iter().enumerate().map(|(i, x)| (x.at, i)).collect();
+    let stepper = Stepper::new(class, insns);
+    for (i, insn) in insns.iter().enumerate() {
+        let Some(f) = &frames[i] else { continue };
+        for t in f.locals.iter().chain(&f.stack) {
+            seen.extend(site(t));
+        }
+        let d = f.stack.len();
+        let s = |k: usize| f.stack.get(d.wrapping_sub(1 + k)).and_then(site);
+        let mut escape = |x: Option<u32>| out.extend(x);
+        match insn.opcode {
+            0xBB => {
+                // A second one while the first is held: two objects, one name.
+                if f.locals
+                    .iter()
+                    .chain(&f.stack)
+                    .any(|t| site(t) == Some(insn.at))
+                {
+                    escape(Some(insn.at));
+                }
+                seen.insert(insn.at);
+            }
+            0xB5 => escape(s(0)),
+            0xB3 | 0xB0 | 0xBF | 0xC2 | 0xC3 | 0xC1 => escape(s(0)),
+            0x53 => {
+                escape(s(0));
+                escape(s(2));
+            }
+            0xA5 | 0xA6 => {
+                escape(s(0));
+                escape(s(1));
+            }
+            0xB6..=0xBA => {
+                let call = invoked_member(class, insn);
+                let Some((owner, name, desc)) = call else {
+                    for k in 0..d {
+                        escape(s(k));
+                    }
+                    continue;
+                };
+                let n = Method::parse(&desc).map_or(0, |m| m.params.len());
+                for k in 0..n {
+                    escape(s(k));
+                }
+                if insn.opcode != 0xB8 && insn.opcode != 0xBA {
+                    let receiver = f.stack.get(d - n - 1);
+                    let followed = match receiver {
+                        Some(Ty::Site(x, c)) => Some((*x, c.to_string())),
+                        // A constructor call: the class it names.
+                        Some(t) => site(t).map(|x| (x, owner.clone())),
+                        None => None,
+                    };
+                    if let Some((x, c)) = followed {
+                        let x = &x;
+                        // Its class is exactly known: the method it runs too.
+                        let target = if insn.opcode == 0xB7 {
+                            w.resolve(&owner, &name, &desc)
+                        } else {
+                            w.resolve(&c, &name, &desc)
+                        };
+                        let keeps = match target {
+                            _ if owner == "java/lang/Object" && name == "<init>" => true,
+                            Some(t) => depth > 0 && stays(w, h, &t, &name, &desc, depth - 1),
+                            None => false,
+                        };
+                        if !keeps {
+                            escape(Some(*x));
+                        }
+                    }
+                }
+                if insn.opcode == 0xBA {
+                    for k in 0..d {
+                        escape(s(k));
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Across an edge, a held object must arrive as itself, or as Top
+        // (its slot is dead there).
+        let Ok(after) = stepper.after(class, opts, insn, f) else {
+            continue;
+        };
+        for t in successors(insns, i, &at) {
+            let Some(g) = &frames[t] else { continue };
+            for (k, v) in after.locals.iter().enumerate() {
+                if let Some(x) = site(v) {
+                    let there = g.locals.get(k).unwrap_or(&Ty::Top);
+                    if site(there) != Some(x) && *there != Ty::Top {
+                        out.insert(x);
+                    }
+                }
+            }
+            for (k, v) in after.stack.iter().enumerate() {
+                if let Some(x) = site(v)
+                    && g.stack.get(k).and_then(site) != Some(x)
+                {
+                    out.insert(x);
+                }
+            }
+        }
+    }
+    // An object of a class outside the closed world has no known fields.
+    for (i, insn) in insns.iter().enumerate() {
+        if insn.opcode == 0xBB
+            && let Operand::Constant(c) = insn.operand
+            && class
+                .class_name(c)
+                .map_or(true, |n| !w.layouts.contains_key(n))
+        {
+            out.insert(insn.at);
+        }
+        let _ = i;
+    }
+    (seen, out)
+}
+
+/// The method a call instruction names.
+fn invoked_member(class: &ClassFile, insn: &Instruction) -> Option<(String, String, String)> {
+    let (Operand::Constant(c) | Operand::Interface(c, _)) = insn.operand else {
+        return None;
+    };
+    if insn.opcode == 0xBA {
+        return None;
+    }
+    let (o, n, d) = class.member_ref(c).ok()?;
+    Some((o.to_owned(), n.to_owned(), d.to_owned()))
+}
+
+/// Whether method `name desc` of `class` keeps its own object inside it
+/// (so a caller can keep that object in variables and inline the method).
+fn stays(w: &World<'_>, h: &Classes, class: &str, name: &str, desc: &str, depth: u32) -> bool {
+    let key = (export_name(class, name, desc), depth);
+    if let Some(&v) = w.stays.borrow().get(&key) {
+        return v;
+    }
+    // While it is decided (recursion): no.
+    w.stays.borrow_mut().insert(key.clone(), false);
+    let v = (|| {
+        let cf = w.by_name.get(class)?;
+        let m = cf
+            .methods
+            .iter()
+            .find(|m| m.name == name && m.descriptor == desc)?;
+        let code = m.code()?;
+        if !code.handlers.is_empty() || m.access & STATIC != 0 {
+            return None;
+        }
+        let insns = decode(&code.code).ok()?;
+        if insns.len() > ESCAPE_SIZE {
+            return None;
+        }
+        let opts = Options {
+            sites: true,
+            this_site: true,
+        };
+        let frames = infer_with(h, cf, m, &insns, &opts).ok()?;
+        let (_, out) = escapes(w, h, cf, &insns, &frames, &opts, depth);
+        Some(!out.contains(&THIS_SITE))
+    })()
+    .unwrap_or(false);
+    w.stays.borrow_mut().insert(key, v);
+    v
+}
+
+/// An object kept in variables: the body it was made in (its id) and its
+/// `new` position.
+type SiteKey = (u32, u32);
+
 struct MethodGen<'a, 'b, 'f> {
     w: &'a World<'a>,
     h: &'a Classes,
@@ -1061,10 +1261,24 @@ struct MethodGen<'a, 'b, 'f> {
     cfg: Cfg,
     b: FunctionBuilder<'f>,
     module: &'b mut JITModule,
-    vars: HashMap<(bool, usize, Type), Variable>,
+    /// Locals and stack slots, by body (the method or one inlined in it).
+    vars: HashMap<(u32, bool, usize, Type), Variable>,
     blocks: Vec<Option<Block>>,
     /// Classes whose init test this method already made.
     inited: HashSet<String>,
+    /// The body being generated, and the next body's id.
+    body: u32,
+    next_body: u32,
+    /// This body's objects kept in variables (by `new` position).
+    scalar: HashSet<u32>,
+    /// In an inlined body: the object its `this` is.
+    this_key: Option<SiteKey>,
+    /// In an inlined body: where its returns go, with the value's type.
+    ret: Option<(Block, Option<Type>)>,
+    /// Inlining depth left for objects kept in variables.
+    depth: u32,
+    /// The fields of objects kept in variables.
+    fields: HashMap<(SiteKey, i32, Type), Variable>,
 }
 
 impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
@@ -1081,8 +1295,18 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         if !code.handlers.is_empty() {
             return Err("exception handlers (not in the prototype)".into());
         }
-        let frames = infer(h, class, method, &insns)?;
+        let opts = Options {
+            sites: true,
+            this_site: false,
+        };
+        let frames = infer_with(h, class, method, &insns, &opts)?;
         let cfg = Cfg::new(&insns, &code.handlers);
+        let (seen, out) = escapes(w, h, class, &insns, &frames, &opts, ESCAPE_DEPTH);
+        let scalar = seen
+            .difference(&out)
+            .copied()
+            .filter(|&x| x != THIS_SITE)
+            .collect();
         Ok(MethodGen {
             w,
             h,
@@ -1097,15 +1321,42 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             vars: HashMap::new(),
             blocks: Vec::new(),
             inited: HashSet::new(),
+            body: 0,
+            next_body: 1,
+            scalar,
+            this_key: None,
+            ret: None,
+            depth: ESCAPE_DEPTH,
+            fields: HashMap::new(),
         })
     }
 
     fn var(&mut self, local: bool, n: usize, t: Type) -> Variable {
-        if let Some(&v) = self.vars.get(&(local, n, t)) {
+        let key = (self.body, local, n, t);
+        if let Some(&v) = self.vars.get(&key) {
             return v;
         }
         let v = self.b.declare_var(t);
-        self.vars.insert((local, n, t), v);
+        self.vars.insert(key, v);
+        v
+    }
+
+    /// The object a value of type `t` is, if it is kept in variables.
+    fn site_key(&self, t: &Ty) -> Option<SiteKey> {
+        match t {
+            Ty::Site(THIS_SITE, _) | Ty::UninitThis => self.this_key,
+            Ty::Site(x, _) | Ty::Uninit(x) if self.scalar.contains(x) => Some((self.body, *x)),
+            _ => None,
+        }
+    }
+
+    /// Field variable `at` (of type `t`) of object `key`.
+    fn field_var(&mut self, key: SiteKey, at: i32, t: Type) -> Variable {
+        if let Some(&v) = self.fields.get(&(key, at, t)) {
+            return v;
+        }
+        let v = self.b.declare_var(t);
+        self.fields.insert((key, at, t), v);
         v
     }
     fn get(&mut self, d: usize, t: Type) -> Value {
@@ -1159,6 +1410,126 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         let first = self.blocks[0].ok_or("no entry")?;
         self.b.ins().jump(first, &[]);
         self.b.seal_block(entry);
+        self.emit_blocks()?;
+        self.b.seal_all_blocks();
+        let config = self.module.target_config();
+        self.b.finalize(config);
+        Ok(())
+    }
+
+    /// Method `name desc` of `class` inlined on object `key`, with `args`:
+    /// its result.
+    fn inline(
+        &mut self,
+        key: SiteKey,
+        class: &str,
+        name: &str,
+        desc: &str,
+        args: &[Value],
+        ret: Option<Type>,
+    ) -> Result<Option<Value>, String> {
+        let w = self.w;
+        let cf: &'a ClassFile = w.by_name.get(class).copied().ok_or("no class to inline")?;
+        let m: &'a Member = cf
+            .methods
+            .iter()
+            .find(|m| m.name == name && m.descriptor == desc)
+            .ok_or("no method to inline")?;
+        let code = m.code().ok_or("no code to inline")?;
+        let insns = decode(&code.code).map_err(|e| e.to_string())?;
+        let opts = Options {
+            sites: true,
+            this_site: true,
+        };
+        let frames = infer_with(self.h, cf, m, &insns, &opts)?;
+        let cfg = Cfg::new(&insns, &code.handlers);
+        let depth = self.depth.checked_sub(1).ok_or("inlined too deep")?;
+        let (seen, out) = escapes(w, self.h, cf, &insns, &frames, &opts, depth);
+        let scalar: HashSet<u32> = seen
+            .difference(&out)
+            .copied()
+            .filter(|&x| x != THIS_SITE)
+            .collect();
+        let cont = self.b.create_block();
+        if let Some(t) = ret {
+            self.b.append_block_param(cont, t);
+        }
+        let owner: &'a str = cf.name().map_err(|e| e.to_string())?;
+        let id = self.next_body;
+        self.next_body += 1;
+        // The caller's body, put back after.
+        let saved = (
+            self.class,
+            self.owner,
+            self.method,
+            std::mem::replace(&mut self.insns, insns),
+            std::mem::replace(&mut self.frames, frames),
+            std::mem::replace(&mut self.cfg, cfg),
+            std::mem::take(&mut self.blocks),
+            std::mem::replace(&mut self.scalar, scalar),
+            self.this_key,
+            self.ret,
+            self.body,
+            self.depth,
+        );
+        self.class = cf;
+        self.owner = owner;
+        self.method = m;
+        self.this_key = Some(key);
+        self.ret = Some((cont, ret));
+        self.body = id;
+        self.depth = depth;
+        let r = (|| -> Result<(), String> {
+            let n = self.cfg.blocks.len();
+            self.blocks = (0..n)
+                .map(|b| {
+                    self.frames[self.cfg.blocks[b].start]
+                        .is_some()
+                        .then(|| self.b.create_block())
+                })
+                .collect();
+            // Its own object is the kept one: local 0 is a stand-in.
+            let one = self.b.ins().iconst(types::I64, 1);
+            let v = self.var(true, 0, types::I64);
+            self.b.def_var(v, one);
+            let sig = Method::parse(desc).ok_or("a bad descriptor")?;
+            let mut slot = 1usize;
+            for (p, a) in sig.params.iter().zip(args) {
+                let t = desc_type(p).ok_or("a bad parameter")?;
+                let v = self.var(true, slot, t);
+                self.b.def_var(v, *a);
+                slot += if matches!(p.as_bytes()[0], b'J' | b'D') {
+                    2
+                } else {
+                    1
+                };
+            }
+            let first = self.blocks[0].ok_or("no entry to inline")?;
+            self.b.ins().jump(first, &[]);
+            self.emit_blocks()
+        })();
+        (
+            self.class,
+            self.owner,
+            self.method,
+            self.insns,
+            self.frames,
+            self.cfg,
+            self.blocks,
+            self.scalar,
+            self.this_key,
+            self.ret,
+            self.body,
+            self.depth,
+        ) = saved;
+        r?;
+        self.b.switch_to_block(cont);
+        self.inited.clear();
+        Ok(ret.map(|_| self.b.block_params(cont)[0]))
+    }
+
+    /// The code of the current body's blocks.
+    fn emit_blocks(&mut self) -> Result<(), String> {
         for x in self.cfg.rpo.clone() {
             let Some(blk) = self.blocks[x] else { continue };
             self.b.switch_to_block(blk);
@@ -1184,9 +1555,6 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 self.b.ins().jump(next, &[]);
             }
         }
-        self.b.seal_all_blocks();
-        let config = self.module.target_config();
-        self.b.finalize(config);
         Ok(())
     }
 
@@ -1441,6 +1809,20 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 let r = self.b.ins().select(uno, nan, r);
                 self.set(d - 2, i32t, r);
             }
+            0xC6 | 0xC7 if self.site_key(&f.stack[d - 1]).is_some() => {
+                // An object kept in variables is never null.
+                let Operand::Target(t) = insn.operand else {
+                    unreachable!()
+                };
+                let to = if op == 0xC7 {
+                    self.target(t)?
+                } else {
+                    self.next_block(i)?
+                };
+                self.b.ins().jump(to, &[]);
+                return Ok(true);
+            }
+            0xC0 if self.site_key(&f.stack[d - 1]).is_some() => {}
             0x99..=0xA6 | 0xC6 | 0xC7 => {
                 let Operand::Target(t) = insn.operand else {
                     unreachable!()
@@ -1520,11 +1902,25 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             }
             0xAC..=0xB0 => {
                 let v = self.get(d - 1, st(0));
-                self.b.ins().return_(&[v]);
+                match self.ret {
+                    Some((to, _)) => {
+                        self.b.ins().jump(to, &[v.into()]);
+                    }
+                    None => {
+                        self.b.ins().return_(&[v]);
+                    }
+                }
                 return Ok(true);
             }
             0xB1 => {
-                self.b.ins().return_(&[]);
+                match self.ret {
+                    Some((to, _)) => {
+                        self.b.ins().jump(to, &[]);
+                    }
+                    None => {
+                        self.b.ins().return_(&[]);
+                    }
+                }
                 return Ok(true);
             }
             0xB2 | 0xB3 => {
@@ -1559,6 +1955,18 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                     self.b.ins().trap(UNSUPPORTED);
                     return Ok(true);
                 };
+                let object = if op == 0xB4 { d - 1 } else { d - 2 };
+                if let Some(key) = self.site_key(&f.stack[object]) {
+                    let v = self.field_var(key, at, t);
+                    if op == 0xB4 {
+                        let x = self.b.use_var(v);
+                        self.set(d - 1, t, x);
+                    } else {
+                        let x = self.get(d - 1, t);
+                        self.b.def_var(v, x);
+                    }
+                    return Ok(false);
+                }
                 if op == 0xB4 {
                     let obj = self.get(d - 1, i64t);
                     self.null_check(obj);
@@ -1614,6 +2022,19 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 };
                 let (size, vt) = (l.size, l.vtable as i64);
                 self.init(&class);
+                if self.scalar.contains(&insn.at) {
+                    // Kept in variables: its fields start at zero.
+                    let key = (self.body, insn.at);
+                    let fields: Vec<(i32, Type)> = l.fields.values().copied().collect();
+                    for (at, t) in fields {
+                        let v = self.field_var(key, at, t);
+                        let z = zero(&mut self.b, t);
+                        self.b.def_var(v, z);
+                    }
+                    let one = self.b.ins().iconst(i64t, 1);
+                    self.set(d, i64t, one);
+                    return Ok(false);
+                }
                 let size = self.b.ins().iconst(i64t, i64::from(size));
                 let header = self.b.ins().iconst(i64t, vt);
                 let obj = self.alloc(size, header);
@@ -1924,6 +2345,22 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         if op == 0xB7 && name == "<init>" && owner == OBJECT {
             return Ok(false);
         }
+        // A call on an object kept in variables: its code, here.
+        if receiver && let Some(key) = self.site_key(&f.stack[base]) {
+            let class = match &f.stack[base] {
+                Ty::Site(_, c) if op != 0xB7 => c.to_string(),
+                _ => owner.clone(),
+            };
+            let declaring = self
+                .w
+                .resolve(&class, &name, &desc)
+                .ok_or("no method for a kept object")?;
+            let result = self.inline(key, &declaring, &name, &desc, &args[1..], ret)?;
+            if let (Some(t), Some(v)) = (ret, result) {
+                self.set(base, t, v);
+            }
+            return Ok(false);
+        }
         let result = match op {
             0xB8 | 0xB7 => {
                 let Some(declaring) = self.w.resolve(&owner, &name, &desc) else {
@@ -2031,6 +2468,16 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             }
             _ => return None,
         }))
+    }
+}
+
+fn zero(b: &mut FunctionBuilder<'_>, t: Type) -> Value {
+    if t == types::F32 {
+        b.ins().f32const(0.0)
+    } else if t == types::F64 {
+        b.ins().f64const(0.0)
+    } else {
+        b.ins().iconst(t, 0)
     }
 }
 

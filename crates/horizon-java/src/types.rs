@@ -37,6 +37,22 @@ pub enum Ty {
     Uninit(u32),
     /// `this` in a constructor before the superclass constructor runs.
     UninitThis,
+    /// One object, followed for escape analysis ([`Options::sites`]): the
+    /// object of the `new` at this position (or of [`THIS_SITE`]), and its
+    /// class. It joins with anything else to a plain reference.
+    Site(u32, Arc<str>),
+}
+
+/// The site of a method's own object, with [`Options::this_site`].
+pub const THIS_SITE: u32 = u32::MAX;
+
+/// What [`infer_with`] follows besides the verifier's types.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    /// Constructed objects keep their `new` site ([`Ty::Site`]).
+    pub sites: bool,
+    /// The method's own object is [`Ty::Site`]`(`[`THIS_SITE`]`, class)`.
+    pub this_site: bool,
 }
 
 impl Ty {
@@ -45,6 +61,13 @@ impl Ty {
     }
     pub fn class(name: &str) -> Ty {
         Ty::Ref(name.into())
+    }
+    /// A followed object as the plain reference it is.
+    pub fn plain(&self) -> Ty {
+        match self {
+            Ty::Site(_, c) => Ty::Ref(c.clone()),
+            t => t.clone(),
+        }
     }
     /// The type of a field descriptor: `I` and the other small ints are
     /// `Int`; a class or array is its reference.
@@ -60,7 +83,10 @@ impl Ty {
         })
     }
     fn is_reference(&self) -> bool {
-        matches!(self, Ty::Null | Ty::Ref(_) | Ty::Uninit(_) | Ty::UninitThis)
+        matches!(
+            self,
+            Ty::Null | Ty::Ref(_) | Ty::Uninit(_) | Ty::UninitThis | Ty::Site(..)
+        )
     }
 }
 
@@ -186,6 +212,9 @@ fn join_refs(h: &dyn Hierarchy, a: &str, b: &str) -> Arc<str> {
 
 /// Two types at a merge point; `None` when they cannot share a stack slot.
 fn join(h: &dyn Hierarchy, a: &Ty, b: &Ty) -> Option<Ty> {
+    if a != b && (matches!(a, Ty::Site(..)) || matches!(b, Ty::Site(..))) {
+        return join(h, &a.plain(), &b.plain());
+    }
     Some(match (a, b) {
         _ if a == b => a.clone(),
         (Ty::Null, Ty::Ref(_)) => b.clone(),
@@ -269,6 +298,10 @@ impl Frame {
 
 /// The frame on entry to `method` of `class`.
 pub fn entry(class: &ClassFile, method: &Member) -> Result<Frame, String> {
+    entry_with(class, method, &Options::default())
+}
+
+fn entry_with(class: &ClassFile, method: &Member, opts: &Options) -> Result<Frame, String> {
     let owner = class.name().map_err(|e| e.to_string())?;
     let sig = Method::parse(&method.descriptor).ok_or("a bad method descriptor")?;
     let mut f = Frame {
@@ -279,6 +312,8 @@ pub fn entry(class: &ClassFile, method: &Member) -> Result<Frame, String> {
     if method.access & STATIC == 0 {
         let this = if method.name == "<init>" && owner != OBJECT {
             Ty::UninitThis
+        } else if opts.this_site {
+            Ty::Site(THIS_SITE, owner.into())
         } else {
             Ty::class(owner)
         };
@@ -326,6 +361,7 @@ fn local_of(insn: &Instruction, first: u8) -> u16 {
 fn effect(
     class: &ClassFile,
     news: &HashMap<u32, String>,
+    opts: &Options,
     insn: &Instruction,
     f: &mut Frame,
 ) -> Result<(), String> {
@@ -468,7 +504,14 @@ fn effect(
                             let Some(new) = news.get(at) else {
                                 return Err("a constructor on an unknown new".into());
                             };
-                            Ty::class(new)
+                            if opts.sites {
+                                Site(*at, new.as_str().into())
+                            } else {
+                                Ty::class(new)
+                            }
+                        }
+                        UninitThis if opts.this_site => {
+                            Site(THIS_SITE, class.name().map_err(me)?.into())
                         }
                         UninitThis => Ty::class(class.name().map_err(me)?),
                         _ => receiver.clone(),
@@ -529,7 +572,12 @@ fn effect(
                 return Err("checkcast without a class".into());
             };
             let c = class.class_name(i).map_err(me)?;
-            f.push(if t == Null { Null } else { Ty::class(c) });
+            f.push(match t {
+                Null => Null,
+                // A cast does not change which object it is.
+                Site(..) => t,
+                _ => Ty::class(c),
+            });
         }
         0xC1 => {
             f.pop()?;
@@ -636,6 +684,37 @@ fn stack_op(op: u8, f: &mut Frame) -> Result<(), String> {
     Ok(())
 }
 
+/// The frame after one instruction, for passes that follow values across
+/// edges (escape analysis).
+pub struct Stepper {
+    news: HashMap<u32, String>,
+}
+
+impl Stepper {
+    pub fn new(class: &ClassFile, insns: &[Instruction]) -> Stepper {
+        let news = insns
+            .iter()
+            .filter(|x| x.opcode == 0xBB)
+            .filter_map(|x| match x.operand {
+                Operand::Constant(i) => class.class_name(i).ok().map(|c| (x.at, c.to_owned())),
+                _ => None,
+            })
+            .collect();
+        Stepper { news }
+    }
+    pub fn after(
+        &self,
+        class: &ClassFile,
+        opts: &Options,
+        insn: &Instruction,
+        before: &Frame,
+    ) -> Result<Frame, String> {
+        let mut f = before.clone();
+        effect(class, &self.news, opts, insn, &mut f)?;
+        Ok(f)
+    }
+}
+
 /// Where control goes after `insns[i]`: the next instruction (if it falls
 /// through) and its targets, as instruction indices.
 pub fn successors(insns: &[Instruction], i: usize, at: &HashMap<u32, usize>) -> Vec<usize> {
@@ -673,6 +752,17 @@ pub fn infer(
     method: &Member,
     insns: &[Instruction],
 ) -> Result<Vec<Option<Frame>>, String> {
+    infer_with(h, class, method, insns, &Options::default())
+}
+
+/// [`infer`], following objects as `opts` asks.
+pub fn infer_with(
+    h: &dyn Hierarchy,
+    class: &ClassFile,
+    method: &Member,
+    insns: &[Instruction],
+    opts: &Options,
+) -> Result<Vec<Option<Frame>>, String> {
     let code = method.code().ok_or("no code")?;
     let at: HashMap<u32, usize> = insns.iter().enumerate().map(|(i, x)| (x.at, i)).collect();
     // The `new` instructions, for the constructor calls on their objects.
@@ -686,7 +776,7 @@ pub fn infer(
         .collect();
     let mut before: Vec<Option<Frame>> = vec![None; insns.len()];
     let mut work: VecDeque<usize> = VecDeque::new();
-    before[0] = Some(entry(class, method)?);
+    before[0] = Some(entry_with(class, method, opts)?);
     work.push_back(0);
     let handlers: Vec<(usize, usize, usize, Ty)> = code
         .handlers
@@ -741,7 +831,7 @@ pub fn infer(
             }
         }
         let mut f = f0;
-        effect(class, &news, &insns[i], &mut f)
+        effect(class, &news, opts, &insns[i], &mut f)
             .map_err(|e| format!("at {} ({}): {e}", insns[i].at, insns[i].opcode))?;
         // The locals after a store matter to the handlers too.
         if matches!(insns[i].opcode, 0x36..=0x4E) {
@@ -870,6 +960,7 @@ pub fn stack_map(class: &ClassFile, method: &Member) -> Result<Option<Vec<MapFra
 /// declares `want` (an interface takes any reference, as in the verifier).
 /// `None` when the hierarchy does not know enough to say.
 pub fn assignable(h: &dyn Hierarchy, got: &Ty, want: &Ty) -> Option<bool> {
+    let (got, want) = (&got.plain(), &want.plain());
     Some(match (got, want) {
         (_, Ty::Top) => true,
         _ if got == want => true,
