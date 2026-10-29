@@ -976,10 +976,10 @@ extern "C" fn objects_require_non_null_message(o: u64, m: u64) -> u64 {
     }
     o
 }
-extern "C" fn objects_equals(a: u64, b: u64) -> i32 {
+pub extern "C" fn objects_equals(a: u64, b: u64) -> i32 {
     (a == b || (a != 0 && equals(a, b))) as i32
 }
-extern "C" fn objects_hash_code(o: u64) -> i32 {
+pub extern "C" fn objects_hash_code(o: u64) -> i32 {
     if o == 0 { 0 } else { hash_code(o) }
 }
 
@@ -1229,6 +1229,14 @@ pub fn builtins() -> Vec<Builtin> {
             size: 8,
             is_final: false,
             methods: vec![],
+        },
+        Builtin {
+            name: "java/lang/Record",
+            super_name: Some(object),
+            interfaces: &[],
+            size: 8,
+            is_final: false,
+            methods: vec![m("<init>", "()V", object_init as *const () as usize)],
         },
         Builtin {
             name: "java/lang/Throwable",

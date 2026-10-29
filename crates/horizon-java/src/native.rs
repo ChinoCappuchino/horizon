@@ -2268,6 +2268,271 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         Ok(true)
     }
 
+    /// A record's `equals`, `hashCode` or `toString` (`invokedynamic`
+    /// through ObjectMethods), as the JDK defines them, over its fields.
+    /// Whether it was one.
+    fn record_method(&mut self, insn: &Instruction, f: &Frame, i: usize) -> Result<bool, String> {
+        let me = |e: crate::classfile::Error| e.to_string();
+        let Operand::Constant(c) = insn.operand else {
+            return Ok(false);
+        };
+        let Some(Constant::InvokeDynamic(bsm, nat)) = self.class.constants.get(usize::from(c))
+        else {
+            return Ok(false);
+        };
+        let (method, desc) = self.class.name_and_type(*nat).map_err(me)?;
+        let (method, desc) = (method.to_owned(), desc.to_owned());
+        let bootstrap = self
+            .class
+            .bootstrap_methods()
+            .get(usize::from(*bsm))
+            .ok_or("a bad bootstrap method")?
+            .clone();
+        let Some(Constant::MethodHandle(_, r)) = self
+            .class
+            .constants
+            .get(usize::from(bootstrap.method_handle))
+        else {
+            return Ok(false);
+        };
+        let (bo, _, _) = self.class.member_ref(*r).map_err(me)?;
+        if bo != "java/lang/runtime/ObjectMethods" {
+            return Ok(false);
+        }
+        let mut args = bootstrap.arguments.iter();
+        let record = self
+            .class
+            .class_name(*args.next().ok_or("a record without its class")?)
+            .map_err(me)?
+            .to_owned();
+        let names = match self
+            .class
+            .constants
+            .get(usize::from(*args.next().ok_or("no names")?))
+        {
+            Some(Constant::String(u)) => self.class.utf8(*u).map_err(me)?.to_owned(),
+            _ => return Err("a record without its names".into()),
+        };
+        // The components: name, field offset, descriptor (from the getters).
+        let mut parts: Vec<(String, i32, String)> = Vec::new();
+        for (name, h) in names.split(';').filter(|n| !n.is_empty()).zip(args) {
+            let Some(Constant::MethodHandle(_, fr)) = self.class.constants.get(usize::from(*h))
+            else {
+                return Err("a record component without its getter".into());
+            };
+            let (owner, field, fdesc) = self.class.member_ref(*fr).map_err(me)?;
+            let (at, _) = self
+                .w
+                .layouts
+                .get(owner)
+                .and_then(|l| l.fields.get(field))
+                .copied()
+                .ok_or("a record field outside the classes")?;
+            parts.push((name.to_owned(), at, fdesc.to_owned()));
+        }
+        let d = f.stack.len();
+        let n = Method::parse(&desc).ok_or("a bad descriptor")?.params.len();
+        let base = d - n;
+        let this = self.get(base, types::I64);
+        self.null_check(this);
+        let flags = MemFlagsData::trusted();
+        let load = |s: &mut Self, obj: Value, at: i32, fdesc: &str| -> Value {
+            let t = desc_type(fdesc).unwrap_or(types::I64);
+            s.b.ins().load(t, flags, obj, at)
+        };
+        let result = match method.as_str() {
+            "toString" => {
+                // Name[a=1, b=x]: the simple name (after `/` and `$`).
+                let simple = record
+                    .rsplit(['/', '$'])
+                    .next()
+                    .unwrap_or(&record)
+                    .to_owned();
+                let sb = self
+                    .call_builtin(
+                        rt::concat::new as *const () as usize,
+                        "()Ljava/lang/Object;",
+                        false,
+                        &[],
+                    )?
+                    .ok_or("no builder")?;
+                let lit = |s: &mut Self, text: &str| -> Result<(), String> {
+                    let l = s.string(text);
+                    let l = s.b.ins().iconst(types::I64, l);
+                    s.call_builtin(
+                        rt::concat::append_string as *const () as usize,
+                        "(Ljava/lang/String;)Ljava/lang/Object;",
+                        true,
+                        &[sb, l],
+                    )?;
+                    Ok(())
+                };
+                lit(self, &format!("{simple}["))?;
+                for (k, (name, at, fdesc)) in parts.iter().enumerate() {
+                    lit(self, &format!("{}{name}=", if k > 0 { ", " } else { "" }))?;
+                    let v = load(self, this, *at, fdesc);
+                    let (fp, pdesc) = match fdesc.as_str() {
+                        "I" | "S" | "B" => (
+                            rt::concat::append_int as *const () as usize,
+                            "(I)Ljava/lang/Object;",
+                        ),
+                        "Z" => (
+                            rt::concat::append_bool as *const () as usize,
+                            "(Z)Ljava/lang/Object;",
+                        ),
+                        "C" => (
+                            rt::concat::append_char as *const () as usize,
+                            "(C)Ljava/lang/Object;",
+                        ),
+                        "J" => (
+                            rt::concat::append_long as *const () as usize,
+                            "(J)Ljava/lang/Object;",
+                        ),
+                        "F" => (
+                            rt::concat::append_float as *const () as usize,
+                            "(F)Ljava/lang/Object;",
+                        ),
+                        "D" => (
+                            rt::concat::append_double as *const () as usize,
+                            "(D)Ljava/lang/Object;",
+                        ),
+                        _ => (
+                            rt::concat::append_object as *const () as usize,
+                            "(Ljava/lang/Object;)Ljava/lang/Object;",
+                        ),
+                    };
+                    self.call_builtin(fp, pdesc, true, &[sb, v])?;
+                }
+                lit(self, "]")?;
+                self.call_builtin(
+                    rt::concat::finish as *const () as usize,
+                    "()Ljava/lang/String;",
+                    true,
+                    &[sb],
+                )?
+                .ok_or("no string")?
+            }
+            "hashCode" => {
+                // 31 * h + each component's hash, from 0.
+                let mut h = self.b.ins().iconst(types::I32, 0);
+                for (_, at, fdesc) in &parts {
+                    let v = load(self, this, *at, fdesc);
+                    let ph = self.primitive_hash(v, fdesc)?;
+                    let m = self.b.ins().imul_imm_s(h, 31);
+                    h = self.b.ins().iadd(m, ph);
+                }
+                h
+            }
+            "equals" => {
+                let other = self.get(base + 1, types::I64);
+                let id = self
+                    .w
+                    .ids
+                    .get(record.as_str())
+                    .copied()
+                    .ok_or("an unknown record")?;
+                let id = self.b.ins().iconst(types::I32, i64::from(id));
+                let same_class = self
+                    .host("host_is_instance", &[other, id])
+                    .ok_or("is_instance")?;
+                let out = self.b.create_block();
+                self.b.append_block_param(out, types::I32);
+                let mut ok = same_class;
+                // Each component, while all are equal so far.
+                for (_, at, fdesc) in &parts {
+                    let next = self.b.create_block();
+                    let fail = self.b.ins().iconst(types::I32, 0);
+                    self.b.ins().brif(ok, next, &[], out, &[fail.into()]);
+                    self.b.switch_to_block(next);
+                    let a = load(self, this, *at, fdesc);
+                    let b2 = load(self, other, *at, fdesc);
+                    ok = self.component_equals(a, b2, fdesc)?;
+                }
+                self.b.ins().jump(out, &[ok.into()]);
+                self.b.switch_to_block(out);
+                self.b.block_params(out)[0]
+            }
+            _ => return Err(format!("record method {method}")),
+        };
+        self.after_call(i)?;
+        let t =
+            desc_type(&Method::parse(&desc).ok_or("a bad descriptor")?.ret).unwrap_or(types::I32);
+        self.set(base, t, result);
+        Ok(true)
+    }
+
+    /// The hash of a component, as its wrapper's `hashCode` (or
+    /// `Objects.hashCode` for a reference).
+    fn primitive_hash(&mut self, v: Value, fdesc: &str) -> Result<Value, String> {
+        let ins = self.b.ins();
+        Ok(match fdesc {
+            "I" | "S" | "B" | "C" => v,
+            "Z" => {
+                let t = ins.iconst(types::I32, 1231);
+                let f = self.b.ins().iconst(types::I32, 1237);
+                self.b.ins().select(v, t, f)
+            }
+            "J" => {
+                let hi = ins.ushr_imm_s(v, 32);
+                let x = self.b.ins().bxor(v, hi);
+                self.b.ins().ireduce(types::I32, x)
+            }
+            "F" => self.float_bits(v, types::F32),
+            "D" => {
+                let bits = self.float_bits(v, types::F64);
+                let hi = self.b.ins().ushr_imm_s(bits, 32);
+                let x = self.b.ins().bxor(bits, hi);
+                self.b.ins().ireduce(types::I32, x)
+            }
+            _ => self
+                .call_builtin(
+                    rt::objects_hash_code as *const () as usize,
+                    "(Ljava/lang/Object;)I",
+                    false,
+                    &[v],
+                )?
+                .ok_or("no hash")?,
+        })
+    }
+
+    /// `floatToIntBits` / `doubleToLongBits`: the bits, every NaN the same.
+    fn float_bits(&mut self, v: Value, t: Type) -> Value {
+        let (it, canon) = if t == types::F32 {
+            (types::I32, 0x7fc0_0000i64)
+        } else {
+            (types::I64, 0x7ff8_0000_0000_0000i64)
+        };
+        let bits = self.b.ins().bitcast(it, MemFlagsData::new(), v);
+        let nan = self.b.ins().fcmp(FloatCC::Unordered, v, v);
+        let c = self.b.ins().iconst(it, canon);
+        self.b.ins().select(nan, c, bits)
+    }
+
+    /// Whether two component values are equal as a record compares them.
+    fn component_equals(&mut self, a: Value, b: Value, fdesc: &str) -> Result<Value, String> {
+        Ok(match fdesc {
+            "F" | "D" => {
+                let t = if fdesc == "F" { types::F32 } else { types::F64 };
+                let x = self.float_bits(a, t);
+                let y = self.float_bits(b, t);
+                let e = self.b.ins().icmp(IntCC::Equal, x, y);
+                self.b.ins().uextend(types::I32, e)
+            }
+            "I" | "S" | "B" | "C" | "Z" | "J" => {
+                let e = self.b.ins().icmp(IntCC::Equal, a, b);
+                self.b.ins().uextend(types::I32, e)
+            }
+            _ => self
+                .call_builtin(
+                    rt::objects_equals as *const () as usize,
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                    false,
+                    &[a, b],
+                )?
+                .ok_or("no equals")?,
+        })
+    }
+
     /// The object of string literal `text` (the same for each use).
     fn string(&mut self, text: &str) -> i64 {
         let mut strings = self.w.strings.borrow_mut();
@@ -2733,6 +2998,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             }
             0xB6..=0xB9 => return self.invoke(insn, f, i),
             0xBA if self.concat(insn, f, i)? => {}
+            0xBA if self.record_method(insn, f, i)? => {}
             0xBA => {
                 let site = self
                     .w
