@@ -415,6 +415,14 @@ pub fn port(
         log("no portable mod has its jar: nothing to carry over".into());
     } else {
         carry(work, resources, &only, log)?;
+        // Fork `afterwinter`: the content the mods register from their code
+        // (docs/java-compat/plan.md), through the Java compiler.
+        if let Some(resources) = resources {
+            match translate(work, resources, &only, log) {
+                Ok(n) => log(format!("{n} mods' content from their code")),
+                Err(e) => log(format!("content from the mods' code skipped: {e}")),
+            }
+        }
     }
     Ok((fetched, report(work, log)?))
 }
