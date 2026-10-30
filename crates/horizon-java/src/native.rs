@@ -136,19 +136,29 @@ const JDK_EXCEPTIONS: &[&str] = &[
     "java/util/IllegalFormatException",
 ];
 
-extern "C" fn host_catches(exc: u64, catch: u32) -> u32 {
+/// The program's type tables, for its type tests and catch clauses (the
+/// compiled code passes their address: any thread may test).
+struct TypeTables {
+    /// Each class id's ancestors' ids (itself, superclasses, interfaces), sorted.
+    ancestors: Vec<Vec<u32>>,
+    /// Each class id's ancestors by name, the JDK's exception classes too.
+    names: Vec<HashSet<String>>,
+    /// The classes `catch` clauses name, by index.
+    catches: Vec<String>,
+}
+
+extern "C" fn host_catches(exc: u64, catch: u32, tables: *const TypeTables) -> u32 {
     if exc == 0 {
         return 0;
     }
+    // SAFETY: the program's tables, alive while its code runs.
+    let tables = unsafe { &*tables };
     // SAFETY: as in host_is_instance.
     let id = unsafe { *(*(exc as *const *const u64)) } as usize;
-    CATCHES.with(|c| {
-        let c = c.borrow();
-        let Some(name) = c.get(catch as usize) else {
-            return 0;
-        };
-        ANCESTOR_NAMES.with(|a| a.borrow().get(id).is_some_and(|set| set.contains(name)) as u32)
-    })
+    let Some(name) = tables.catches.get(catch as usize) else {
+        return 0;
+    };
+    tables.names.get(id).is_some_and(|set| set.contains(name)) as u32
 }
 
 extern "C" fn host_missing() {
@@ -166,6 +176,7 @@ pub struct Native {
     // Memory the code points at, kept alive.
     /// The heap, and the context of the thread that compiled the code.
     main: Box<heap::Context>,
+    _types: Box<TypeTables>,
     heap: Box<heap::Heap>,
     _statics: Vec<u64>,
     _vtables: Vec<Vec<u64>>,
@@ -238,33 +249,19 @@ extern "C" fn host_fmodf(a: f32, b: f32) -> f32 {
 }
 /// Whether the class with vtable `vt` is `target` or a subclass: the vtable
 /// holds the class id, then the selectors; the ancestor sets are below.
-extern "C" fn host_is_instance(obj: u64, target: u32) -> u32 {
+extern "C" fn host_is_instance(obj: u64, target: u32, tables: *const TypeTables) -> u32 {
     if obj == 0 {
         return 0;
     }
     // SAFETY: obj is an object the compiled code made: its first word is
     // its vtable, whose first word is its class id.
     let id = unsafe { *(*(obj as *const *const u64)) } as u32;
-    ANCESTORS.with(|a| {
-        a.borrow()
-            .get(id as usize)
-            .is_some_and(|set| set.contains(&target)) as u32
-    })
-}
-
-thread_local! {
-    /// Each class id's ancestors by name, the JDK's exception classes too.
-    static ANCESTOR_NAMES: std::cell::RefCell<Vec<HashSet<String>>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
-    /// The classes `catch` clauses name, by index.
-    static CATCHES: std::cell::RefCell<Vec<String>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
-    /// Each class id's ancestors (itself, superclasses, interfaces), by id.
-    static ANCESTORS: std::cell::RefCell<Vec<HashSet<u32>>> = const {
-        std::cell::RefCell::new(Vec::new())
-    };
+    // SAFETY: the program's tables, alive while its code runs.
+    let tables = unsafe { &*tables };
+    tables
+        .ancestors
+        .get(id as usize)
+        .is_some_and(|a| a.binary_search(&target).is_ok()) as u32
 }
 
 impl Native {
@@ -518,7 +515,14 @@ impl Native {
             names_of[builtin_base + k] = chain(n);
         }
         let names_by_id = names_of.clone();
-        ANCESTOR_NAMES.with(|a| *a.borrow_mut() = names_of);
+        // The type tables the compiled code tests against (their address
+        // is baked into it).
+        let mut types = Box::new(TypeTables {
+            ancestors: Vec::new(),
+            names: names_of,
+            catches: Vec::new(),
+        });
+        let types_at = &*types as *const TypeTables as i64;
         // Ancestors, for instanceof and checkcast: by id, built-ins too.
         let mut ancestors: Vec<HashSet<u32>> = vec![HashSet::new(); builtin_base + builtins.len()];
         for b in &builtins {
@@ -544,7 +548,14 @@ impl Native {
                 .collect();
             ancestors[ids[n] as usize] = set;
         }
-        ANCESTORS.with(|a| *a.borrow_mut() = ancestors);
+        types.ancestors = ancestors
+            .into_iter()
+            .map(|set| {
+                let mut ids: Vec<u32> = set.into_iter().collect();
+                ids.sort_unstable();
+                ids
+            })
+            .collect();
 
         // Statics: 8 bytes per static field, then an init flag per class.
         let mut statics_at: HashMap<(String, String), (i32, Type)> = HashMap::new();
@@ -582,6 +593,8 @@ impl Native {
             false
         };
 
+        // Each function's machine code size (HORIZON_NATIVE_PERFMAP).
+        let mut code_sizes: Vec<(FuncId, u32)> = Vec::new();
         // The heap, shared by every thread that runs the code; each has a
         // context (this one's made at the end).
         let heap = Box::new(heap::Heap::reserve(heap::RESERVE));
@@ -637,12 +650,12 @@ impl Native {
             ("host_fmodf", vec![types::F32, types::F32], Some(types::F32)),
             (
                 "host_is_instance",
-                vec![types::I64, types::I32],
+                vec![types::I64, types::I32, types::I64],
                 Some(types::I32),
             ),
             (
                 "host_catches",
-                vec![types::I64, types::I32],
+                vec![types::I64, types::I32, types::I64],
                 Some(types::I32),
             ),
             ("host_missing", vec![], None),
@@ -695,6 +708,7 @@ impl Native {
             statics_at: &statics_at,
             statics_base,
             flags_at,
+            types_at,
             ptr,
             lambdas: &lambdas,
             lambda_at: &lambda_at,
@@ -746,7 +760,7 @@ impl Native {
                 module.clear_context(&mut ctx);
             }
         }
-        CATCHES.with(|c| *c.borrow_mut() = world.catches.borrow().clone());
+        types.catches = world.catches.borrow().clone();
         // The lambdas' bridges: captured values and the interface method's
         // arguments to the target.
         for (i, l) in lambdas.iter().enumerate() {
@@ -821,6 +835,10 @@ impl Native {
             module
                 .define_function(id, &mut ctx)
                 .map_err(|e| format!("{name}: {e:?}"))?;
+            code_sizes.push((
+                id,
+                ctx.compiled_code().map_or(0, |c| c.code_info().total_size),
+            ));
             module.clear_context(&mut ctx);
         }
         // The init functions.
@@ -878,6 +896,10 @@ impl Native {
             module
                 .define_function(id, &mut ctx)
                 .map_err(|e| format!("init {class}: {e:?}"))?;
+            code_sizes.push((
+                id,
+                ctx.compiled_code().map_or(0, |c| c.code_info().total_size),
+            ));
             module.clear_context(&mut ctx);
         }
         // The runtime library's instance methods as vtable entries: compiled
@@ -913,6 +935,10 @@ impl Native {
                 module
                     .define_function(id, &mut ctx)
                     .map_err(|e| format!("thunk {}.{}: {e:?}", b.name, m.name))?;
+                code_sizes.push((
+                    id,
+                    ctx.compiled_code().map_or(0, |c| c.code_info().total_size),
+                ));
                 module.clear_context(&mut ctx);
                 thunks.insert((m.f, m.desc), id);
             }
@@ -953,10 +979,28 @@ impl Native {
             module
                 .define_function(id, &mut ctx)
                 .map_err(|e| format!("absent {mname}: {e:?}"))?;
+            code_sizes.push((
+                id,
+                ctx.compiled_code().map_or(0, |c| c.code_info().total_size),
+            ));
             module.clear_context(&mut ctx);
             absent.insert(sel, id);
         }
         module.finalize_definitions().map_err(|e| e.to_string())?;
+        // HORIZON_NATIVE_PERFMAP=1: /tmp/perf-<pid>.map, where `perf`
+        // finds the compiled functions' names.
+        if std::env::var_os("HORIZON_NATIVE_PERFMAP").is_some() {
+            use std::io::Write;
+            let path = format!("/tmp/perf-{}.map", std::process::id());
+            if let Ok(f) = std::fs::File::create(&path) {
+                let mut f = std::io::BufWriter::new(f);
+                for &(id, size) in &code_sizes {
+                    let at = module.get_finalized_function(id) as usize;
+                    let name = module.declarations().get_function_decl(id).linkage_name(id);
+                    let _ = writeln!(f, "{at:x} {size:x} {name}");
+                }
+            }
+        }
         let thunk = |m: &rt::Method| -> u64 {
             thunks
                 .get(&(m.f, m.desc))
@@ -1162,6 +1206,7 @@ impl Native {
             unsupported,
             main,
             heap,
+            _types: types,
             _statics: statics,
             _vtables: vtables,
             _singletons: singletons,
@@ -1448,6 +1493,8 @@ struct World<'a> {
     statics_at: &'a HashMap<(String, String), (i32, Type)>,
     statics_base: i64,
     flags_at: usize,
+    /// The program's type tables (`TypeTables`), by address.
+    types_at: i64,
     ptr: Type,
     lambdas: &'a [LambdaSite],
     /// Each lambda site, by class, method and offset.
@@ -2584,8 +2631,9 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         }
                     };
                     let idx = self.b.ins().iconst(types::I32, index as i64);
+                    let types = self.b.ins().iconst(types::I64, self.w.types_at);
                     let yes = self
-                        .host("host_catches", &[exc, idx])
+                        .host("host_catches", &[exc, idx, types])
                         .ok_or("host_catches")?;
                     let next = self.b.create_block();
                     self.b.ins().brif(yes, take, &[], next, &[]);
@@ -2954,10 +3002,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                     .get(record.as_str())
                     .copied()
                     .ok_or("an unknown record")?;
-                let id = self.b.ins().iconst(types::I32, i64::from(id));
-                let same_class = self
-                    .host("host_is_instance", &[other, id])
-                    .ok_or("is_instance")?;
+                let same_class = self.instance_test(other, &record, id)?;
                 let out = self.b.create_block();
                 self.b.append_block_param(out, types::I32);
                 let mut ok = same_class;
@@ -3180,6 +3225,45 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
     }
 
     /// Bump allocation of `size` bytes (zeroed), the header set to `header`.
+    /// Whether `obj` is an instance of `class` (id `id`), 0 for null: its
+    /// vtable compared with the class's own first (no call when it is that
+    /// class), then the program's type tables.
+    fn instance_test(&mut self, obj: Value, class: &str, id: u32) -> Result<Value, String> {
+        let i32t = types::I32;
+        let zero = self.b.ins().iconst(i32t, 0);
+        let one = self.b.ins().iconst(i32t, 1);
+        let done = self.b.create_block();
+        self.b.append_block_param(done, i32t);
+        let present = self.b.create_block();
+        self.b.ins().brif(obj, present, &[], done, &[zero.into()]);
+        self.b.switch_to_block(present);
+        self.b.seal_block(present);
+        if let Some(layout) = self.w.layouts.get(class) {
+            let vt = self
+                .b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), obj, 0);
+            let same = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, vt, layout.vtable as i64);
+            let slow = self.b.create_block();
+            self.b.set_cold_block(slow);
+            self.b.ins().brif(same, done, &[one.into()], slow, &[]);
+            self.b.switch_to_block(slow);
+            self.b.seal_block(slow);
+        }
+        let idv = self.b.ins().iconst(i32t, i64::from(id));
+        let types = self.b.ins().iconst(types::I64, self.w.types_at);
+        let r = self
+            .host("host_is_instance", &[obj, idv, types])
+            .ok_or("host_is_instance")?;
+        self.b.ins().jump(done, &[r.into()]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(self.b.block_params(done)[0])
+    }
+
     /// A synchronized method lets go of its monitor (before it returns).
     fn leave_monitor(&mut self) -> Result<(), String> {
         if let Some(o) = self.sync_on {
@@ -3721,8 +3805,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 // Arrays and classes outside the closed world: not tested yet.
                 let r = match self.w.ids.get(class.as_str()) {
                     Some(&id) if !class.starts_with('[') => {
-                        let id = self.b.ins().iconst(i32t, i64::from(id));
-                        self.host("host_is_instance", &[obj, id])
+                        Some(self.instance_test(obj, &class, id)?)
                     }
                     _ => None,
                 };

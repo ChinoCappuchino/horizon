@@ -208,4 +208,31 @@ public class Threads {
         int fixedOk = fixedMade.get() >= 1 && fixedMade.get() <= 3 ? 1 : 0;
         return done.get() * 1000L + threadsOk * 100 + fixedOk * 10 + (first && second ? 1 : 0);
     }
+
+    /** Type tests and catch clauses on another thread: each check one bit. */
+    public static int typesOnThreads() throws InterruptedException {
+        int[] out = new int[1];
+        Thread t = new Thread(() -> {
+            Object counter = new Counter();
+            Object text = "text";
+            int r = 0;
+            if (counter instanceof Counter) r |= 1;
+            if (!(text instanceof Counter)) r |= 2;
+            try {
+                throw new IllegalStateException("x");
+            } catch (IllegalStateException e) {
+                r |= 4;
+            }
+            try {
+                Counter bad = (Counter) text;
+                r |= bad.n;
+            } catch (ClassCastException e) {
+                r |= 8;
+            }
+            out[0] = r;
+        });
+        t.start();
+        t.join();
+        return out[0];
+    }
 }

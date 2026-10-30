@@ -283,3 +283,12 @@ fn a_programs_own_list_gets_the_jdks_skeleton_methods() {
         !bits & ((1 << 4) - 1)
     );
 }
+
+#[test]
+fn type_tests_and_catches_work_on_every_thread() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/Threads.typesOnThreads()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    assert_eq!(f(native.context()), 0b1111);
+}
