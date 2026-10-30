@@ -5,7 +5,7 @@
 use horizon_java::{ClassFile, heap::Context, native::Native};
 use std::{path::PathBuf, process::Command, sync::OnceLock};
 
-/// `t/NativeOps` and its nested classes, built once with `javac` (the tests
+/// `t/NativeOps`, `t/Threads` and their nested classes, built once with `javac` (the tests
 /// run side by side: one build, not one each into the same folder); None
 /// without a `javac`.
 fn classes() -> Option<&'static [Vec<u8>]> {
@@ -18,6 +18,7 @@ fn classes() -> Option<&'static [Vec<u8>]> {
                 .args(["--release", "21", "-d"])
                 .arg(&out)
                 .arg(src.join("t/NativeOps.java"))
+                .arg(src.join("t/Threads.java"))
                 .status();
             match status {
                 Ok(s) if s.success() => {}
@@ -30,11 +31,8 @@ fn classes() -> Option<&'static [Vec<u8>]> {
             let mut classes = Vec::new();
             for e in std::fs::read_dir(out.join("t")).unwrap() {
                 let p = e.unwrap().path();
-                if p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("NativeOps")
-                {
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                if name.starts_with("NativeOps") || name.starts_with("Threads") {
                     classes.push(std::fs::read(&p).unwrap());
                 }
             }
@@ -114,4 +112,35 @@ fn threads_allocate_side_by_side_each_in_its_own_buffer() {
     // Many buffers were taken, and every thread let go of its context.
     assert!(native.heap().used() - before > 8 * horizon_java::heap::CHUNK);
     assert_eq!(native.heap().threads(), 1);
+}
+
+#[test]
+fn java_threads_share_monitors_atomics_and_class_initialization() {
+    let Some(native) = native_ops() else { return };
+    assert!(native.unsupported.is_empty(), "{:?}", native.unsupported);
+    let ctx = native.context();
+    let get = |name: &str| native.function(name).unwrap_or_else(|| panic!("no {name}"));
+    // SAFETY: the compiled methods have these signatures.
+    let two: extern "C" fn(*mut Context, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(get("t/Threads.synchronizedCounter(II)I")) };
+    assert_eq!(two(ctx, 8, 20_000), 160_000, "synchronized methods");
+    let blocks: extern "C" fn(*mut Context, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(get("t/Threads.synchronizedBlocks(II)I")) };
+    assert_eq!(blocks(ctx, 8, 20_000), 160_000, "synchronized blocks");
+    let atomics: extern "C" fn(*mut Context, i32, i32) -> i32 =
+        unsafe { std::mem::transmute(get("t/Threads.atomics(II)I")) };
+    assert_eq!(atomics(ctx, 8, 20_000), 160_000, "AtomicInteger");
+    let subclass: extern "C" fn(*mut Context, i32) -> i64 =
+        unsafe { std::mem::transmute(get("t/Threads.subclass(I)J")) };
+    assert_eq!(subclass(ctx, 1000), 500_500, "a Thread subclass's run()");
+    let handoff: extern "C" fn(*mut Context, i32) -> i64 =
+        unsafe { std::mem::transmute(get("t/Threads.handoff(I)J")) };
+    assert_eq!(handoff(ctx, 2000), 2000 * 2001 / 2, "wait and notifyAll");
+    let race: extern "C" fn(*mut Context, i32) -> i32 =
+        unsafe { std::mem::transmute(get("t/Threads.initRace(I)I")) };
+    assert_eq!(
+        race(ctx, 8),
+        8 * 42 + 1000,
+        "one initialization, seen by all"
+    );
 }

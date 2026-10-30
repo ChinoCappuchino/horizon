@@ -38,6 +38,7 @@ const STATIC: u16 = 0x0008;
 const INTERFACE: u16 = 0x0200;
 const ABSTRACT: u16 = 0x0400;
 const PRIVATE: u16 = 0x0002;
+const SYNCHRONIZED: u16 = 0x0020;
 const OBJECT: &str = "java/lang/Object";
 /// The trap of code the prototype does not compile.
 const UNSUPPORTED: TrapCode = TrapCode::unwrap_user(1);
@@ -68,6 +69,7 @@ fn jdk_super(class: &str) -> Option<&'static str> {
         | "java/lang/CloneNotSupportedException" => "java/lang/Exception",
         "java/lang/IllegalStateException"
         | "java/lang/IllegalArgumentException"
+        | "java/lang/IllegalMonitorStateException"
         | "java/lang/NullPointerException"
         | "java/lang/UnsupportedOperationException"
         | "java/lang/IndexOutOfBoundsException"
@@ -80,7 +82,9 @@ fn jdk_super(class: &str) -> Option<&'static str> {
         | "java/util/ConcurrentModificationException"
         | "java/util/NoSuchElementException"
         | "java/io/UncheckedIOException" => "java/lang/RuntimeException",
-        "java/lang/NumberFormatException" => "java/lang/IllegalArgumentException",
+        "java/lang/NumberFormatException" | "java/lang/IllegalThreadStateException" => {
+            "java/lang/IllegalArgumentException"
+        }
         "java/lang/ArrayIndexOutOfBoundsException"
         | "java/lang/StringIndexOutOfBoundsException" => "java/lang/IndexOutOfBoundsException",
         "java/lang/ClassNotFoundException" | "java/lang/NoSuchMethodException" => {
@@ -125,6 +129,8 @@ const JDK_EXCEPTIONS: &[&str] = &[
     "java/lang/AssertionError",
     "java/lang/StackOverflowError",
     "java/lang/OutOfMemoryError",
+    "java/lang/IllegalMonitorStateException",
+    "java/lang/IllegalThreadStateException",
 ];
 
 extern "C" fn host_catches(exc: u64, catch: u32) -> u32 {
@@ -808,8 +814,29 @@ impl Native {
             let thread = b.block_params(e)[0];
             let flag = statics_base + 8 * (flags_at + ids[class.as_str()] as usize) as i64;
             let at = b.ins().iconst(types::I64, flag);
-            let one = b.ins().iconst(types::I64, 1);
-            b.ins().store(MemFlagsData::trusted(), one, at, 0);
+            // One thread runs it, the others wait until it has (the flag is
+            // set by `class_init_end`); the thread running it passes.
+            let raw = |module: &JITModule, params: &[Type], ret: Option<Type>| {
+                let mut sig = module.make_signature();
+                sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
+                sig.returns.extend(ret.map(AbiParam::new));
+                sig
+            };
+            let begin_sig = b.import_signature(raw(&module, &[types::I64], Some(types::I32)));
+            let begin = b.ins().iconst(
+                types::I64,
+                rt::threads::class_init_begin as *const () as i64,
+            );
+            let call = b.ins().call_indirect(begin_sig, begin, &[at]);
+            let mine = b.inst_results(call)[0];
+            let run = b.create_block();
+            let skip = b.create_block();
+            b.ins().brif(mine, run, &[], skip, &[]);
+            b.switch_to_block(skip);
+            b.seal_block(skip);
+            b.ins().return_(&[]);
+            b.switch_to_block(run);
+            b.seal_block(run);
             if let Some(s) = superclass(class)
                 && let Some(&sid) = inits.get(s)
             {
@@ -821,6 +848,11 @@ impl Native {
                 let f = module.declare_func_in_func(cid, b.func);
                 b.ins().call(f, &[thread]);
             }
+            let end_sig = b.import_signature(raw(&module, &[types::I64], None));
+            let end = b
+                .ins()
+                .iconst(types::I64, rt::threads::class_init_end as *const () as i64);
+            b.ins().call_indirect(end_sig, end, &[at]);
             b.ins().return_(&[]);
             b.finalize(module.target_config());
             module
@@ -2081,6 +2113,8 @@ struct MethodGen<'a, 'b, 'f> {
     cur: usize,
     /// This thread's context: the function's hidden first parameter.
     ctx: Value,
+    /// A synchronized method: the object whose monitor it holds.
+    sync_on: Option<Value>,
 }
 
 impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
@@ -2141,6 +2175,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             cur: 0,
             // (Set to the entry block's first parameter by `run`.)
             ctx: Value::from_u32(u32::MAX),
+            sync_on: None,
         })
     }
 
@@ -2215,6 +2250,20 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 1
             };
             k += 1;
+        }
+        // A synchronized method holds its object's (or class's) monitor
+        // until it returns or throws.
+        if self.method.access & SYNCHRONIZED != 0 {
+            let o = if self.method.access & STATIC != 0 {
+                let class = self.owner.to_owned();
+                let at = self.class_object(&class);
+                self.b.ins().iconst(types::I64, at)
+            } else {
+                params[1]
+            };
+            let enter = rt::threads::monitor_enter as *const () as usize;
+            self.call_builtin(enter, "(Ljava/lang/Object;)V", false, &[o])?;
+            self.sync_on = Some(o);
         }
         // A static method makes sure its class is initialized.
         if self.method.access & STATIC != 0 && self.method.name != "<clinit>" {
@@ -2485,6 +2534,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                     .map(|r| r.value_type)
                     .collect();
                 let zeros: Vec<Value> = rets.into_iter().map(|t| zero(&mut self.b, t)).collect();
+                self.leave_monitor()?;
                 self.b.ins().return_(&zeros);
             }
         }
@@ -3048,6 +3098,15 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
     }
 
     /// Bump allocation of `size` bytes (zeroed), the header set to `header`.
+    /// A synchronized method lets go of its monitor (before it returns).
+    fn leave_monitor(&mut self) -> Result<(), String> {
+        if let Some(o) = self.sync_on {
+            let exit = rt::threads::monitor_exit as *const () as usize;
+            self.call_builtin(exit, "(Ljava/lang/Object;)V", false, &[o])?;
+        }
+        Ok(())
+    }
+
     /// A compiled method's arguments: this thread's context first.
     fn with_ctx(&self, args: &[Value]) -> Vec<Value> {
         std::iter::once(self.ctx)
@@ -3347,6 +3406,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         self.b.ins().jump(to, &[v.into()]);
                     }
                     None => {
+                        self.leave_monitor()?;
                         self.b.ins().return_(&[v]);
                     }
                 }
@@ -3358,6 +3418,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         self.b.ins().jump(to, &[]);
                     }
                     None => {
+                        self.leave_monitor()?;
                         self.b.ins().return_(&[]);
                     }
                 }
@@ -3559,7 +3620,20 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                     self.set(d - 1, i32t, r);
                 }
             }
-            0xC2 | 0xC3 => {}
+            // synchronized blocks: the object's monitor.
+            0xC2 | 0xC3 => {
+                let o = self.get(d - 1, i64t);
+                self.null_check(o);
+                let f = if op == 0xC2 {
+                    rt::threads::monitor_enter as *const () as usize
+                } else {
+                    rt::threads::monitor_exit as *const () as usize
+                };
+                self.call_builtin(f, "(Ljava/lang/Object;)V", false, &[o])?;
+                if op == 0xC3 {
+                    self.after_call(i)?;
+                }
+            }
             _ => {
                 self.stop(format!("opcode {op:#x}"));
                 return Ok(true);

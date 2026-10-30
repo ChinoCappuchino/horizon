@@ -20,6 +20,7 @@ use std::{
 
 mod collections;
 mod logging;
+pub mod threads;
 pub use collections::array_clone;
 
 /// A built-in class.
@@ -1669,8 +1670,12 @@ pub fn builtins() -> Vec<Builtin> {
             methods,
         });
     }
+    if let Some(object) = out.iter_mut().find(|b| b.name == "java/lang/Object") {
+        object.methods.extend(threads::object_methods());
+    }
     out.extend(collections::builtins());
     out.extend(logging::builtins());
+    out.extend(threads::builtins());
     out
 }
 
