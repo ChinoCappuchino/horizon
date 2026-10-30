@@ -3430,6 +3430,17 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 };
                 let (owner, name, _) = self.class.member_ref(c).map_err(me)?;
                 let Some((declaring, at, t)) = self.w.static_field(owner, name) else {
+                    // A JDK constant the runtime library provides.
+                    if op == 0xB2
+                        && let Some((f, desc)) = rt::static_getter(owner, name)
+                    {
+                        let t = Method::parse(desc)
+                            .and_then(|m| desc_type(&m.ret))
+                            .ok_or("a bad getter")?;
+                        let v = self.call_builtin(f, desc, false, &[])?.ok_or("no value")?;
+                        self.set(d, t, v);
+                        return Ok(false);
+                    }
                     self.stop(format!("static field of {owner}"));
                     return Ok(true);
                 };

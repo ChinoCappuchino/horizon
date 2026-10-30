@@ -733,13 +733,15 @@ extern "C" fn uoe_remove(_m: u64, _k: u64) -> u64 {
     0
 }
 
-/// An object the runtime makes once.
-fn once(name: &'static str, make: impl FnOnce() -> u64) -> u64 {
-    if let Some(&o) = rt().once.lock().unwrap().get(name) {
+/// An object the runtime makes once (by one thread: the others wait for
+/// it, and every caller gets the same object). `make` must not call `once`.
+pub(super) fn once(name: &'static str, make: impl FnOnce() -> u64) -> u64 {
+    let mut made = rt().once.lock().unwrap();
+    if let Some(&o) = made.get(name) {
         return o;
     }
     let o = make();
-    rt().once.lock().unwrap().insert(name, o);
+    made.insert(name, o);
     o
 }
 

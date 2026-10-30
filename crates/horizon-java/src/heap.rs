@@ -177,6 +177,7 @@ impl Memory {
         let fixed_flags = flags;
         let at = unsafe { libc::mmap(BASE as *mut _, len, prot, fixed_flags, -1, 0) };
         if at != libc::MAP_FAILED && at as u64 == BASE {
+            leave_out_of_core_dumps(at, len);
             return (Memory { at, size: len }, BASE, true);
         }
         if at != libc::MAP_FAILED {
@@ -186,6 +187,7 @@ impl Memory {
         // SAFETY: as above, anywhere.
         let at = unsafe { libc::mmap(std::ptr::null_mut(), len, prot, flags, -1, 0) };
         assert!(at != libc::MAP_FAILED, "no address space for the heap");
+        leave_out_of_core_dumps(at, len);
         (Memory { at, size: len }, at as u64, false)
     }
 
@@ -195,6 +197,19 @@ impl Memory {
         let base = bytes.as_ptr() as u64;
         (Memory { _bytes: bytes }, base, false)
     }
+}
+
+/// A crash's core dump without the heap: the system's crash handler would
+/// read through the whole reservation (tens of GB) to write it.
+#[cfg(unix)]
+fn leave_out_of_core_dumps(at: *mut libc::c_void, len: usize) {
+    #[cfg(target_os = "linux")]
+    // SAFETY: advice on the mapping just made.
+    unsafe {
+        libc::madvise(at, len, libc::MADV_DONTDUMP);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (at, len);
 }
 
 #[cfg(unix)]

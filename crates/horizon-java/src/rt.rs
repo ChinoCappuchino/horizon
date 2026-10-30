@@ -20,6 +20,8 @@ use std::{
 
 mod collections;
 mod logging;
+mod system;
+pub use system::static_getter;
 pub mod threads;
 pub use collections::array_clone;
 
@@ -1676,6 +1678,13 @@ pub fn builtins() -> Vec<Builtin> {
     out.extend(collections::builtins());
     out.extend(logging::builtins());
     out.extend(threads::builtins());
+    out.extend(system::builtins());
+    if let Some(system) = out.iter_mut().find(|b| b.name == "java/lang/System") {
+        system.methods.extend(system::system_methods());
+    }
+    if let Some(math) = out.iter_mut().find(|b| b.name == "java/lang/Math") {
+        math.methods.extend(system::math_methods());
+    }
     out
 }
 
