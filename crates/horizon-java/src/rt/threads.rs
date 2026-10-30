@@ -227,7 +227,7 @@ pub(super) fn named(t: u64, name: u64) {
 extern "C" fn thread_init(t: u64) {
     named(t, 0);
 }
-extern "C" fn thread_init_target(t: u64, target: u64) {
+pub(super) extern "C" fn thread_init_target(t: u64, target: u64) {
     set_word(t, T_TARGET, target);
     named(t, 0);
 }
@@ -340,6 +340,11 @@ extern "C" fn thread_is_alive(t: u64) -> i32 {
         .get(&t)
         .is_some_and(|s| !*s.finished.lock().unwrap())
         .into()
+}
+
+/// This thread's `Thread` object.
+pub(super) fn current() -> u64 {
+    thread_current()
 }
 
 extern "C" fn thread_current() -> u64 {

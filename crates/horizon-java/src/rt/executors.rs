@@ -22,12 +22,20 @@ use std::{
 const POOL: &str = "java/util/concurrent/ForkJoinPool";
 const WORKER: &str = "java/util/concurrent/ForkJoinWorkerThread";
 const TASK: &str = "horizon/rt/PoolTask";
+const EXECUTOR: &str = "java/util/concurrent/ThreadPoolExecutor";
+const LOOP: &str = "horizon/rt/PoolLoop";
 
 struct Pool {
     number: u64,
+    /// The most workers it runs.
     parallelism: usize,
+    /// A ForkJoinPool's worker factory; a thread pool's `ThreadFactory`.
     factory: u64,
     handler: u64,
+    /// A thread pool (`Executors`): workers are plain threads, started when
+    /// a task finds none idle.
+    plain: bool,
+    idle: std::sync::atomic::AtomicUsize,
     queue: Mutex<VecDeque<u64>>,
     work: Condvar,
     shutdown: AtomicBool,
@@ -51,6 +59,10 @@ fn pool(p: u64) -> Arc<Pool> {
 }
 
 fn make_pool(p: u64, parallelism: i32, factory: u64, handler: u64) {
+    make(p, parallelism, factory, handler, false);
+}
+
+fn make(p: u64, parallelism: i32, factory: u64, handler: u64, plain: bool) {
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let state = Arc::new(Pool {
         number: POOL_NUMBERS.fetch_add(1, Ordering::Relaxed),
@@ -61,6 +73,8 @@ fn make_pool(p: u64, parallelism: i32, factory: u64, handler: u64) {
         },
         factory,
         handler,
+        plain,
+        idle: std::sync::atomic::AtomicUsize::new(0),
         queue: Mutex::new(VecDeque::new()),
         work: Condvar::new(),
         shutdown: AtomicBool::new(false),
@@ -111,9 +125,25 @@ fn new_worker(p: u64, state: &Pool) -> u64 {
     w
 }
 
-/// Starts the pool's workers (on its first task).
+/// Starts the pool's workers: a ForkJoinPool's all on its first task, a
+/// thread pool's one when a task finds none idle.
 fn start_workers(p: u64, state: &Pool) {
     let mut started = state.started.lock().unwrap();
+    if state.plain {
+        if state.idle.load(Ordering::Acquire) == 0 && *started < state.parallelism {
+            let lp = alloc(16, vt(LOOP));
+            // SAFETY: a fresh PoolLoop.
+            unsafe { super::set_word(lp, 8, p) };
+            let t = plain_thread(state, lp);
+            if t == 0 || pending() {
+                return;
+            }
+            *started += 1;
+            *state.live.lock().unwrap() += 1;
+            threads::thread_start(t);
+        }
+        return;
+    }
     while *started < state.parallelism {
         let w = new_worker(p, state);
         if w == 0 || pending() {
@@ -326,9 +356,47 @@ fn call_void(o: u64, nd: &str, args: &[u64]) {
 
 /// `ForkJoinWorkerThread.run()`: the pool's tasks until it shuts down.
 extern "C" fn worker_run(w: u64) {
-    let p = worker_pool(w);
-    let state = pool(p);
+    let state = pool(worker_pool(w));
     call_void(w, "onStart ()V", &[]);
+    serve(&state, w);
+    call_void(w, "onTermination (Ljava/lang/Throwable;)V", &[0]);
+    worker_ended(&state);
+}
+
+/// A thread pool's worker loop (`PoolLoop.run()`, on a thread its factory made).
+extern "C" fn loop_run(lp: u64) {
+    // SAFETY: lp is a PoolLoop.
+    let state = pool(unsafe { word(lp, 8) });
+    serve(&state, threads::current());
+    worker_ended(&state);
+}
+
+fn worker_ended(state: &Pool) {
+    let mut live = state.live.lock().unwrap();
+    *live -= 1;
+    state.ended.notify_all();
+}
+
+/// The thread a thread pool's worker runs on: its `ThreadFactory`'s, or a
+/// plain one.
+fn plain_thread(state: &Pool, lp: u64) -> u64 {
+    if state.factory != 0
+        && let Some(f) = method(
+            state.factory,
+            "newThread (Ljava/lang/Runnable;)Ljava/lang/Thread;",
+        )
+    {
+        // SAFETY: (receiver, Runnable) -> Thread.
+        let f: extern "C" fn(*mut Context, u64, u64) -> u64 = unsafe { std::mem::transmute(f) };
+        return f(ctx(), state.factory, lp);
+    }
+    let t = alloc(threads::THREAD_SIZE as usize, vt("java/lang/Thread"));
+    threads::thread_init_target(t, lp);
+    t
+}
+
+/// Runs the pool's tasks on worker `w` until it shuts down.
+fn serve(state: &Pool, w: u64) {
     loop {
         let task = {
             let mut queue = state.queue.lock().unwrap();
@@ -339,7 +407,9 @@ extern "C" fn worker_run(w: u64) {
                 if state.shutdown.load(Ordering::Acquire) {
                     break None;
                 }
+                state.idle.fetch_add(1, Ordering::AcqRel);
                 queue = state.work.wait(queue).unwrap();
+                state.idle.fetch_sub(1, Ordering::AcqRel);
             }
         };
         let Some(task) = task else { break };
@@ -363,10 +433,34 @@ extern "C" fn worker_run(w: u64) {
             unsafe { (*ctx()).exception = 0 };
         }
     }
-    call_void(w, "onTermination (Ljava/lang/Throwable;)V", &[0]);
-    let mut live = state.live.lock().unwrap();
-    *live -= 1;
-    state.ended.notify_all();
+}
+
+// ---- Executors -----------------------------------------------------------------
+
+fn new_executor(max: i32, factory: u64) -> u64 {
+    let p = alloc(16, vt(EXECUTOR));
+    make(p, max, factory, 0, true);
+    p
+}
+/// Unbounded in the JDK; here at most this many threads at once.
+const CACHED: i32 = 1024;
+extern "C" fn executors_cached() -> u64 {
+    new_executor(CACHED, 0)
+}
+extern "C" fn executors_cached_with(factory: u64) -> u64 {
+    new_executor(CACHED, factory)
+}
+extern "C" fn executors_fixed(n: i32) -> u64 {
+    new_executor(n.max(1), 0)
+}
+extern "C" fn executors_fixed_with(n: i32, factory: u64) -> u64 {
+    new_executor(n.max(1), factory)
+}
+extern "C" fn executors_single() -> u64 {
+    new_executor(1, 0)
+}
+extern "C" fn executors_single_with(factory: u64) -> u64 {
+    new_executor(1, factory)
 }
 
 pub fn builtins() -> Vec<Builtin> {
@@ -374,6 +468,12 @@ pub fn builtins() -> Vec<Builtin> {
         name,
         desc,
         is_static: false,
+        f,
+    };
+    let s = |name, desc, f: usize| Method {
+        name,
+        desc,
+        is_static: true,
         f,
     };
     macro_rules! f {
@@ -481,6 +581,89 @@ pub fn builtins() -> Vec<Builtin> {
                     "onTermination",
                     "(Ljava/lang/Throwable;)V",
                     f!(worker_end_hook),
+                ),
+            ],
+        },
+        interface("java/util/concurrent/ThreadFactory"),
+        Builtin {
+            name: EXECUTOR,
+            super_name: Some(O),
+            interfaces: &[
+                "java/util/concurrent/ExecutorService",
+                "java/util/concurrent/Executor",
+            ],
+            size: 16,
+            is_final: false,
+            is_interface: false,
+            methods: vec![
+                m("execute", "(Ljava/lang/Runnable;)V", f!(pool_execute)),
+                m(
+                    "submit",
+                    "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;",
+                    f!(pool_submit_runnable),
+                ),
+                m(
+                    "submit",
+                    "(Ljava/util/concurrent/Callable;)Ljava/util/concurrent/Future;",
+                    f!(pool_submit_callable),
+                ),
+                m("shutdown", "()V", f!(pool_shutdown)),
+                m("shutdownNow", "()Ljava/util/List;", f!(pool_shutdown_now)),
+                m("isShutdown", "()Z", f!(pool_is_shutdown)),
+                m("isTerminated", "()Z", f!(pool_is_terminated)),
+                m(
+                    "awaitTermination",
+                    "(JLjava/util/concurrent/TimeUnit;)Z",
+                    f!(pool_await_termination),
+                ),
+            ],
+        },
+        Builtin {
+            name: LOOP,
+            super_name: Some(O),
+            interfaces: &["java/lang/Runnable"],
+            size: 16,
+            is_final: true,
+            is_interface: false,
+            methods: vec![m("run", "()V", f!(loop_run))],
+        },
+        Builtin {
+            name: "java/util/concurrent/Executors",
+            super_name: Some(O),
+            interfaces: &[],
+            size: 8,
+            is_final: true,
+            is_interface: false,
+            methods: vec![
+                s(
+                    "newCachedThreadPool",
+                    "()Ljava/util/concurrent/ExecutorService;",
+                    f!(executors_cached),
+                ),
+                s(
+                    "newCachedThreadPool",
+                    "(Ljava/util/concurrent/ThreadFactory;)Ljava/util/concurrent/ExecutorService;",
+                    f!(executors_cached_with),
+                ),
+                s(
+                    "newFixedThreadPool",
+                    "(I)Ljava/util/concurrent/ExecutorService;",
+                    f!(executors_fixed),
+                ),
+                s(
+                    "newFixedThreadPool",
+                    "(ILjava/util/concurrent/ThreadFactory;)Ljava/util/concurrent/ExecutorService;",
+                    f!(executors_fixed_with),
+                ),
+                s(
+                    "newSingleThreadExecutor",
+                    "()Ljava/util/concurrent/ExecutorService;",
+                    f!(executors_single),
+                ),
+                s(
+                    "newSingleThreadExecutor",
+                    "(Ljava/util/concurrent/ThreadFactory;)Ljava/util/concurrent/ExecutorService;",
+                    f!(executors_single_with),
                 ),
             ],
         },

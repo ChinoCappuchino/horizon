@@ -1,5 +1,7 @@
 package t;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinWorkerThread;
 import java.util.concurrent.Future;
@@ -180,5 +182,30 @@ public class Threads {
         boolean ended = pool.awaitTermination(10, TimeUnit.SECONDS);
         return done.get() * 1_000_000L + value * 10_000L + STARTS.get() * 100L + ENDS.get() * 10L
                 + (ended ? 1 : 0);
+    }
+
+    /** done * 1000 + cached pool's threads in 1..tasks * 100 + fixed pool's <= 3 * 10 + both ended. */
+    public static long executors(int tasks) throws Exception {
+        AtomicInteger done = new AtomicInteger();
+        AtomicInteger made = new AtomicInteger();
+        ExecutorService cached = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "io-" + made.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
+        for (int i = 0; i < tasks; i++) cached.execute(done::incrementAndGet);
+        cached.shutdown();
+        boolean first = cached.awaitTermination(10, TimeUnit.SECONDS);
+        AtomicInteger fixedMade = new AtomicInteger();
+        ExecutorService fixed = Executors.newFixedThreadPool(3, r -> {
+            fixedMade.incrementAndGet();
+            return new Thread(r);
+        });
+        for (int i = 0; i < tasks; i++) fixed.execute(done::incrementAndGet);
+        fixed.shutdown();
+        boolean second = fixed.awaitTermination(10, TimeUnit.SECONDS);
+        int threadsOk = made.get() >= 1 && made.get() <= tasks ? 1 : 0;
+        int fixedOk = fixedMade.get() >= 1 && fixedMade.get() <= 3 ? 1 : 0;
+        return done.get() * 1000L + threadsOk * 100 + fixedOk * 10 + (first && second ? 1 : 0);
     }
 }

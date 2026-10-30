@@ -150,4 +150,11 @@ fn java_threads_share_monitors_atomics_and_class_initialization() {
         1000 * 1_000_000 + 7 * 10_000 + 4 * 100 + 4 * 10 + 1,
         "a ForkJoinPool with the program's own workers"
     );
+    let executors: extern "C" fn(*mut Context, i32) -> i64 =
+        unsafe { std::mem::transmute(get("t/Threads.executors(I)J")) };
+    assert_eq!(
+        executors(ctx, 200),
+        400 * 1000 + 100 + 10 + 1,
+        "thread pools from Executors, with the program's thread factories"
+    );
 }
