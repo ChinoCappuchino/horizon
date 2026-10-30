@@ -286,6 +286,14 @@ fn main() -> Result<()> {
     if !only.is_empty() {
         classes = with_supertypes(classes, roots, &only);
     }
+    // The native backend alone: no WASM compile before it.
+    if native_check {
+        eprintln!("{} classes", classes.len());
+        return native_check_report(&classes);
+    }
+    if run_native {
+        return native_bench(&classes, &bench[1..]);
+    }
     let started = Instant::now();
     let compiled = compile(&classes).map_err(anyhow)?;
     eprintln!(
@@ -296,12 +304,6 @@ fn main() -> Result<()> {
     );
     for (m, why) in &compiled.skipped {
         eprintln!("not compiled: {m}: {why}");
-    }
-    if native_check {
-        return native_check_report(&classes);
-    }
-    if run_native {
-        return native_bench(&classes, &bench[1..]);
     }
     if let Some(out) = native {
         std::fs::write(&out, horizon_java::runtime::precompile(&compiled)?)?;

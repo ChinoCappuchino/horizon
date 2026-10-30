@@ -450,8 +450,8 @@ impl Native {
                     size += 8;
                 }
             }
-            let mut vt = vec![0u64; 1 + selectors];
-            vt[0] = u64::from(ids[c]);
+            // A class's record: its id (its methods are in the dispatch table).
+            let vt = vec![u64::from(ids[c])];
             vtables.push(vt);
             let vtable = vtables.last_mut().expect("just pushed").as_mut_ptr();
             layouts.insert(
@@ -480,8 +480,7 @@ impl Native {
         let mut singletons: Vec<Box<u64>> = Vec::new();
         let mut singleton_at: Vec<Option<i64>> = Vec::new();
         for (i, l) in lambdas.iter().enumerate() {
-            let mut vt = vec![0u64; 1 + selectors.len()];
-            vt[0] = (names.len() + 1 + i) as u64;
+            let vt = vec![(names.len() + 1 + i) as u64];
             vtables.push(vt);
             let p = vtables.last_mut().expect("just pushed").as_mut_ptr() as i64;
             lambda_vt.push(p);
@@ -497,8 +496,7 @@ impl Native {
         for (k, b) in builtin_list.iter().enumerate() {
             let id = (builtin_base + k) as u32;
             ids.insert(b.name, id);
-            let mut vt = vec![0u64; 1 + selectors.len()];
-            vt[0] = u64::from(id);
+            let vt = vec![u64::from(id)];
             vtables.push(vt);
             let vtable = vtables.last_mut().expect("just pushed").as_mut_ptr();
             layouts.insert(
@@ -551,6 +549,104 @@ impl Native {
             names_of[builtin_base + k] = chain(n);
         }
         let names_by_id = names_of.clone();
+
+        // The global dispatch table (row displacement): selector `s` of a
+        // class with id `c` is entry `c + offsets[s]`, two words: its method
+        // and `s + 1` (so the runtime can tell an entry is that selector's).
+        // A class has entries for the selectors it responds to: the methods
+        // it and its ancestors declare, and a lambda's interface method.
+        let declared = |class: &str| -> Vec<usize> {
+            let key = |n: &str, d: &str| selectors.get(&(n.to_owned(), d.to_owned())).copied();
+            if let Some(cf) = by_name.get(class) {
+                cf.methods
+                    .iter()
+                    .filter(|m| m.access & STATIC == 0 && !m.name.starts_with('<'))
+                    .filter_map(|m| key(&m.name, &m.descriptor))
+                    .collect()
+            } else if let Some(b) = builtin.get(class) {
+                b.methods
+                    .iter()
+                    .filter(|m| !m.is_static && !m.name.starts_with('<'))
+                    .filter_map(|m| key(m.name, m.desc))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+        let mut declared_by: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut responders: Vec<Vec<usize>> = vec![Vec::new(); builtin_base + builtins.len()];
+        // Types with an interface ancestor outside the program (`Supplier`,
+        // `List`...; a built-in interface lists only what the runtime
+        // implements): what they declare is not all known here.
+        let mut opaque: Vec<bool> = vec![false; responders.len()];
+        for (id, ancestors) in names_by_id.iter().enumerate() {
+            let mut sels: Vec<usize> = Vec::new();
+            opaque[id] = ancestors
+                .iter()
+                .any(|a| !by_name.contains_key(a.as_str()) && builtin.get(a.as_str()).is_none_or(|b| b.is_interface));
+            for a in ancestors {
+                if !declared_by.contains_key(a.as_str()) {
+                    declared_by.insert(a.as_str(), declared(a));
+                }
+                sels.extend(&declared_by[a.as_str()]);
+            }
+            if let Some(i) = id.checked_sub(names.len() + 1).filter(|&i| i < lambdas.len()) {
+                let l = &lambdas[i];
+                sels.extend(selectors.get(&(l.name.clone(), l.sam.clone())));
+            }
+            sels.sort_unstable();
+            sels.dedup();
+            responders[id] = sels;
+        }
+        let mut by_selector: Vec<Vec<u32>> = vec![Vec::new(); selectors.len()];
+        for (id, sels) in responders.iter().enumerate() {
+            for &s in sels {
+                by_selector[s].push(id as u32);
+            }
+        }
+        // First fit, the selectors most classes respond to first.
+        let mut order: Vec<usize> = (0..selectors.len()).collect();
+        order.sort_by_key(|&s| std::cmp::Reverse(by_selector[s].len()));
+        let mut taken: Vec<bool> = Vec::new();
+        let mut offsets: Vec<i64> = vec![i64::MIN; selectors.len()];
+        let mut first_free = 0usize;
+        for s in order {
+            let cids = &by_selector[s];
+            let Some(&lowest) = cids.first() else { continue };
+            let mut offset = first_free as i64 - i64::from(lowest);
+            loop {
+                if cids
+                    .iter()
+                    .all(|&c| taken.get((i64::from(c) + offset) as usize) != Some(&true))
+                {
+                    break;
+                }
+                offset += 1;
+            }
+            for &c in cids {
+                let at = (i64::from(c) + offset) as usize;
+                if at >= taken.len() {
+                    taken.resize(at + 1, false);
+                }
+                taken[at] = true;
+            }
+            while taken.get(first_free) == Some(&true) {
+                first_free += 1;
+            }
+            offsets[s] = offset;
+        }
+        let mut dispatch = vec![0u64; 2 * taken.len().max(1)].into_boxed_slice();
+        let dispatch_at = dispatch.as_ptr() as i64;
+        if std::env::var_os("HORIZON_NATIVE_TRACE").is_some() {
+            let entries: usize = by_selector.iter().map(Vec::len).sum();
+            eprintln!(
+                "dispatch table: {} selectors, {} classes, {entries} entries in {} slots ({} MB)",
+                selectors.len(),
+                responders.len(),
+                taken.len(),
+                taken.len() * 16 >> 20
+            );
+        }
         // The type tables the compiled code tests against (their address
         // is baked into it).
         let mut types = Box::new(TypeTables {
@@ -752,6 +848,10 @@ impl Native {
             statics_at: &statics_at,
             statics_base,
             flags_at,
+            dispatch_at,
+            offsets: &offsets,
+            responders: &responders,
+            opaque: &opaque,
             types_at,
             bit_table_at,
             tested: std::cell::RefCell::new(HashMap::new()),
@@ -1008,6 +1108,10 @@ impl Native {
         // implementation: it says which method was called, then traps.
         let mut absent: HashMap<usize, FuncId> = HashMap::new();
         for ((mname, mdesc), &sel) in &selectors {
+            // (Only a selector some class responds to can reach one.)
+            if by_selector[sel].is_empty() {
+                continue;
+            }
             // (The thread's context and the receiver; the other arguments
             // are left alone.)
             let mut sig = module.make_signature();
@@ -1112,112 +1216,91 @@ impl Native {
             }
             c
         };
-        // Fill the vtables: each selector's implementation in the class or
-        // its superclasses (or an interface's default method, or a built-in
-        // superclass's).
-        for n in &names {
-            let l = &layouts[*n];
-            for ((mname, mdesc), &sel) in &selectors {
-                let mut x = Some(*n);
-                let mut found = None;
-                while let Some(c) = x {
-                    let key = export_name(c, mname, mdesc);
-                    if let Some(&f) = funcs.get(&key)
-                        && by_name[c].methods.iter().any(|m| {
-                            m.name == *mname && m.descriptor == *mdesc && m.access & ABSTRACT == 0
-                        })
-                    {
-                        found = Some(f);
-                        break;
-                    }
-                    x = superclass(c);
-                }
-                if found.is_none() {
-                    // A default method of an interface it implements.
-                    let defaults = ancestors_of(n, &by_name);
-                    found = defaults.iter().find_map(|i| {
-                        let cf = by_name.get(i.as_str())?;
-                        (cf.access & INTERFACE != 0)
-                            .then(|| funcs.get(&export_name(i, mname, mdesc)).copied())
-                            .flatten()
-                    });
-                }
-                if let Some(f) = found {
-                    let p = module.get_finalized_function(f);
-                    // SAFETY: the vtable has 1 + selectors entries.
-                    unsafe { *l.vtable.add(1 + sel) = p as u64 };
-                } else if let Some(p) = builtin_impl(&first_outside(n), mname, mdesc)
-                    .or_else(|| interface_default(&names_by_id[ids[n] as usize], mname, mdesc))
-                {
-                    // SAFETY: as above.
-                    unsafe { *l.vtable.add(1 + sel) = p };
-                }
+        // Fill the dispatch table: each selector a class responds to, its
+        // implementation in the class or its superclasses (or an interface's
+        // default method, or a built-in superclass's); none, the selector's
+        // stand-in (it says which method was called, then traps).
+        let by_sel_name: Vec<(&str, &str)> = {
+            let mut v = vec![("", ""); selectors.len()];
+            for ((n, d), &i) in &selectors {
+                v[i] = (n.as_str(), d.as_str());
             }
-        }
-        for b in &builtins {
-            let l = &layouts[*b];
-            for ((mname, mdesc), &sel) in &selectors {
-                if let Some(p) = builtin_impl(b, mname, mdesc)
-                    .or_else(|| interface_default(&names_by_id[ids[b] as usize], mname, mdesc))
-                {
-                    // SAFETY: as above.
-                    unsafe { *l.vtable.add(1 + sel) = p };
-                }
-            }
-        }
-        for (i, l) in lambdas.iter().enumerate() {
-            let vt = lambda_vt[i] as *mut u64;
-            if let (Some(id), Some(&sel)) =
-                (bridges[i], selectors.get(&(l.name.clone(), l.sam.clone())))
-            {
-                let p = module.get_finalized_function(id);
-                // SAFETY: the vtable has 1 + selectors entries.
-                unsafe { *vt.add(1 + sel) = p as u64 };
-            }
-            // The interface's default methods for its other selectors, and
-            // Object's.
-            for ((mname, mdesc), &sel) in &selectors {
-                if *mname == l.name && *mdesc == l.sam {
-                    continue;
-                }
-                if let Some(p) = builtin_impl(OBJECT, mname, mdesc) {
-                    // SAFETY: the vtable has 1 + selectors entries.
-                    unsafe { *vt.add(1 + sel) = p };
-                }
-                let found = ancestors_of(&l.interface, &by_name)
-                    .iter()
-                    .find_map(|c| funcs.get(&export_name(c, mname, mdesc)).copied());
-                if let Some(f) = found {
-                    // SAFETY: as above.
-                    unsafe { *vt.add(1 + sel) = module.get_finalized_function(f) as u64 };
-                } else if let Some(p) =
-                    interface_default(&names_by_id[names.len() + 1 + i], mname, mdesc)
-                {
-                    // A runtime interface's default (Comparator.reversed...).
-                    // SAFETY: as above.
-                    unsafe { *vt.add(1 + sel) = p };
-                }
-            }
-        }
-        // Selectors nothing implements: a call stops with a message.
+            v
+        };
+        let mut put = |cid: usize, sel: usize, p: u64| {
+            let at = (cid as i64 + offsets[sel]) as usize;
+            dispatch[2 * at] = p;
+            dispatch[2 * at + 1] = sel as u64 + 1;
+        };
+        let report = std::env::var("HORIZON_NATIVE_MISSING").ok();
         let absent_at: HashMap<usize, u64> = absent
             .iter()
             .map(|(&sel, &id)| (sel, module.get_finalized_function(id) as u64))
             .collect();
-        // HORIZON_NATIVE_MISSING=<text>: the selectors left to it, for each
-        // class whose name has the text.
-        let report = std::env::var("HORIZON_NATIVE_MISSING").ok();
-        let by_selector: HashMap<usize, String> = selectors
-            .iter()
-            .map(|((n, d), &i)| (i, format!("{n}{d}")))
-            .collect();
-        for vt in &mut vtables {
-            let class = class_names.get(vt[0] as usize).cloned().unwrap_or_default();
-            for (k, slot) in vt.iter_mut().enumerate().skip(1) {
-                if *slot == 0 {
-                    *slot = absent_at[&(k - 1)];
-                    if report.as_ref().is_some_and(|r| class.contains(r.as_str())) {
-                        eprintln!("{class}: no {}", by_selector[&(k - 1)]);
+        for cid in 0..responders.len() {
+            let class = class_names.get(cid).cloned().unwrap_or_default();
+            let lambda = cid
+                .checked_sub(names.len() + 1)
+                .filter(|&i| i < lambdas.len());
+            // (Class ids start at 1.)
+            let compiled = cid
+                .checked_sub(1)
+                .and_then(|i| names.get(i))
+                .filter(|n| ids.get(**n) == Some(&(cid as u32)));
+            for &sel in &responders[cid] {
+                let (mname, mdesc) = by_sel_name[sel];
+                let found: Option<u64> = if let Some(i) = lambda {
+                    let l = &lambdas[i];
+                    if mname == l.name && mdesc == l.sam {
+                        bridges[i].map(|id| module.get_finalized_function(id) as u64)
+                    } else {
+                        ancestors_of(&l.interface, &by_name)
+                            .iter()
+                            .find_map(|c| funcs.get(&export_name(c, mname, mdesc)).copied())
+                            .map(|f| module.get_finalized_function(f) as u64)
+                            .or_else(|| interface_default(&names_by_id[cid], mname, mdesc))
+                            .or_else(|| builtin_impl(OBJECT, mname, mdesc))
+                    }
+                } else if let Some(n) = compiled {
+                    let mut x = Some(*n);
+                    let mut f = None;
+                    while let Some(c) = x {
+                        if let Some(&id) = funcs.get(&export_name(c, mname, mdesc))
+                            && by_name[c].methods.iter().any(|m| {
+                                m.name == mname && m.descriptor == mdesc && m.access & ABSTRACT == 0
+                            })
+                        {
+                            f = Some(id);
+                            break;
+                        }
+                        x = superclass(c);
+                    }
+                    f.or_else(|| {
+                        ancestors_of(n, &by_name).iter().find_map(|i| {
+                            let cf = by_name.get(i.as_str())?;
+                            (cf.access & INTERFACE != 0)
+                                .then(|| funcs.get(&export_name(i, mname, mdesc)).copied())
+                                .flatten()
+                        })
+                    })
+                    .map(|f| module.get_finalized_function(f) as u64)
+                    .or_else(|| builtin_impl(&first_outside(n), mname, mdesc))
+                    .or_else(|| interface_default(&names_by_id[cid], mname, mdesc))
+                } else {
+                    // A built-in class.
+                    builtins
+                        .get(cid.wrapping_sub(builtin_base))
+                        .and_then(|b| builtin_impl(b, mname, mdesc))
+                        .or_else(|| interface_default(&names_by_id[cid], mname, mdesc))
+                };
+                match found {
+                    Some(p) => put(cid, sel, p),
+                    None => {
+                        put(cid, sel, absent_at[&sel]);
+                        // HORIZON_NATIVE_MISSING=<text>: those left to it.
+                        if report.as_ref().is_some_and(|r| class.contains(r.as_str())) {
+                            eprintln!("{class}: no {mname}{mdesc}");
+                        }
                     }
                 }
             }
@@ -1245,6 +1328,8 @@ impl Native {
                 .iter()
                 .map(|((n, d), &i)| (format!("{n} {d}"), i))
                 .collect(),
+            dispatch,
+            offsets: offsets.clone(),
             classes: class_objects,
             ancestors: names_by_id,
             enum_values: names
@@ -1565,6 +1650,12 @@ struct World<'a> {
     statics_at: &'a HashMap<(String, String), (i32, Type)>,
     statics_base: i64,
     flags_at: usize,
+    /// The dispatch table's address, each selector's offset in it
+    /// (`i64::MIN`: no class responds to it), and each class id's selectors.
+    dispatch_at: i64,
+    offsets: &'a [i64],
+    responders: &'a [Vec<usize>],
+    opaque: &'a [bool],
     /// The program's type tables (`TypeTables`), by address, and their
     /// table of each class id's bits.
     types_at: i64,
@@ -1663,6 +1754,24 @@ impl World<'_> {
         .unwrap_or(false);
         self.nothrow.borrow_mut().insert(key, answer);
         answer
+    }
+
+    /// Whether every object of type `class` (a receiver's type) responds to
+    /// selector `sel`; `None` for a type outside the program (its objects'
+    /// classes are the program's, each may or may not).
+    fn responds(&self, class: &str, sel: usize) -> Option<bool> {
+        if self.offsets[sel] == i64::MIN {
+            return Some(false);
+        }
+        let id = *self.ids.get(class)? as usize;
+        let r = self.responders.get(id)?;
+        if r.binary_search(&sel).is_ok() {
+            Some(true)
+        } else if self.opaque.get(id) == Some(&true) {
+            None
+        } else {
+            Some(false)
+        }
     }
 
     /// Whether `class` is `Enum` or one of the program's enums.
@@ -1807,6 +1916,22 @@ impl World<'_> {
 }
 
 /// Bump allocation of `size` bytes (zeroed), the header set to `header`.
+/// The method of `obj`'s class for selector `sel`: its entry in the
+/// dispatch table, at its class id plus the selector's offset.
+fn dispatch_fp(b: &mut FunctionBuilder<'_>, w: &World<'_>, obj: Value, sel: usize) -> Value {
+    let at = dispatch_entry(b, w, obj, sel);
+    b.ins().load(types::I64, MemFlagsData::trusted(), at, 0)
+}
+
+/// The address of `obj`'s entry for selector `sel`: `[method, selector + 1]`.
+fn dispatch_entry(b: &mut FunctionBuilder<'_>, w: &World<'_>, obj: Value, sel: usize) -> Value {
+    let vt = b.ins().load(types::I64, MemFlagsData::trusted(), obj, 0);
+    let class_id = b.ins().load(types::I64, MemFlagsData::trusted(), vt, 0);
+    let slot = b.ins().imul_imm_s(class_id, 16);
+    let row = b.ins().iconst(types::I64, w.dispatch_at + 16 * w.offsets[sel]);
+    b.ins().iadd(row, slot)
+}
+
 /// In this thread's buffer (`ctx`'s); when it is out, a new one from the
 /// heap (`heap::refill`).
 fn alloc_in(b: &mut FunctionBuilder<'_>, ctx: Value, size: Value, header: Value) -> Value {
@@ -1907,21 +2032,13 @@ fn call_virtual(
             let fr = module.declare_func_in_func(id, b.func);
             b.ins().call(fr, args)
         }
-        (None, Some(&sel)) => {
-            let vt = b
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), args[1], 0);
-            let fp = b.ins().load(
-                types::I64,
-                MemFlagsData::trusted(),
-                vt,
-                (8 * (1 + sel)) as i32,
-            );
+        (None, Some(&sel)) if w.offsets[sel] != i64::MIN => {
+            let fp = dispatch_fp(b, w, args[1], sel);
             let sig = signature(module, true, desc).ok_or("a bad signature")?;
             let sr = b.import_signature(sig);
             b.ins().call_indirect(sr, fp, args)
         }
-        (None, None) => return Err(format!("no implementation of {owner}.{name}{desc}")),
+        _ => return Err(format!("no implementation of {owner}.{name}{desc}")),
     };
     Ok(b.inst_results(call).first().copied())
 }
@@ -4378,16 +4495,31 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         self.b.inst_results(call).first().copied()
                     }
                     (None, Some(&sel)) => {
-                        let vt = self
-                            .b
-                            .ins()
-                            .load(types::I64, MemFlagsData::trusted(), args[0], 0);
-                        let fp = self.b.ins().load(
-                            types::I64,
-                            MemFlagsData::trusted(),
-                            vt,
-                            (8 * (1 + sel)) as i32,
-                        );
+                        // Through the dispatch table: only for a receiver
+                        // whose type responds to it (a method declared only
+                        // by a JDK class outside the program has no entries).
+                        // For a type outside the program, checked as called:
+                        // the entry is the method's when tagged with it.
+                        let fp = match self.w.responds(&owner, sel) {
+                            Some(false) => {
+                                self.stop(format!("virtual call to {owner}.{name}{desc}, outside the program"));
+                                return Ok(true);
+                            }
+                            Some(true) => dispatch_fp(&mut self.b, self.w, args[0], sel),
+                            None => {
+                                let at = dispatch_entry(&mut self.b, self.w, args[0], sel);
+                                let tag = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 8);
+                                let bad = self.b.ins().icmp_imm_s(IntCC::NotEqual, tag, sel as i64 + 1);
+                                let stop = self.b.create_block();
+                                let on = self.b.create_block();
+                                self.b.set_cold_block(stop);
+                                self.b.ins().brif(bad, stop, &[], on, &[]);
+                                self.b.switch_to_block(stop);
+                                self.stop(format!("virtual call to {owner}.{name}{desc}, not implemented by the receiver's class"));
+                                self.b.switch_to_block(on);
+                                self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0)
+                            }
+                        };
                         let sig = signature(self.module, true, &desc).ok_or("a bad signature")?;
                         let all = self.with_ctx(&args);
                         nothrow = self.w.no_implementation_throws(&name, &desc);

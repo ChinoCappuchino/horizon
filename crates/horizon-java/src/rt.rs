@@ -68,6 +68,11 @@ pub struct Rt {
     /// Every vtable selector, by `name descriptor` (the runtime calls the
     /// program's methods through them).
     pub selectors: HashMap<String, usize>,
+    /// The dispatch table (compiled code points into it): `[method,
+    /// selector + 1]` at each class id plus the selector's offset, and the
+    /// offsets (`i64::MIN`: no class responds to the selector).
+    pub dispatch: Box<[u64]>,
+    pub offsets: Vec<i64>,
     /// Each class id's `Class` object.
     pub classes: Vec<u64>,
     /// Each class id's ancestors by name (itself, superclasses, interfaces).
@@ -311,9 +316,18 @@ pub fn to_string(o: u64) -> u64 {
 /// The method in `o`'s vtable for `selector`.
 fn call_virtual(o: u64, selector: Option<usize>) -> Option<usize> {
     let sel = selector?;
-    // SAFETY: o's header is its vtable, with a slot per selector.
-    let f = unsafe { word(word(o, 0), 8 * (1 + sel)) } as usize;
-    (f != 0).then_some(f)
+    let r = rt();
+    let offset = *r.offsets.get(sel)?;
+    if offset == i64::MIN {
+        return None;
+    }
+    // SAFETY: an object's vtable starts with its class id.
+    let id = unsafe { word(word(o, 0), 0) } as i64;
+    // The entry is the class's method only when it is tagged with `sel`
+    // (another selector's, or empty, where the class does not respond).
+    let at = usize::try_from(id + offset).ok()?;
+    let entry = r.dispatch.get(2 * at..2 * at + 2)?;
+    (entry[1] == sel as u64 + 1 && entry[0] != 0).then_some(entry[0] as usize)
 }
 
 /// The method of `o`'s class for `name desc`, if it has one.
