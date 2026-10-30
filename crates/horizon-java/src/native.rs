@@ -53,19 +53,7 @@ struct Layout {
     vtable: *mut u64,
 }
 
-/// What the compiled code shares: the arena, the statics, the init flags.
-#[repr(C)]
-struct Globals {
-    /// The next free byte of the arena, and its end.
-    bump: u64,
-    limit: u64,
-    /// The exception being thrown (0: none): set by `athrow`, tested after
-    /// each call (docs/java-compat/compiler.md: exceptions).
-    exception: u64,
-}
-
-/// The offset of [`Globals::exception`].
-const EXCEPTION: i32 = 16;
+use crate::heap::{self, EXCEPTION};
 
 /// The JDK's exception classes this backend knows (public API): each one's
 /// superclass. A class of the closed world that extends one of them is
@@ -167,8 +155,9 @@ pub struct Native {
     /// not compiled yet), by why.
     pub stops: HashMap<String, usize>,
     // Memory the code points at, kept alive.
-    _arena: Vec<u8>,
-    _globals: Box<Globals>,
+    /// The heap, and the context of the thread that compiled the code.
+    main: Box<heap::Context>,
+    heap: Box<heap::Heap>,
     _statics: Vec<u64>,
     _vtables: Vec<Vec<u64>>,
     /// Boxed: each one's address is baked into the code.
@@ -573,15 +562,9 @@ impl Native {
             false
         };
 
-        // The arena: 4 GiB, zeroed by the OS on first touch.
-        let arena_size: usize = 4 << 30;
-        let arena = vec![0u8; arena_size];
-        let mut globals = Box::new(Globals {
-            bump: arena.as_ptr() as u64,
-            limit: arena.as_ptr() as u64 + arena_size as u64,
-            exception: 0,
-        });
-        let globals_at = (&mut *globals) as *mut Globals as i64;
+        // The heap, shared by every thread that runs the code; each has a
+        // context (this one's made at the end).
+        let heap = Box::new(heap::Heap::reserve(heap::RESERVE));
 
         // Declare every method.
         let mut funcs: HashMap<String, FuncId> = HashMap::new();
@@ -607,7 +590,8 @@ impl Native {
         let mut inits: HashMap<String, FuncId> = HashMap::new();
         for n in &names {
             if has_clinit(n) {
-                let sig = module.make_signature();
+                let mut sig = module.make_signature();
+                sig.params.push(AbiParam::new(types::I64));
                 let id = module
                     .declare_function(&format!("init {n}"), Linkage::Local, &sig)
                     .map_err(|e| e.to_string())?;
@@ -690,7 +674,6 @@ impl Native {
             statics_at: &statics_at,
             statics_base,
             flags_at,
-            globals_at,
             ptr,
             lambdas: &lambdas,
             lambda_at: &lambda_at,
@@ -808,10 +791,13 @@ impl Native {
         }
         // The init functions.
         for (class, &id) in &inits {
+            ctx.func.signature.params = vec![AbiParam::new(types::I64)];
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
             let e = b.create_block();
+            b.append_block_params_for_function_params(e);
             b.switch_to_block(e);
             b.seal_block(e);
+            let thread = b.block_params(e)[0];
             let flag = statics_base + 8 * (flags_at + ids[class.as_str()] as usize) as i64;
             let at = b.ins().iconst(types::I64, flag);
             let one = b.ins().iconst(types::I64, 1);
@@ -820,12 +806,12 @@ impl Native {
                 && let Some(&sid) = inits.get(s)
             {
                 let f = module.declare_func_in_func(sid, b.func);
-                b.ins().call(f, &[]);
+                b.ins().call(f, &[thread]);
             }
             let clinit = export_name(class, "<clinit>", "()V");
             if let Some(&cid) = funcs.get(&clinit) {
                 let f = module.declare_func_in_func(cid, b.func);
-                b.ins().call(f, &[]);
+                b.ins().call(f, &[thread]);
             }
             b.ins().return_(&[]);
             b.finalize(module.target_config());
@@ -834,7 +820,49 @@ impl Native {
                 .map_err(|e| format!("init {class}: {e:?}"))?;
             module.clear_context(&mut ctx);
         }
+        // The runtime library's instance methods as vtable entries: compiled
+        // callers pass the thread's context first, which they don't take.
+        let mut thunks: HashMap<(usize, &'static str), FuncId> = HashMap::new();
+        for b in &builtin_list {
+            for m in b.methods.iter().filter(|m| !m.is_static) {
+                if thunks.contains_key(&(m.f, m.desc)) {
+                    continue;
+                }
+                let (Some(sig), Some(raw)) = (
+                    signature(&module, true, m.desc),
+                    raw_signature(&module, true, m.desc),
+                ) else {
+                    continue;
+                };
+                let id = module
+                    .declare_function(&format!("thunk {}", thunks.len()), Linkage::Local, &sig)
+                    .map_err(|e| e.to_string())?;
+                ctx.func.signature = sig;
+                let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                let e = fb.create_block();
+                fb.append_block_params_for_function_params(e);
+                fb.switch_to_block(e);
+                fb.seal_block(e);
+                let args = fb.block_params(e)[1..].to_vec();
+                let sr = fb.import_signature(raw);
+                let fp = fb.ins().iconst(types::I64, m.f as i64);
+                let call = fb.ins().call_indirect(sr, fp, &args);
+                let rets = fb.inst_results(call).to_vec();
+                fb.ins().return_(&rets);
+                fb.finalize(module.target_config());
+                module
+                    .define_function(id, &mut ctx)
+                    .map_err(|e| format!("thunk {}.{}: {e:?}", b.name, m.name))?;
+                module.clear_context(&mut ctx);
+                thunks.insert((m.f, m.desc), id);
+            }
+        }
         module.finalize_definitions().map_err(|e| e.to_string())?;
+        let thunk = |m: &rt::Method| -> u64 {
+            thunks
+                .get(&(m.f, m.desc))
+                .map_or(m.f as u64, |&id| module.get_finalized_function(id) as u64)
+        };
 
         // A default method of a built-in interface among `ancestors`.
         let interface_default =
@@ -849,7 +877,7 @@ impl Native {
                     b.methods
                         .iter()
                         .find(|m| !m.is_static && m.name == name && m.desc == desc)
-                        .map(|m| m.f as u64)
+                        .map(thunk)
                 })
             };
         // A built-in implementation of `name desc` from built-in class `start`
@@ -863,7 +891,7 @@ impl Native {
                     .iter()
                     .find(|m| !m.is_static && m.name == name && m.desc == desc)
                 {
-                    return Some(m.f as u64);
+                    return Some(thunk(m));
                 }
                 x = b.super_name;
             }
@@ -983,7 +1011,6 @@ impl Native {
         let cache = rt::make_caches(&builtin_vtables, &mut boxes);
         let sel = |n: &str, d: &str| selectors.get(&(n.to_owned(), d.to_owned())).copied();
         let runtime = Box::new(rt::Rt {
-            globals: globals_at as *mut u64,
             vtables: builtin_vtables,
             names: class_names,
             to_string: sel("toString", "()Ljava/lang/String;"),
@@ -1004,16 +1031,18 @@ impl Native {
                     Some((ids[n], (statics_base + i64::from(*at)) as u64))
                 })
                 .collect(),
-            once: std::cell::RefCell::new(HashMap::new()),
+            once: std::sync::Mutex::new(HashMap::new()),
         });
         rt::install(&runtime);
+        let main = heap.context();
+        rt::install_context(&main);
         let exports = funcs;
         Ok(Native {
             module,
             exports,
             unsupported,
-            _arena: arena,
-            _globals: globals,
+            main,
+            heap,
             _statics: statics,
             _vtables: vtables,
             _singletons: singletons,
@@ -1026,12 +1055,77 @@ impl Native {
         })
     }
 
-    /// The machine code of an exported method (`Class.name(desc)ret`).
+    /// The context of the thread that compiled the code: the first argument
+    /// of every compiled method it calls.
+    pub fn context(&self) -> *mut heap::Context {
+        &*self.main as *const heap::Context as *mut heap::Context
+    }
+
+    /// Lets the calling thread run the code: its own context (allocation
+    /// buffer, exception), registered with the heap until dropped.
+    pub fn attach(&self) -> Attached<'_> {
+        self.shared().attach()
+    }
+
+    /// What other threads need to run the code (the compiled code itself
+    /// is finished and read-only): they attach through it.
+    pub fn shared(&self) -> Shared<'_> {
+        Shared {
+            heap: &self.heap,
+            rt: &self._rt,
+        }
+    }
+
+    pub fn heap(&self) -> &heap::Heap {
+        &self.heap
+    }
+
+    /// The machine code of an exported method (`Class.name(desc)ret`): it
+    /// takes a thread's context first.
     pub fn function(&self, export: &str) -> Option<*const u8> {
         Some(
             self.module
                 .get_finalized_function(*self.exports.get(export)?),
         )
+    }
+}
+
+/// The compiled program as threads share it (`Native::shared`).
+#[derive(Clone, Copy)]
+pub struct Shared<'n> {
+    heap: &'n heap::Heap,
+    rt: &'n rt::Rt,
+}
+
+impl<'n> Shared<'n> {
+    /// Lets the calling thread run the code (`Native::attach`).
+    pub fn attach(self) -> Attached<'n> {
+        let ctx = self.heap.context();
+        rt::install(self.rt);
+        rt::install_context(&ctx);
+        Attached {
+            heap: self.heap,
+            ctx,
+        }
+    }
+}
+
+/// A thread attached to compiled code (`Native::attach`).
+pub struct Attached<'n> {
+    heap: &'n heap::Heap,
+    ctx: Box<heap::Context>,
+}
+
+impl Attached<'_> {
+    /// This thread's context: the first argument of every compiled method.
+    pub fn context(&self) -> *mut heap::Context {
+        &*self.ctx as *const heap::Context as *mut heap::Context
+    }
+}
+
+impl Drop for Attached<'_> {
+    fn drop(&mut self) {
+        self.heap.release(&self.ctx);
     }
 }
 
@@ -1195,7 +1289,16 @@ fn ancestors_of(c: &str, by_name: &HashMap<&str, &ClassFile>) -> Vec<String> {
     out
 }
 
+/// A compiled method's signature: its thread's context first (hidden), then
+/// the receiver and the descriptor's parameters.
 fn signature(module: &JITModule, instance: bool, desc: &str) -> Option<Signature> {
+    let mut sig = raw_signature(module, instance, desc)?;
+    sig.params.insert(0, AbiParam::new(types::I64));
+    Some(sig)
+}
+
+/// A runtime library function's signature: no context.
+fn raw_signature(module: &JITModule, instance: bool, desc: &str) -> Option<Signature> {
     let m = Method::parse(desc)?;
     let mut sig = module.make_signature();
     if instance {
@@ -1224,7 +1327,6 @@ struct World<'a> {
     statics_at: &'a HashMap<(String, String), (i32, Type)>,
     statics_base: i64,
     flags_at: usize,
-    globals_at: i64,
     ptr: Type,
     lambdas: &'a [LambdaSite],
     lambda_at: &'a HashMap<(String, u32), usize>,
@@ -1312,22 +1414,57 @@ impl World<'_> {
 }
 
 /// Bump allocation of `size` bytes (zeroed), the header set to `header`.
-fn alloc_in(b: &mut FunctionBuilder<'_>, w: &World<'_>, size: Value, header: Value) -> Value {
-    let g = b.ins().iconst(types::I64, w.globals_at);
-    let cur = b.ins().load(types::I64, MemFlagsData::trusted(), g, 0);
-    let limit = b.ins().load(types::I64, MemFlagsData::trusted(), g, 8);
+/// In this thread's buffer (`ctx`'s); when it is out, a new one from the
+/// heap (`heap::refill`).
+fn alloc_in(b: &mut FunctionBuilder<'_>, ctx: Value, size: Value, header: Value) -> Value {
+    let cur = b
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), ctx, heap::BUMP);
+    let limit = b
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), ctx, heap::LIMIT);
     let size = b.ins().iadd_imm_s(size, 7);
     let size = b.ins().band_imm_s(size, !7);
     let next = b.ins().iadd(cur, size);
     let over = b.ins().icmp(IntCC::UnsignedGreaterThan, next, limit);
-    b.ins().trapnz(over, ARENA);
-    b.ins().store(MemFlagsData::trusted(), next, g, 0);
-    b.ins().store(MemFlagsData::trusted(), header, cur, 0);
-    cur
+    let fast = b.create_block();
+    let slow = b.create_block();
+    let done = b.create_block();
+    b.append_block_param(done, types::I64);
+    b.set_cold_block(slow);
+    b.ins().brif(over, slow, &[], fast, &[]);
+    b.switch_to_block(fast);
+    b.seal_block(fast);
+    b.ins()
+        .store(MemFlagsData::trusted(), next, ctx, heap::BUMP);
+    b.ins().jump(done, &[cur.into()]);
+    b.switch_to_block(slow);
+    b.seal_block(slow);
+    let mut sig = Signature::new(b.func.signature.call_conv);
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I64));
+    let sr = b.import_signature(sig);
+    let f = b.ins().iconst(types::I64, heap::refill as *const () as i64);
+    let call = b.ins().call_indirect(sr, f, &[ctx, size]);
+    let got = b.inst_results(call)[0];
+    b.ins().trapz(got, ARENA);
+    b.ins().jump(done, &[got.into()]);
+    b.switch_to_block(done);
+    b.seal_block(done);
+    let obj = b.block_params(done)[0];
+    b.ins().store(MemFlagsData::trusted(), header, obj, 0);
+    obj
 }
 
 /// Runs the static initializer of `class` if it has not run.
-fn init_in(b: &mut FunctionBuilder<'_>, module: &mut JITModule, w: &World<'_>, class: &str) {
+fn init_in(
+    b: &mut FunctionBuilder<'_>,
+    module: &mut JITModule,
+    w: &World<'_>,
+    ctx: Value,
+    class: &str,
+) {
     let Some(&id) = w.inits.get(class) else {
         return;
     };
@@ -1340,7 +1477,7 @@ fn init_in(b: &mut FunctionBuilder<'_>, module: &mut JITModule, w: &World<'_>, c
     b.switch_to_block(run);
     b.seal_block(run);
     let f = module.declare_func_in_func(id, b.func);
-    b.ins().call(f, &[]);
+    b.ins().call(f, &[ctx]);
     b.ins().jump(done, &[]);
     b.switch_to_block(done);
     b.seal_block(done);
@@ -1348,16 +1485,20 @@ fn init_in(b: &mut FunctionBuilder<'_>, module: &mut JITModule, w: &World<'_>, c
 
 /// Calls instance method `name desc` of `owner` on `args[0]`: directly when
 /// the closed world has one implementation, else through the vtable.
+#[allow(clippy::too_many_arguments)]
 fn call_virtual(
     b: &mut FunctionBuilder<'_>,
     module: &mut JITModule,
     w: &World<'_>,
+    ctx: Value,
     owner: &str,
     name: &str,
     desc: &str,
     args: &[Value],
 ) -> Result<Option<Value>, String> {
     b.ins().trapz(args[0], NULL);
+    let args: Vec<Value> = std::iter::once(ctx).chain(args.iter().copied()).collect();
+    let args = &args[..];
     let key = (name.to_owned(), desc.to_owned());
     let direct = (w.implementations.get(&key) == Some(&1))
         .then(|| w.resolve(owner, name, desc))
@@ -1376,7 +1517,7 @@ fn call_virtual(
         (None, Some(&sel)) => {
             let vt = b
                 .ins()
-                .load(types::I64, MemFlagsData::trusted(), args[0], 0);
+                .load(types::I64, MemFlagsData::trusted(), args[1], 0);
             let fp = b.ins().load(
                 types::I64,
                 MemFlagsData::trusted(),
@@ -1405,6 +1546,8 @@ fn bridge(
     b.switch_to_block(e);
     b.seal_block(e);
     let params = b.block_params(e).to_vec();
+    // The thread's context, the lambda object, the interface's arguments.
+    let ctx = params[0];
     let sam = Method::parse(&l.sam).ok_or("a bad interface descriptor")?;
     let target = Method::parse(&l.target_desc).ok_or("a bad target descriptor")?;
     let mut args = Vec::new();
@@ -1412,10 +1555,10 @@ fn bridge(
         let t = desc_type(c).ok_or("a bad capture")?;
         args.push(
             b.ins()
-                .load(t, MemFlagsData::trusted(), params[0], 8 + 8 * k as i32),
+                .load(t, MemFlagsData::trusted(), params[1], 8 + 8 * k as i32),
         );
     }
-    args.extend_from_slice(&params[1..]);
+    args.extend_from_slice(&params[2..]);
     let mut want: Vec<Type> = Vec::new();
     if matches!(l.kind, 5 | 7 | 9) {
         want.push(types::I64);
@@ -1445,7 +1588,7 @@ fn bridge(
                         instance: bool,
                         args: &[Value]|
      -> Result<Option<Value>, String> {
-        let sig = signature(module, instance, &l.target_desc).ok_or("a bad signature")?;
+        let sig = raw_signature(module, instance, &l.target_desc).ok_or("a bad signature")?;
         let sr = b.import_signature(sig);
         let fp = b.ins().iconst(types::I64, f as i64);
         let call = b.ins().call_indirect(sr, fp, args);
@@ -1481,7 +1624,7 @@ fn bridge(
             let (size, vt) = (layout.size, layout.vtable as i64);
             let size = b.ins().iconst(types::I64, i64::from(size));
             let header = b.ins().iconst(types::I64, vt);
-            let obj = alloc_in(&mut b, w, size, header);
+            let obj = alloc_in(&mut b, ctx, size, header);
             let (f, _, _) = w
                 .builtin_method(&l.owner, "<init>", &l.target_desc)
                 .ok_or("no constructor")?;
@@ -1495,19 +1638,21 @@ fn bridge(
                 .resolve(&l.owner, &l.target, &l.target_desc)
                 .ok_or("no target")?;
             if kind == 6 {
-                init_in(&mut b, module, w, &declaring);
+                init_in(&mut b, module, w, ctx, &declaring);
             } else {
                 b.ins().trapz(args[0], NULL);
             }
             let id = w.funcs[&export_name(&declaring, &l.target, &l.target_desc)];
             let fr = module.declare_func_in_func(id, b.func);
-            let call = b.ins().call(fr, &args);
+            let all: Vec<Value> = std::iter::once(ctx).chain(args.iter().copied()).collect();
+            let call = b.ins().call(fr, &all);
             b.inst_results(call).first().copied()
         }
         5 | 9 => call_virtual(
             &mut b,
             module,
             w,
+            ctx,
             &l.owner,
             &l.target,
             &l.target_desc,
@@ -1519,16 +1664,16 @@ fn bridge(
                 .get(&l.owner)
                 .ok_or("a constructor outside the classes")?;
             let (size, vt) = (layout.size, layout.vtable as i64);
-            init_in(&mut b, module, w, &l.owner);
+            init_in(&mut b, module, w, ctx, &l.owner);
             let size = b.ins().iconst(types::I64, i64::from(size));
             let header = b.ins().iconst(types::I64, vt);
-            let obj = alloc_in(&mut b, w, size, header);
+            let obj = alloc_in(&mut b, ctx, size, header);
             let declaring = w
                 .resolve(&l.owner, "<init>", &l.target_desc)
                 .ok_or("no constructor")?;
             let id = w.funcs[&export_name(&declaring, "<init>", &l.target_desc)];
             let fr = module.declare_func_in_func(id, b.func);
-            let mut all = vec![obj];
+            let mut all = vec![ctx, obj];
             all.extend_from_slice(&args);
             b.ins().call(fr, &all);
             Some(obj)
@@ -1771,7 +1916,7 @@ fn adapt(
     let is_ref = |d: &str| d.starts_with('L') || d.starts_with('[');
     let call =
         |b: &mut FunctionBuilder<'_>, module: &mut JITModule, f: usize, desc: &str, v: Value| {
-            let sig = signature(module, false, desc).expect("a runtime signature");
+            let sig = raw_signature(module, false, desc).expect("a runtime signature");
             let sr = b.import_signature(sig);
             let fp = b.ins().iconst(types::I64, f as i64);
             let call = b.ins().call_indirect(sr, fp, &[v]);
@@ -1840,6 +1985,8 @@ struct MethodGen<'a, 'b, 'f> {
     dispatches: HashMap<(u32, Vec<usize>), Block>,
     /// The instruction being compiled (where implicit exceptions go from).
     cur: usize,
+    /// This thread's context: the function's hidden first parameter.
+    ctx: Value,
 }
 
 impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
@@ -1898,6 +2045,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             unwind: None,
             dispatches: HashMap::new(),
             cur: 0,
+            // (Set to the entry block's first parameter by `run`.)
+            ctx: Value::from_u32(u32::MAX),
         })
     }
 
@@ -1950,16 +2099,17 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         let entry = self.b.create_block();
         self.b.append_block_params_for_function_params(entry);
         self.b.switch_to_block(entry);
-        // Parameters into their locals.
+        // Parameters into their locals, after the thread's context.
         let params: Vec<Value> = self.b.block_params(entry).to_vec();
+        self.ctx = params[0];
         let sig = Method::parse(&self.method.descriptor).ok_or("a bad descriptor")?;
         let mut slot = 0usize;
-        let mut k = 0usize;
+        let mut k = 1usize;
         if self.method.access & STATIC == 0 {
             let v = self.var(true, 0, types::I64);
-            self.b.def_var(v, params[0]);
+            self.b.def_var(v, params[1]);
             slot = 1;
-            k = 1;
+            k = 2;
         }
         for p in &sig.params {
             let t = desc_type(p).ok_or("a bad parameter")?;
@@ -2174,7 +2324,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         let d = self.b.create_block();
         self.dispatches.insert((self.body, covering.clone()), d);
         self.b.switch_to_block(d);
-        let g = self.b.ins().iconst(types::I64, self.w.globals_at);
+        let g = self.ctx;
         let exc = self
             .b
             .ins()
@@ -2262,7 +2412,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
 
     /// After a call at instruction `i`: on to the handlers if it threw.
     fn after_call(&mut self, i: usize) -> Result<(), String> {
-        let g = self.b.ins().iconst(types::I64, self.w.globals_at);
+        let g = self.ctx;
         let exc = self
             .b
             .ins()
@@ -2733,7 +2883,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         self.b.switch_to_block(run);
         self.b.seal_block(run);
         let f = self.module.declare_func_in_func(id, self.b.func);
-        self.b.ins().call(f, &[]);
+        self.b.ins().call(f, &[self.ctx]);
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(done);
         self.b.seal_block(done);
@@ -2789,7 +2939,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         instance: bool,
         args: &[Value],
     ) -> Result<Option<Value>, String> {
-        let sig = signature(self.module, instance, desc).ok_or("a bad signature")?;
+        let sig = raw_signature(self.module, instance, desc).ok_or("a bad signature")?;
         let sr = self.b.import_signature(sig);
         let fp = self.b.ins().iconst(types::I64, f as i64);
         let call = self.b.ins().call_indirect(sr, fp, args);
@@ -2804,18 +2954,15 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
     }
 
     /// Bump allocation of `size` bytes (zeroed), the header set to `header`.
+    /// A compiled method's arguments: this thread's context first.
+    fn with_ctx(&self, args: &[Value]) -> Vec<Value> {
+        std::iter::once(self.ctx)
+            .chain(args.iter().copied())
+            .collect()
+    }
+
     fn alloc(&mut self, size: Value, header: Value) -> Value {
-        let g = self.b.ins().iconst(types::I64, self.w.globals_at);
-        let cur = self.b.ins().load(types::I64, MemFlagsData::trusted(), g, 0);
-        let limit = self.b.ins().load(types::I64, MemFlagsData::trusted(), g, 8);
-        let size = self.b.ins().iadd_imm_s(size, 7);
-        let size = self.b.ins().band_imm_s(size, !7);
-        let next = self.b.ins().iadd(cur, size);
-        let over = self.b.ins().icmp(IntCC::UnsignedGreaterThan, next, limit);
-        self.b.ins().trapnz(over, ARENA);
-        self.b.ins().store(MemFlagsData::trusted(), next, g, 0);
-        self.b.ins().store(MemFlagsData::trusted(), header, cur, 0);
-        cur
+        alloc_in(&mut self.b, self.ctx, size, header)
     }
 
     /// One instruction; whether it ended the block.
@@ -3198,7 +3345,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         let k = l.captures.len();
                         let size = self.b.ins().iconst(i64t, 8 + 8 * k as i64);
                         let header = self.b.ins().iconst(i64t, self.w.lambda_vt[n]);
-                        let obj = alloc_in(&mut self.b, self.w, size, header);
+                        let obj = alloc_in(&mut self.b, self.ctx, size, header);
                         for (j, c) in l.captures.clone().iter().enumerate() {
                             let t = desc_type(c).ok_or("a bad capture")?;
                             let v = self.get(d - k + j, t);
@@ -3276,7 +3423,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             0xBF => {
                 let exc = self.get(d - 1, i64t);
                 self.null_check(exc);
-                let g = self.b.ins().iconst(i64t, self.w.globals_at);
+                let g = self.ctx;
                 self.b
                     .ins()
                     .store(MemFlagsData::trusted(), exc, g, EXCEPTION);
@@ -3639,7 +3786,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 }
                 let id = self.w.funcs[&export_name(&declaring, &name, &desc)];
                 let fr = self.module.declare_func_in_func(id, self.b.func);
-                let call = self.b.ins().call(fr, &args);
+                let all = self.with_ctx(&args);
+                let call = self.b.ins().call(fr, &all);
                 self.b.inst_results(call).first().copied()
             }
             _ if self.w.resolve(&owner, &name, &desc).is_none()
@@ -3673,7 +3821,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                     (Some(declaring), _) => {
                         let id = self.w.funcs[&export_name(&declaring, &name, &desc)];
                         let fr = self.module.declare_func_in_func(id, self.b.func);
-                        let call = self.b.ins().call(fr, &args);
+                        let all = self.with_ctx(&args);
+                        let call = self.b.ins().call(fr, &all);
                         self.b.inst_results(call).first().copied()
                     }
                     (None, Some(&sel)) => {
@@ -3689,7 +3838,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         );
                         let sig = signature(self.module, true, &desc).ok_or("a bad signature")?;
                         let sr = self.b.import_signature(sig);
-                        let call = self.b.ins().call_indirect(sr, fp, &args);
+                        let all = self.with_ctx(&args);
+                        let call = self.b.ins().call_indirect(sr, fp, &all);
                         self.b.inst_results(call).first().copied()
                     }
                     (None, None) => {

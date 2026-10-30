@@ -6,9 +6,10 @@
 //! `toString` forms. Not yet: tree bins (a bucket of 8 or more keys with
 //! colliding hashes in a table of 64 or more keeps its list order here).
 use super::{
-    A_DATA, A_LEN, Builtin, Method, alloc, equals, hash_code, instance_of, method, new_string,
+    A_DATA, A_LEN, Builtin, Method, alloc, ctx, equals, hash_code, instance_of, method, new_string,
     pending, rt, set_word, str_of, throw, to_string, units, vt, word,
 };
+use crate::heap::Context;
 
 // ---- Helpers ---------------------------------------------------------------
 
@@ -79,8 +80,8 @@ fn call0(o: u64, nd: &str) -> u64 {
     match method(o, nd) {
         Some(f) => {
             // SAFETY: the selector's slot holds a method of this shape.
-            let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(f) };
-            f(o)
+            let f: extern "C" fn(*mut Context, u64) -> u64 = unsafe { std::mem::transmute(f) };
+            f(ctx(), o)
         }
         None => {
             missing(o, nd);
@@ -92,8 +93,8 @@ fn call0_i(o: u64, nd: &str) -> i32 {
     match method(o, nd) {
         Some(f) => {
             // SAFETY: as above.
-            let f: extern "C" fn(u64) -> i32 = unsafe { std::mem::transmute(f) };
-            f(o)
+            let f: extern "C" fn(*mut Context, u64) -> i32 = unsafe { std::mem::transmute(f) };
+            f(ctx(), o)
         }
         None => {
             missing(o, nd);
@@ -105,8 +106,8 @@ fn call1(o: u64, nd: &str, a: u64) -> u64 {
     match method(o, nd) {
         Some(f) => {
             // SAFETY: as above.
-            let f: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(f) };
-            f(o, a)
+            let f: extern "C" fn(*mut Context, u64, u64) -> u64 = unsafe { std::mem::transmute(f) };
+            f(ctx(), o, a)
         }
         None => {
             missing(o, nd);
@@ -118,8 +119,8 @@ fn call1_i(o: u64, nd: &str, a: u64) -> i32 {
     match method(o, nd) {
         Some(f) => {
             // SAFETY: as above.
-            let f: extern "C" fn(u64, u64) -> i32 = unsafe { std::mem::transmute(f) };
-            f(o, a)
+            let f: extern "C" fn(*mut Context, u64, u64) -> i32 = unsafe { std::mem::transmute(f) };
+            f(ctx(), o, a)
         }
         None => {
             missing(o, nd);
@@ -131,8 +132,9 @@ fn call2(o: u64, nd: &str, a: u64, b: u64) -> u64 {
     match method(o, nd) {
         Some(f) => {
             // SAFETY: as above.
-            let f: extern "C" fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(f) };
-            f(o, a, b)
+            let f: extern "C" fn(*mut Context, u64, u64, u64) -> u64 =
+                unsafe { std::mem::transmute(f) };
+            f(ctx(), o, a, b)
         }
         None => {
             missing(o, nd);
@@ -144,8 +146,9 @@ fn call2_i(o: u64, nd: &str, a: u64, b: u64) -> i32 {
     match method(o, nd) {
         Some(f) => {
             // SAFETY: as above.
-            let f: extern "C" fn(u64, u64, u64) -> i32 = unsafe { std::mem::transmute(f) };
-            f(o, a, b)
+            let f: extern "C" fn(*mut Context, u64, u64, u64) -> i32 =
+                unsafe { std::mem::transmute(f) };
+            f(ctx(), o, a, b)
         }
         None => {
             missing(o, nd);
@@ -732,11 +735,11 @@ extern "C" fn uoe_remove(_m: u64, _k: u64) -> u64 {
 
 /// An object the runtime makes once.
 fn once(name: &'static str, make: impl FnOnce() -> u64) -> u64 {
-    if let Some(&o) = rt().once.borrow().get(name) {
+    if let Some(&o) = rt().once.lock().unwrap().get(name) {
         return o;
     }
     let o = make();
-    rt().once.borrow_mut().insert(name, o);
+    rt().once.lock().unwrap().insert(name, o);
     o
 }
 

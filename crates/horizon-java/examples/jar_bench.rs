@@ -336,12 +336,16 @@ fn native_bench(classes: &[ClassFile], bench: &[String]) -> Result<()> {
         .ok_or(anyhow("no run method"))?;
     // SAFETY: the compiled methods have these signatures (a reference is
     // a pointer, an int an i32), in the platform's calling convention.
-    let make: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(make) };
-    let run: extern "C" fn(i64, i32) -> f64 = unsafe { std::mem::transmute(run) };
-    let made = make(42);
+    // (Each takes the thread's context first.)
+    let make: extern "C" fn(*mut horizon_java::heap::Context, i64) -> i64 =
+        unsafe { std::mem::transmute(make) };
+    let run: extern "C" fn(*mut horizon_java::heap::Context, i64, i32) -> f64 =
+        unsafe { std::mem::transmute(run) };
+    let ctx = native.context();
+    let made = make(ctx, 42);
     for pass in 0..5 {
         let t = Instant::now();
-        let sum = run(made, n);
+        let sum = run(ctx, made, n);
         println!(
             "pass {pass}: {:.1} ms sum={sum}d",
             t.elapsed().as_secs_f64() * 1e3

@@ -12,6 +12,7 @@
 //! - boxes: the value;
 //! - `Throwable`: message, cause;
 //! - arrays (the compiler's): kind, length, elements.
+use crate::heap::Context;
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -47,8 +48,6 @@ pub struct Method {
 
 /// What the runtime needs from the compiled program.
 pub struct Rt {
-    /// [next free byte, arena end, exception being thrown].
-    pub globals: *mut u64,
     /// The vtables of the built-in classes, by name.
     pub vtables: HashMap<&'static str, u64>,
     /// Each class id's name (for `Object.toString`).
@@ -70,11 +69,24 @@ pub struct Rt {
     /// Each enum class's `$VALUES` static (its address), by class id.
     pub enum_values: HashMap<u32, u64>,
     /// Objects the runtime makes once (`Optional.empty()`...), by name.
-    pub once: std::cell::RefCell<HashMap<&'static str, u64>>,
+    pub once: std::sync::Mutex<HashMap<&'static str, u64>>,
 }
 
 thread_local! {
     static RT: Cell<*const Rt> = const { Cell::new(std::ptr::null()) };
+    /// This thread's context (`heap::Context`): its buffer and exception.
+    static CTX: Cell<*mut Context> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// Makes `ctx` this thread's context for the runtime library (compiled code
+/// gets it as an argument). It must stay alive while the thread runs code.
+pub fn install_context(ctx: &Context) {
+    CTX.with(|c| c.set(ctx as *const Context as *mut Context));
+}
+
+/// This thread's context, as compiled code takes it.
+pub(crate) fn ctx() -> *mut Context {
+    CTX.with(Cell::get)
 }
 
 /// Makes `rt` the runtime of this thread's compiled code. It must stay
@@ -104,19 +116,24 @@ unsafe fn set_word(obj: u64, at: usize, v: u64) {
     unsafe { *((obj as usize + at) as *mut u64) = v }
 }
 
-/// Bump allocation in the arena, zeroed, with its header.
+/// Allocation in this thread's buffer, zeroed, with its header; a new
+/// buffer from the heap when it is out.
 pub fn alloc(size: usize, vtable: u64) -> u64 {
-    let g = rt().globals;
-    let size = (size + 7) & !7;
-    // SAFETY: globals points at the program's three globals.
-    unsafe {
-        let cur = *g;
-        let next = cur + size as u64;
-        assert!(next <= *g.add(1), "the arena is full");
-        *g = next;
-        *(cur as *mut u64) = vtable;
-        cur
-    }
+    let size = ((size + 7) & !7) as u64;
+    let ctx = ctx();
+    // SAFETY: this thread's context, installed before its code runs.
+    let c = unsafe { &mut *ctx };
+    let at = if c.bump + size <= c.limit && c.bump != 0 {
+        let at = c.bump;
+        c.bump += size;
+        at
+    } else {
+        crate::heap::refill(ctx, size)
+    };
+    assert!(at != 0, "the heap is full");
+    // SAFETY: a fresh object of `size` bytes.
+    unsafe { *(at as *mut u64) = vtable };
+    at
 }
 
 fn vt(name: &str) -> u64 {
@@ -131,16 +148,16 @@ pub fn throw(name: &str, message: Option<&str>) {
         // SAFETY: a Throwable has its message at 8.
         unsafe { set_word(e, 8, s) };
     }
-    // SAFETY: globals[2] is the exception slot.
-    unsafe { *rt().globals.add(2) = e };
+    // SAFETY: this thread's context.
+    unsafe { (*ctx()).exception = e };
 }
 
 /// Throws a new exception whose class has vtable `vtable` (for the
 /// compiled code's implicit exceptions: null, bounds, division, cast).
 pub extern "C" fn throw_new(vtable: u64) {
     let e = alloc(24, vtable);
-    // SAFETY: globals[2] is the exception slot.
-    unsafe { *rt().globals.add(2) = e };
+    // SAFETY: this thread's context.
+    unsafe { (*ctx()).exception = e };
 }
 
 /// Why each stop compiled (`native::MethodGen::stop`), by its number.
@@ -167,7 +184,7 @@ pub extern "C" fn stopped(id: i32) {
 
 fn pending() -> bool {
     // SAFETY: as above.
-    unsafe { *rt().globals.add(2) != 0 }
+    unsafe { (*ctx()).exception != 0 }
 }
 
 // ---- Strings ----------------------------------------------------------
@@ -225,8 +242,8 @@ pub fn to_string(o: u64) -> u64 {
     match call_virtual(o, rt().to_string) {
         Some(f) => {
             // SAFETY: the selector's slot holds a (receiver) -> String method.
-            let f: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(f) };
-            f(o)
+            let f: extern "C" fn(*mut Context, u64) -> u64 = unsafe { std::mem::transmute(f) };
+            f(ctx(), o)
         }
         None => object_to_string(o),
     }
@@ -688,8 +705,8 @@ fn object_to_string(o: u64) -> u64 {
     let hash = match call_virtual(o, rt().hash_code) {
         Some(f) => {
             // SAFETY: the hashCode selector's slot: (receiver) -> int.
-            let f: extern "C" fn(u64) -> i32 = unsafe { std::mem::transmute(f) };
-            f(o)
+            let f: extern "C" fn(*mut Context, u64) -> i32 = unsafe { std::mem::transmute(f) };
+            f(ctx(), o)
         }
         None => identity_hash(o),
     };
@@ -703,8 +720,8 @@ pub fn equals(o: u64, other: u64) -> bool {
     match call_virtual(o, rt().equals) {
         Some(f) => {
             // SAFETY: the equals selector's slot: (receiver, Object) -> boolean.
-            let f: extern "C" fn(u64, u64) -> i32 = unsafe { std::mem::transmute(f) };
-            f(o, other) != 0
+            let f: extern "C" fn(*mut Context, u64, u64) -> i32 = unsafe { std::mem::transmute(f) };
+            f(ctx(), o, other) != 0
         }
         None => false,
     }
@@ -714,8 +731,8 @@ pub fn hash_code(o: u64) -> i32 {
     match call_virtual(o, rt().hash_code) {
         Some(f) => {
             // SAFETY: as above.
-            let f: extern "C" fn(u64) -> i32 = unsafe { std::mem::transmute(f) };
-            f(o)
+            let f: extern "C" fn(*mut Context, u64) -> i32 = unsafe { std::mem::transmute(f) };
+            f(ctx(), o)
         }
         None => identity_hash(o),
     }

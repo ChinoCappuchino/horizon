@@ -55,4 +55,30 @@ public class NativeOps {
         b.k = 5;
         return a.op().applyAsInt(x) * 100 + b.op().applyAsInt(x);
     }
+
+    /** Allocates all the way: arrays of varying length, a list of nodes. */
+    static final class Node {
+        final int value;
+        final Node next;
+
+        Node(int value, Node next) {
+            this.value = value;
+            this.next = next;
+        }
+    }
+
+    public static long churn(int n) {
+        long sum = 0;
+        Node head = null;
+        for (int i = 0; i < n; i++) {
+            int[] a = new int[8 + (i & 63)];
+            a[i % a.length] = i;
+            sum += a.length + a[i % a.length];
+            head = new Node(i, (i & 1023) == 0 ? null : head);
+        }
+        for (Node x = head; x != null; x = x.next) {
+            sum += x.value;
+        }
+        return sum;
+    }
 }

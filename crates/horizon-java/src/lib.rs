@@ -11,6 +11,8 @@ pub mod classfile;
 pub mod compile;
 pub mod descriptor;
 #[cfg(feature = "native")]
+pub mod heap;
+#[cfg(feature = "native")]
 pub mod native;
 #[cfg(feature = "native")]
 pub mod rt;
