@@ -165,6 +165,12 @@ pub fn carry(
         mods: &in_pack,
     };
     let mut done = 0;
+    // Progress, mod by mod ("Carrying over mod 3/7: name").
+    let total = records
+        .iter()
+        .filter(|r| chosen(r) && r.jar.is_some() && r.info.is_some())
+        .count();
+    let mut started = 0;
     for r in &records {
         let chosen = chosen(r);
         let (Some(jar), Some(info)) = (&r.jar, &r.info) else {
@@ -180,6 +186,8 @@ pub fn carry(
         if !chosen {
             continue;
         }
+        started += 1;
+        log(format!("Carrying over mod {started}/{total}: {}", r.key));
         // The oracle's facts for the mods it ran; a mod it did not load (a
         // library missing) keeps the guesses from its blockstates.
         let prefix = format!("{}:", info.mod_id);
@@ -265,6 +273,7 @@ pub fn translate(
     let next = std::sync::atomic::AtomicUsize::new(0);
     let (tx, rx) = std::sync::mpsc::channel::<Translated>();
     let mut done = 0;
+    let mut finished = 0;
     let mut failed = None;
     std::thread::scope(|scope| {
         for _ in 0..threads {
@@ -282,10 +291,14 @@ pub fn translate(
         for message in rx {
             match message {
                 Translated::Done(line) => {
-                    log(line);
                     done += 1;
+                    finished += 1;
+                    log(format!("Mod code {finished}/{}: {line}", chosen.len()));
                 }
-                Translated::DidNotRun(line) => log(line),
+                Translated::DidNotRun(line) => {
+                    finished += 1;
+                    log(format!("Mod code {finished}/{}: {line}", chosen.len()));
+                }
                 Translated::Failed(e) => {
                     failed.get_or_insert(e);
                 }

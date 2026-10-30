@@ -217,8 +217,10 @@ impl Setup {
         let Some((n, of, title, since)) = &self.stage else {
             return ("Setting up".to_owned(), 0.0);
         };
-        // Within a step: on toward its end, never quite there.
-        let within = 0.92 * (1.0 - (-since.elapsed().as_secs_f32() / 50.0).exp());
+        // Within a step: its latest line's count ("mod 3/7"), else on
+        // toward its end with time, never quite there.
+        let within = count_in(&self.line)
+            .unwrap_or_else(|| 0.92 * (1.0 - (-since.elapsed().as_secs_f32() / 50.0).exp()));
         let progress = ((*n as f32 - 1.0 + within) / (*of).max(1) as f32).clamp(0.0, 1.0);
         let mut text = if self.line.is_empty() {
             title.clone()
@@ -259,6 +261,16 @@ impl Setup {
         self.splash = None;
         event_loop.exit();
     }
+}
+
+/// How far a line's count is ("Carrying over mod 3/7: name" is 3/7).
+fn count_in(line: &str) -> Option<f32> {
+    line.split(|c: char| c.is_whitespace() || c == ':')
+        .find_map(|word| {
+            let (k, n) = word.split_once('/')?;
+            let (k, n) = (k.parse::<u32>().ok()?, n.parse::<u32>().ok()?);
+            (n > 0 && k <= n).then(|| k as f32 / n as f32)
+        })
 }
 
 /// `== 2/5 Preparing the resources ==`: (2, 5, its title).
@@ -339,5 +351,21 @@ impl ApplicationHandler for Setup {
         let next = s.next_frame();
         self.write_moment();
         event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count_in;
+
+    #[test]
+    fn a_lines_count_is_its_progress() {
+        assert_eq!(count_in("Carrying over mod 3/6: chipped"), Some(0.5));
+        assert_eq!(count_in("Mod code 7/7: t_and_t: 0 blocks"), Some(1.0));
+        assert_eq!(
+            count_in("Exporting mob data (VanillaMobDataExporter)"),
+            None
+        );
+        assert_eq!(count_in("path a/b"), None);
     }
 }
