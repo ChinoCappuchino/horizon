@@ -568,6 +568,30 @@ extern "C" fn uuid_version(u: u64) -> i32 {
     ((uuid_bits(u).0 >> 12) & 0x0F) as i32
 }
 
+// ---- File system providers ------------------------------------------------------
+//
+// The installed ones, by scheme ([vtable][scheme String]): opening their
+// file systems comes with java.nio's file system.
+
+const PROVIDER: &str = "java/nio/file/spi/FileSystemProvider";
+
+extern "C" fn installed_providers() -> u64 {
+    once("FileSystemProvider.installedProviders", || {
+        let list = super::collections::new_array_list();
+        for scheme in ["file", "jar"] {
+            let p = alloc(16, vt(PROVIDER));
+            // SAFETY: a fresh provider.
+            unsafe { *((p + 8) as *mut u64) = str_of(scheme) };
+            super::collections::al_add(list, p);
+        }
+        list
+    })
+}
+extern "C" fn provider_scheme(p: u64) -> u64 {
+    // SAFETY: p is a provider.
+    unsafe { word(p, 8) }
+}
+
 /// The JDK's static fields this library provides: `owner name` → its
 /// getter and the getter's descriptor.
 pub fn static_getter(owner: &str, name: &str) -> Option<(usize, &'static str)> {
@@ -625,6 +649,23 @@ pub fn builtins() -> Vec<Builtin> {
                 m("totalMemory", "()J", f!(runtime_total_memory)),
                 m("freeMemory", "()J", f!(runtime_free_memory)),
                 m("gc", "()V", f!(runtime_gc)),
+            ],
+        },
+        Builtin {
+            name: PROVIDER,
+            super_name: Some(O),
+            interfaces: &[],
+            size: 16,
+            is_final: false,
+            is_interface: false,
+            methods: vec![
+                Method {
+                    name: "installedProviders",
+                    desc: "()Ljava/util/List;",
+                    is_static: true,
+                    f: f!(installed_providers),
+                },
+                m("getScheme", "()Ljava/lang/String;", f!(provider_scheme)),
             ],
         },
         Builtin {

@@ -899,6 +899,38 @@ impl Native {
                 thunks.insert((m.f, m.desc), id);
             }
         }
+        // Each selector's stand-in for the classes without an
+        // implementation: it says which method was called, then traps.
+        let mut absent: HashMap<usize, FuncId> = HashMap::new();
+        for ((mname, mdesc), &sel) in &selectors {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let id = module
+                .declare_function(&format!("absent {sel}"), Linkage::Local, &sig)
+                .map_err(|e| e.to_string())?;
+            ctx.func.signature = sig;
+            let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+            let e = fb.create_block();
+            fb.append_block_params_for_function_params(e);
+            fb.switch_to_block(e);
+            fb.seal_block(e);
+            let why = rt::stop_reason(format!(
+                "a virtual call to {mname}{mdesc}, which the object's class does not implement"
+            ));
+            let mut raw = module.make_signature();
+            raw.params.push(AbiParam::new(types::I32));
+            let sr = fb.import_signature(raw);
+            let f = fb.ins().iconst(types::I64, rt::stopped as *const () as i64);
+            let id_value = fb.ins().iconst(types::I32, i64::from(why));
+            fb.ins().call_indirect(sr, f, &[id_value]);
+            fb.ins().trap(UNSUPPORTED);
+            fb.finalize(module.target_config());
+            module
+                .define_function(id, &mut ctx)
+                .map_err(|e| format!("absent {mname}: {e:?}"))?;
+            module.clear_context(&mut ctx);
+            absent.insert(sel, id);
+        }
         module.finalize_definitions().map_err(|e| e.to_string())?;
         let thunk = |m: &rt::Method| -> u64 {
             thunks
@@ -1032,7 +1064,10 @@ impl Native {
             }
         }
         // Selectors nothing implements: a call stops with a message.
-        let missing = host_missing as *const u8 as u64;
+        let absent_at: HashMap<usize, u64> = absent
+            .iter()
+            .map(|(&sel, &id)| (sel, module.get_finalized_function(id) as u64))
+            .collect();
         // HORIZON_NATIVE_MISSING=<text>: the selectors left to it, for each
         // class whose name has the text.
         let report = std::env::var("HORIZON_NATIVE_MISSING").ok();
@@ -1044,7 +1079,7 @@ impl Native {
             let class = class_names.get(vt[0] as usize).cloned().unwrap_or_default();
             for (k, slot) in vt.iter_mut().enumerate().skip(1) {
                 if *slot == 0 {
-                    *slot = missing;
+                    *slot = absent_at[&(k - 1)];
                     if report.as_ref().is_some_and(|r| class.contains(r.as_str())) {
                         eprintln!("{class}: no {}", by_selector[&(k - 1)]);
                     }
