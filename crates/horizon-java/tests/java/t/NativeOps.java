@@ -123,4 +123,16 @@ public class NativeOps {
     public static int sameOffsetLambdas() {
         return functionAt1(2).apply(3) * 10 + supplierAt1(4).get().length();
     }
+
+    /** instanceof on lambdas of the runtime's interfaces. */
+    public static int lambdaInstanceOf() {
+        Object f = (java.util.function.Function<Integer, Integer>) x -> x + 1;
+        Object c = (java.util.Comparator<Integer>) (a, b) -> a - b;
+        int r = 0;
+        if (f instanceof java.util.function.Function) r |= 1;
+        if (!(f instanceof java.util.Comparator)) r |= 2;
+        if (c instanceof java.util.Comparator) r |= 4;
+        if (!(c instanceof java.util.function.Function)) r |= 8;
+        return r;
+    }
 }

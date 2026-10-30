@@ -145,6 +145,11 @@ struct TypeTables {
     names: Vec<HashSet<String>>,
     /// The classes `catch` clauses name, by index.
     catches: Vec<String>,
+    /// Each class id's bits: one per class the code tests against (its
+    /// number in `World::tested`), set when the class is one of those.
+    /// `bit_table` holds their addresses by class id, for the code.
+    bits: Vec<Box<[u64]>>,
+    bit_table: Box<[u64]>,
 }
 
 extern "C" fn host_catches(exc: u64, catch: u32, tables: *const TypeTables) -> u32 {
@@ -546,7 +551,10 @@ impl Native {
             ancestors: Vec::new(),
             names: names_of,
             catches: Vec::new(),
+            bits: Vec::new(),
+            bit_table: vec![0u64; builtin_base + builtins.len()].into_boxed_slice(),
         });
+        let bit_table_at = types.bit_table.as_ptr() as i64;
         let types_at = &*types as *const TypeTables as i64;
         // Ancestors, for instanceof and checkcast: by id, built-ins too.
         let mut ancestors: Vec<HashSet<u32>> = vec![HashSet::new(); builtin_base + builtins.len()];
@@ -559,7 +567,8 @@ impl Native {
         }
         for (i, l) in lambdas.iter().enumerate() {
             let id = (names.len() + 1 + i) as u32;
-            let mut set: HashSet<u32> = ancestors_of(&l.interface, &by_name)
+            // Its interface's ancestors, the runtime's interfaces too.
+            let mut set: HashSet<u32> = chain(&l.interface)
                 .iter()
                 .filter_map(|c| ids.get(c.as_str()).copied())
                 .collect();
@@ -738,6 +747,8 @@ impl Native {
             statics_base,
             flags_at,
             types_at,
+            bit_table_at,
+            tested: std::cell::RefCell::new(HashMap::new()),
             ptr,
             lambdas: &lambdas,
             lambda_at: &lambda_at,
@@ -792,6 +803,23 @@ impl Native {
             }
         }
         types.catches = world.catches.borrow().clone();
+        // The bits of the classes the code tests against, now all known.
+        let tested = world.tested.borrow().clone();
+        let words = tested.len().div_ceil(64).max(1);
+        for id in 0..types.bit_table.len() {
+            let mut bits = vec![0u64; words].into_boxed_slice();
+            for (&target, &k) in &tested {
+                if types
+                    .ancestors
+                    .get(id)
+                    .is_some_and(|a| a.binary_search(&target).is_ok())
+                {
+                    bits[k as usize / 64] |= 1 << (k % 64);
+                }
+            }
+            types.bit_table[id] = bits.as_ptr() as u64;
+            types.bits.push(bits);
+        }
         // The lambdas' bridges: captured values and the interface method's
         // arguments to the target.
         for (i, l) in lambdas.iter().enumerate() {
@@ -1531,8 +1559,12 @@ struct World<'a> {
     statics_at: &'a HashMap<(String, String), (i32, Type)>,
     statics_base: i64,
     flags_at: usize,
-    /// The program's type tables (`TypeTables`), by address.
+    /// The program's type tables (`TypeTables`), by address, and their
+    /// table of each class id's bits.
     types_at: i64,
+    bit_table_at: i64,
+    /// The classes the code tests against, by id: their bit numbers.
+    tested: std::cell::RefCell<HashMap<u32, u32>>,
     ptr: Type,
     lambdas: &'a [LambdaSite],
     /// Each lambda site, by class, method and offset.
@@ -3328,8 +3360,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
 
     /// Bump allocation of `size` bytes (zeroed), the header set to `header`.
     /// Whether `obj` is an instance of `class` (id `id`), 0 for null: its
-    /// vtable compared with the class's own first (no call when it is that
-    /// class), then the program's type tables.
+    /// vtable compared with the class's own first, then its class's bit for
+    /// `class` (no call either way).
     fn instance_test(&mut self, obj: Value, class: &str, id: u32) -> Result<Value, String> {
         let i32t = types::I32;
         let zero = self.b.ins().iconst(i32t, 0);
@@ -3355,11 +3387,26 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             self.b.switch_to_block(slow);
             self.b.seal_block(slow);
         }
-        let idv = self.b.ins().iconst(i32t, i64::from(id));
-        let types = self.b.ins().iconst(types::I64, self.w.types_at);
-        let r = self
-            .host("host_is_instance", &[obj, idv, types])
-            .ok_or("host_is_instance")?;
+        // Else the class's bit for `class`: its id's bits, from the table.
+        let k = {
+            let mut tested = self.w.tested.borrow_mut();
+            let n = tested.len() as u32;
+            *tested.entry(id).or_insert(n)
+        };
+        let i64t = types::I64;
+        let vt = self.b.ins().load(i64t, MemFlagsData::trusted(), obj, 0);
+        let class_id = self.b.ins().load(i64t, MemFlagsData::trusted(), vt, 0);
+        let slot = self.b.ins().imul_imm_s(class_id, 8);
+        let table = self.b.ins().iconst(i64t, self.w.bit_table_at);
+        let slot = self.b.ins().iadd(table, slot);
+        let bits = self.b.ins().load(i64t, MemFlagsData::trusted(), slot, 0);
+        let word = self
+            .b
+            .ins()
+            .load(i64t, MemFlagsData::trusted(), bits, (8 * (k / 64)) as i32);
+        let bit = self.b.ins().ushr_imm_s(word, i64::from(k % 64));
+        let bit = self.b.ins().band_imm_s(bit, 1);
+        let r = self.b.ins().ireduce(i32t, bit);
         self.b.ins().jump(done, &[r.into()]);
         self.b.switch_to_block(done);
         self.b.seal_block(done);

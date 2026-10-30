@@ -292,3 +292,12 @@ fn type_tests_and_catches_work_on_every_thread() {
     let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
     assert_eq!(f(native.context()), 0b1111);
 }
+
+#[test]
+fn lambdas_are_instances_of_their_interfaces() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/NativeOps.lambdaInstanceOf()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    assert_eq!(f(native.context()), 0b1111);
+}
