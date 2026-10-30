@@ -189,13 +189,56 @@ impl Creative {
     /// prepared before it fall back to `creative-tabs.json`'s item ids.
     pub fn load(root: &Path) -> Result<Self> {
         let path = root.join("creative-inventory.json");
-        if path.exists() {
-            Self::from_json(&serde_json::from_slice(&fs::read(path)?)?)
+        let mut creative = if path.exists() {
+            Self::from_json(&serde_json::from_slice(&fs::read(path)?)?)?
         } else {
             Self::from_legacy(&serde_json::from_slice(&fs::read(
                 root.join("creative-tabs.json"),
-            )?)?)
+            )?)?)?
+        };
+        creative.add_mod_items(root);
+        Ok(creative)
+    }
+    /// The content mods' items (fork `afterwinter`), after vanilla's in the
+    /// search tab: their code, which would place them in tabs of their own,
+    /// does not run here. In each mod's namespace, by id.
+    fn add_mod_items(&mut self, root: &Path) {
+        let mut added = Vec::new();
+        for namespace in crate::mod_content::namespaces(root) {
+            let Ok(dir) = fs::read_dir(root.join("assets").join(&namespace).join("items")) else {
+                continue;
+            };
+            let mut paths: Vec<String> = dir
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.strip_suffix(".json").map(str::to_owned)
+                })
+                .collect();
+            paths.sort();
+            for path in paths {
+                let id = format!("{namespace}:{path}");
+                if self.search_items.iter().any(|s| *s.item == *id) {
+                    continue;
+                }
+                added.push(ItemStack {
+                    item: Arc::from(id.as_str()),
+                    count: 1,
+                    damage: 0,
+                    extra: None,
+                });
+                self.search_index.push(SearchEntry {
+                    namespace: java_lower(&namespace),
+                    path: java_lower(&path),
+                    lines: Vec::new(),
+                    tags: Vec::new(),
+                });
+            }
         }
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.search) {
+            tab.items.extend(added.iter().cloned());
+        }
+        self.search_items.extend(added);
     }
     pub fn from_json(raw: &Value) -> Result<Self> {
         let mut tabs = Vec::new();

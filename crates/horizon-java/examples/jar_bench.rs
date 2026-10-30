@@ -275,6 +275,12 @@ fn main() -> Result<()> {
             roots = classes.len();
         }
     }
+    // A class in several of the inputs: the first one's (patched classes
+    // listed before the originals win).
+    {
+        let mut seen = std::collections::HashSet::new();
+        classes.retain(|c| seen.insert(c.name().unwrap_or_default().to_owned()));
+    }
     // `--only`: the classes it names, and every class they extend or
     // implement (a class is never compiled without its supertypes).
     if !only.is_empty() {

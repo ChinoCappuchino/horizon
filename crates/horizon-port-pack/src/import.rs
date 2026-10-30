@@ -271,6 +271,39 @@ pub fn modlist(list: &Value) -> Result<Pack, String> {
     Ok(pack)
 }
 
+/// What a set of jars is made for: the loader most of them use, the
+/// Minecraft version most of them start at, and the highest of the loader
+/// versions they ask for (one every jar takes).
+fn made_for(jars: &[crate::jar::JarInfo]) -> Option<(String, String, String)> {
+    let most = |values: Vec<&str>| -> Option<String> {
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for v in values.into_iter().filter(|v| !v.is_empty()) {
+            *counts.entry(v).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .max_by_key(|&(v, n)| (n, std::cmp::Reverse(v)))
+            .map(|(v, _)| v.to_owned())
+    };
+    let loader = most(jars.iter().map(|j| j.loader.as_str()).collect())?;
+    let of_loader: Vec<&crate::jar::JarInfo> = jars.iter().filter(|j| j.loader == loader).collect();
+    let minecraft =
+        most(of_loader.iter().map(|j| j.minecraft.as_str()).collect()).unwrap_or_default();
+    let numbers = |v: &str| -> Vec<u64> {
+        v.split(['.', '-', '+'])
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    let loader_version = of_loader
+        .iter()
+        .map(|j| j.loader_min.as_str())
+        .filter(|v| !v.is_empty())
+        .max_by_key(|v| numbers(v))
+        .unwrap_or("")
+        .to_owned();
+    Some((loader, minecraft, loader_version))
+}
+
 /// A Prism / MultiMC instance (`mmc-pack.json`), a game folder, or a
 /// folder of jars: the jars on disk, hashed.
 fn instance(dir: &Path) -> Result<Pack, String> {
@@ -334,6 +367,19 @@ fn instance(dir: &Path) -> Result<Pack, String> {
             ..PackFile::default()
         });
     }
+    // No loader named (a folder of jars, or an instance the game itself
+    // runs in): the jars say what they are for.
+    if pack.loader.is_empty() {
+        let infos: Vec<crate::jar::JarInfo> = pack
+            .files
+            .iter()
+            .filter_map(|f| crate::jar::read(f.jar.as_ref()?).ok())
+            .collect();
+        if let Some((loader, minecraft, loader_version)) = made_for(&infos) {
+            (pack.loader, pack.minecraft, pack.loader_version) =
+                (loader, minecraft, loader_version);
+        }
+    }
     for top in ["config", "kubejs", "defaultconfigs", "datapacks"] {
         let n = count_files(&game.join(top));
         if n > 0 {
@@ -367,6 +413,27 @@ pub fn sha1_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jars_say_what_they_are_for() {
+        let jar = |loader: &str, mc: &str, min: &str| crate::jar::JarInfo {
+            loader: loader.into(),
+            minecraft: mc.into(),
+            loader_min: min.into(),
+            ..Default::default()
+        };
+        let jars = [
+            jar("neoforge", "1.21.1", "21.1.77"),
+            jar("neoforge", "1.21.1", "21.1.251"),
+            jar("neoforge", "1.21", ""),
+            jar("fabric", "1.20.1", "0.15.0"),
+        ];
+        assert_eq!(
+            made_for(&jars),
+            Some(("neoforge".into(), "1.21.1".into(), "21.1.251".into()))
+        );
+        assert_eq!(made_for(&[]), None);
+    }
     use serde_json::json;
 
     #[test]

@@ -13,6 +13,15 @@ pub struct JarInfo {
     /// Required dependencies by mod id (loaders and `minecraft` left out).
     pub depends: Vec<String>,
     pub census: Census,
+    /// The loader it is for (`neoforge`, `forge`, `fabric`), the lowest
+    /// Minecraft version it takes, and the lowest loader version it needs
+    /// (empty when the jar doesn't say).
+    #[serde(default)]
+    pub loader: String,
+    #[serde(default)]
+    pub minecraft: String,
+    #[serde(default)]
+    pub loader_min: String,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,10 +50,17 @@ pub fn read(path: &Path) -> Result<JarInfo, String> {
         zip.by_name(name).ok()?.read_to_string(&mut s).ok()?;
         Some(s)
     };
-    let mut info = if let Some(t) = text(&mut zip, "META-INF/neoforge.mods.toml")
-        .or_else(|| text(&mut zip, "META-INF/mods.toml"))
-    {
-        mods_toml(&t)?
+    let mut info = if let Some(t) = text(&mut zip, "META-INF/neoforge.mods.toml") {
+        let mut info = mods_toml(&t)?;
+        info.loader = "neoforge".into();
+        info
+    } else if let Some(t) = text(&mut zip, "META-INF/mods.toml") {
+        let mut info = mods_toml(&t)?;
+        // NeoForge's first 1.20.1 jars still used mods.toml.
+        if info.loader.is_empty() {
+            info.loader = "forge".into();
+        }
+        info
     } else if let Some(t) = text(&mut zip, "fabric.mod.json") {
         fabric(&t)?
     } else {
@@ -95,6 +111,7 @@ pub fn mods_toml(text: &str) -> Result<JarInfo, String> {
     };
     let mod_id = get(first, "modId");
     let mut depends = Vec::new();
+    let (mut minecraft, mut loader, mut loader_min) = (String::new(), String::new(), String::new());
     if let Some(deps) = doc
         .get("dependencies")
         .and_then(|d| d.get(&mod_id))
@@ -106,6 +123,15 @@ pub fn mods_toml(text: &str) -> Result<JarInfo, String> {
                 |t| t.eq_ignore_ascii_case("required"),
             );
             let id = get(Some(d), "modId");
+            let range = get(Some(d), "versionRange");
+            match id.as_str() {
+                "minecraft" => minecraft = lower_bound(&range),
+                "neoforge" | "forge" => {
+                    loader = id.clone();
+                    loader_min = lower_bound(&range);
+                }
+                _ => {}
+            }
             if required && !NOT_MODS.contains(&id.as_str()) && !id.is_empty() {
                 depends.push(id);
             }
@@ -118,6 +144,9 @@ pub fn mods_toml(text: &str) -> Result<JarInfo, String> {
         mod_id,
         depends,
         census: Census::default(),
+        loader,
+        minecraft,
+        loader_min,
     })
 }
 
@@ -140,6 +169,10 @@ pub fn fabric(text: &str) -> Result<JarInfo, String> {
         .map(|(id, _)| id.clone())
         .filter(|id| !NOT_MODS.contains(&id.as_str()) && !id.starts_with("fabric"))
         .collect();
+    let range = |k: &str| match &v["depends"][k] {
+        serde_json::Value::Array(a) => a.first().and_then(|x| x.as_str()).map(lower_bound),
+        x => x.as_str().map(lower_bound),
+    };
     Ok(JarInfo {
         mod_id: s("id"),
         name: s("name"),
@@ -147,7 +180,29 @@ pub fn fabric(text: &str) -> Result<JarInfo, String> {
         license,
         depends,
         census: Census::default(),
+        loader: "fabric".into(),
+        minecraft: range("minecraft").unwrap_or_default(),
+        loader_min: range("fabricloader").unwrap_or_default(),
     })
+}
+
+/// The lowest version a dependency range takes: Maven's `[1.21.1,1.21.2)`
+/// and `[21.1.77,)`, a bare `1.21.1`, Fabric's `>=1.21`, `~1.21.1`,
+/// `1.21.x`. Empty for `*` or nothing.
+pub fn lower_bound(range: &str) -> String {
+    let first = range.split([',', ' ']).next().unwrap_or("");
+    let v = first
+        .trim_start_matches(['[', '(', '~', '^', '>', '=', '<'])
+        .trim();
+    let v = v
+        .trim_end_matches([')', ']'])
+        .trim_end_matches(".x")
+        .trim_end_matches('-');
+    if v == "*" {
+        String::new()
+    } else {
+        v.to_owned()
+    }
 }
 
 pub fn census(names: &[String]) -> Census {
@@ -184,6 +239,17 @@ pub fn census(names: &[String]) -> Census {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_ranges_give_their_lowest_version() {
+        assert_eq!(lower_bound("[1.21.1,1.21.2)"), "1.21.1");
+        assert_eq!(lower_bound("[21.1.77,)"), "21.1.77");
+        assert_eq!(lower_bound("1.21.1"), "1.21.1");
+        assert_eq!(lower_bound(">=1.21"), "1.21");
+        assert_eq!(lower_bound("~1.21.1"), "1.21.1");
+        assert_eq!(lower_bound("1.21.x"), "1.21");
+        assert_eq!(lower_bound("*"), "");
+    }
 
     #[test]
     fn reads_neoforge_metadata() {
