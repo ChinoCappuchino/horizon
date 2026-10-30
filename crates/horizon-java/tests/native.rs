@@ -268,3 +268,18 @@ fn bitsets_give_javas_results() {
         !bits & ((1 << 7) - 1)
     );
 }
+
+#[test]
+fn a_programs_own_list_gets_the_jdks_skeleton_methods() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/Streams.abstractChecks()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    let bits = f(native.context());
+    assert_eq!(
+        bits,
+        (1 << 4) - 1,
+        "failed checks: {:#b}",
+        !bits & ((1 << 4) - 1)
+    );
+}

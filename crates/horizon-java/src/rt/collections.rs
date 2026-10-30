@@ -2562,11 +2562,219 @@ macro_rules! f {
 }
 
 /// The collections' and utilities' built-in classes.
+// ---- AbstractCollection, AbstractList, AbstractSet, AbstractMap ---------------------
+//
+// The JDK's skeletons for the program's own collections (fastutil's
+// extend them): their methods work through the subclass's size(),
+// iterator(), get() and add().
+
+extern "C" fn abstract_init(_c: u64) {}
+extern "C" fn abstract_is_empty(c: u64) -> i32 {
+    (call0_i(c, SIZE) == 0).into()
+}
+extern "C" fn abstract_contains(c: u64, o: u64) -> i32 {
+    elements(c)
+        .is_some_and(|items| items.iter().any(|&e| objects_equals(e, o)))
+        .into()
+}
+extern "C" fn abstract_contains_all(c: u64, other: u64) -> i32 {
+    let (Some(mine), Some(theirs)) = (elements(c), elements(other)) else {
+        return 0;
+    };
+    theirs
+        .iter()
+        .all(|&t| mine.iter().any(|&e| objects_equals(e, t)))
+        .into()
+}
+extern "C" fn abstract_add_all(c: u64, other: u64) -> i32 {
+    let Some(items) = elements(other) else {
+        return 0;
+    };
+    let mut changed = false;
+    for e in items {
+        changed |= call1_i(c, "add (Ljava/lang/Object;)Z", e) != 0;
+        if pending() {
+            return 0;
+        }
+    }
+    changed.into()
+}
+extern "C" fn abstract_to_array(c: u64) -> u64 {
+    let Some(items) = elements(c) else { return 0 };
+    let a = obj_array(items.len());
+    for (i, e) in items.iter().enumerate() {
+        put(a, i, *e);
+    }
+    a
+}
+extern "C" fn abstract_to_string(c: u64) -> u64 {
+    elements(c).map_or(0, |items| collection_string(c, &items))
+}
+extern "C" fn abstract_add_unsupported(_c: u64, _e: u64) -> i32 {
+    unsupported();
+    0
+}
+/// `AbstractList.add(e)`: `add(size(), e)`.
+extern "C" fn abstract_list_add(l: u64, e: u64) -> i32 {
+    let n = call0_i(l, SIZE);
+    if pending() {
+        return 0;
+    }
+    call2(l, "add (ILjava/lang/Object;)V", n as u64, e);
+    (!pending()).into()
+}
+extern "C" fn abstract_list_add_at(_l: u64, _i: i32, _e: u64) {
+    unsupported();
+}
+extern "C" fn abstract_list_index_of(l: u64, o: u64) -> i32 {
+    elements(l).map_or(-1, |items| {
+        items
+            .iter()
+            .position(|&e| objects_equals(e, o))
+            .map_or(-1, |i| i as i32)
+    })
+}
+extern "C" fn abstract_list_equals(l: u64, o: u64) -> i32 {
+    elements(l).map_or(0, |items| list_equals(l, &items, o))
+}
+extern "C" fn abstract_list_hash(l: u64) -> i32 {
+    elements(l).map_or(0, |items| list_hash(&items))
+}
+/// `AbstractList.iterator()`: by index, through the list's get and size.
+/// [vtable][list][next index].
+const INDEX_ITERATOR: &str = "horizon/rt/IndexIterator";
+extern "C" fn abstract_list_iterator(l: u64) -> u64 {
+    let it = new_of(INDEX_ITERATOR, 24);
+    set(it, 8, l);
+    it
+}
+extern "C" fn index_has_next(it: u64) -> i32 {
+    ((field(it, 16) as i32) < call0_i(field(it, 8), SIZE)).into()
+}
+extern "C" fn index_next(it: u64) -> u64 {
+    let (l, i) = (field(it, 8), field(it, 16) as i32);
+    if i >= call0_i(l, SIZE) {
+        throw("java/util/NoSuchElementException", None);
+        return 0;
+    }
+    set(it, 16, (i + 1) as u64);
+    call1(l, "get (I)Ljava/lang/Object;", i as u64)
+}
+
+/// `AbstractSet.hashCode`: the sum of the elements' hashes.
+extern "C" fn abstract_set_hash(s: u64) -> i32 {
+    elements(s).map_or(0, |items| {
+        items
+            .iter()
+            .fold(0i32, |h, &e| h.wrapping_add(objects_hash(e)))
+    })
+}
+
+fn abstract_builtins() -> Vec<Builtin> {
+    let m = |name, desc, f: usize| Method {
+        name,
+        desc,
+        is_static: false,
+        f,
+    };
+    macro_rules! f {
+        ($f:expr) => {
+            $f as *const () as usize
+        };
+    }
+    let collection = || {
+        vec![
+            m("<init>", "()V", f!(abstract_init)),
+            m("isEmpty", "()Z", f!(abstract_is_empty)),
+            m("contains", "(Ljava/lang/Object;)Z", f!(abstract_contains)),
+            m(
+                "containsAll",
+                "(Ljava/util/Collection;)Z",
+                f!(abstract_contains_all),
+            ),
+            m("addAll", "(Ljava/util/Collection;)Z", f!(abstract_add_all)),
+            m("toArray", "()[Ljava/lang/Object;", f!(abstract_to_array)),
+            m("toString", "()Ljava/lang/String;", f!(abstract_to_string)),
+            m("add", "(Ljava/lang/Object;)Z", f!(abstract_add_unsupported)),
+        ]
+    };
+    let mut list = collection();
+    list.retain(|x| x.name != "add");
+    list.extend([
+        m("add", "(Ljava/lang/Object;)Z", f!(abstract_list_add)),
+        m("add", "(ILjava/lang/Object;)V", f!(abstract_list_add_at)),
+        m(
+            "indexOf",
+            "(Ljava/lang/Object;)I",
+            f!(abstract_list_index_of),
+        ),
+        m("equals", "(Ljava/lang/Object;)Z", f!(abstract_list_equals)),
+        m("hashCode", "()I", f!(abstract_list_hash)),
+        m(
+            "iterator",
+            "()Ljava/util/Iterator;",
+            f!(abstract_list_iterator),
+        ),
+    ]);
+    let mut set = collection();
+    set.push(m("hashCode", "()I", f!(abstract_set_hash)));
+    const O: &str = "java/lang/Object";
+    vec![
+        class(
+            "java/util/AbstractCollection",
+            O,
+            &["java/util/Collection", "java/lang/Iterable"],
+            8,
+            collection(),
+        ),
+        class(
+            "java/util/AbstractList",
+            "java/util/AbstractCollection",
+            &[
+                "java/util/List",
+                "java/util/Collection",
+                "java/lang/Iterable",
+            ],
+            8,
+            list,
+        ),
+        class(
+            "java/util/AbstractSet",
+            "java/util/AbstractCollection",
+            &[
+                "java/util/Set",
+                "java/util/Collection",
+                "java/lang/Iterable",
+            ],
+            8,
+            set,
+        ),
+        class(
+            INDEX_ITERATOR,
+            O,
+            &["java/util/Iterator"],
+            24,
+            vec![
+                m("hasNext", "()Z", f!(index_has_next)),
+                m("next", "()Ljava/lang/Object;", f!(index_next)),
+            ],
+        ),
+        class(
+            "java/util/AbstractMap",
+            O,
+            &["java/util/Map"],
+            8,
+            vec![m("<init>", "()V", f!(abstract_init))],
+        ),
+    ]
+}
+
 /// Streams and Collectors, and the functional interfaces' methods
 /// (collections/streams.rs, collections/functions.rs).
 pub fn stream_builtins() -> Vec<Builtin> {
     let mut out = streams::builtins();
     out.extend(functions::builtins());
+    out.extend(abstract_builtins());
     out
 }
 

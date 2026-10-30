@@ -167,4 +167,36 @@ public class Streams {
         if (small.get(0) && !small.get(1) && small.get(2) && small.get(5)) bits |= 64;
         return bits;
     }
+
+    /** A list of the numbers below n: only get and size of its own. */
+    static final class Below extends java.util.AbstractList<Integer> {
+        final int n;
+
+        Below(int n) {
+            this.n = n;
+        }
+
+        @Override
+        public Integer get(int i) {
+            return i;
+        }
+
+        @Override
+        public int size() {
+            return n;
+        }
+    }
+
+    /** The JDK's skeleton collections under a program's own: each check one bit. */
+    public static int abstractChecks() {
+        int bits = 0;
+        Below b = new Below(4);
+        if (b.contains(3) && !b.contains(4) && b.indexOf(2) == 2) bits |= 1;
+        if (b.toString().equals("[0, 1, 2, 3]")) bits |= 2;
+        if (b.equals(List.of(0, 1, 2, 3)) && b.hashCode() == List.of(0, 1, 2, 3).hashCode()) bits |= 4;
+        int sum = 0;
+        for (int x : b) sum += x;
+        if (sum == 6 && !b.isEmpty() && new Below(0).isEmpty()) bits |= 8;
+        return bits;
+    }
 }
