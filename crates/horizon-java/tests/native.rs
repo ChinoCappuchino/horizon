@@ -253,3 +253,18 @@ fn lambda_sites_at_the_same_offset_of_two_methods_stay_apart() {
     let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
     assert_eq!(f(native.context()), 5 * 10 + "s4".len() as i32);
 }
+
+#[test]
+fn bitsets_give_javas_results() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/Streams.bitsetChecks()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    let bits = f(native.context());
+    assert_eq!(
+        bits,
+        (1 << 7) - 1,
+        "failed checks: {:#b}",
+        !bits & ((1 << 7) - 1)
+    );
+}

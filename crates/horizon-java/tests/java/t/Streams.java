@@ -1,6 +1,7 @@
 package t;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
@@ -136,6 +137,34 @@ public class Streams {
         if (plus1.andThen(times2).apply(3) == 8 && plus1.compose(times2).apply(3) == 7
                 && Function.<Integer>identity().apply(9) == 9) bits |= 32;
         if (Comparator.<Integer>reverseOrder().compare(1, 2) > 0) bits |= 64;
+        return bits;
+    }
+
+    /** BitSet: each check one bit. */
+    public static int bitsetChecks() {
+        int bits = 0;
+        BitSet b = new BitSet();
+        b.set(3);
+        b.set(70, 130);
+        b.clear(100);
+        if (b.get(3) && !b.get(4) && b.get(70) && b.get(129) && !b.get(130) && !b.get(100)) bits |= 1;
+        if (b.nextSetBit(4) == 70 && b.nextClearBit(70) == 100 && b.previousSetBit(69) == 3) bits |= 2;
+        if (b.length() == 130 && b.cardinality() == 1 + 60 - 1) bits |= 4;
+        BitSet c = new BitSet(256);
+        c.set(3);
+        c.set(200);
+        BitSet both = (BitSet) b.clone();
+        both.and(c);
+        if (both.cardinality() == 1 && both.get(3)) bits |= 8;
+        BitSet any = new BitSet();
+        any.or(c);
+        if (any.equals(c) && any.hashCode() == c.hashCode() && c.size() == 256) bits |= 16;
+        BitSet small = new BitSet();
+        small.set(1);
+        small.set(5);
+        if (small.toString().equals("{1, 5}") && !small.isEmpty() && new BitSet().isEmpty()) bits |= 32;
+        small.flip(0, 3);
+        if (small.get(0) && !small.get(1) && small.get(2) && small.get(5)) bits |= 64;
         return bits;
     }
 }

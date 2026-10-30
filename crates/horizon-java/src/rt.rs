@@ -18,6 +18,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+mod bitset;
 mod collections;
 mod executors;
 mod logging;
@@ -1736,6 +1737,7 @@ pub fn builtins() -> Vec<Builtin> {
     out.extend(threads::builtins());
     out.extend(system::builtins());
     out.extend(executors::builtins());
+    out.extend(bitset::builtins());
     if let Some(system) = out.iter_mut().find(|b| b.name == "java/lang/System") {
         system.methods.extend(system::system_methods());
     }
