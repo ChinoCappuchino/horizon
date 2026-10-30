@@ -19,6 +19,7 @@ fn classes() -> Option<&'static [Vec<u8>]> {
                 .arg(&out)
                 .arg(src.join("t/NativeOps.java"))
                 .arg(src.join("t/Threads.java"))
+                .arg(src.join("t/Streams.java"))
                 .status();
             match status {
                 Ok(s) if s.success() => {}
@@ -32,7 +33,10 @@ fn classes() -> Option<&'static [Vec<u8>]> {
             for e in std::fs::read_dir(out.join("t")).unwrap() {
                 let p = e.unwrap().path();
                 let name = p.file_name().unwrap().to_string_lossy().into_owned();
-                if name.starts_with("NativeOps") || name.starts_with("Threads") {
+                if ["NativeOps", "Threads", "Streams"]
+                    .iter()
+                    .any(|p| name.starts_with(p))
+                {
                     classes.push(std::fs::read(&p).unwrap());
                 }
             }
@@ -156,5 +160,21 @@ fn java_threads_share_monitors_atomics_and_class_initialization() {
         executors(ctx, 200),
         400 * 1000 + 100 + 10 + 1,
         "thread pools from Executors, with the program's thread factories"
+    );
+}
+
+#[test]
+fn streams_and_collectors_give_javas_results() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/Streams.checks()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    let bits = f(native.context());
+    // Each bit a check (t/Streams.java): which ones failed, if any.
+    assert_eq!(
+        bits,
+        (1 << 12) - 1,
+        "failed checks: {:#b}",
+        !bits & ((1 << 12) - 1)
     );
 }

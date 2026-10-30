@@ -11,6 +11,8 @@ use super::{
 };
 use crate::heap::Context;
 
+mod streams;
+
 // ---- Helpers ---------------------------------------------------------------
 
 /// An object array: element size 8 in its header.
@@ -2369,6 +2371,11 @@ macro_rules! f {
 }
 
 /// The collections' and utilities' built-in classes.
+/// Streams and Collectors (collections/streams.rs).
+pub fn stream_builtins() -> Vec<Builtin> {
+    streams::builtins()
+}
+
 pub fn builtins() -> Vec<Builtin> {
     const O: &str = "java/lang/Object";
     const LIST: &[&str] = &[
@@ -2934,7 +2941,14 @@ pub fn builtins() -> Vec<Builtin> {
         interface(
             "java/util/Collection",
             &["java/lang/Iterable"],
-            vec![m("isEmpty", "()Z", f!(collection_is_empty))],
+            vec![
+                m("isEmpty", "()Z", f!(collection_is_empty)),
+                m(
+                    "stream",
+                    "()Ljava/util/stream/Stream;",
+                    f!(streams::collection_stream),
+                ),
+            ],
         ),
         interface(
             "java/lang/Iterable",
@@ -3044,6 +3058,11 @@ pub fn builtins() -> Vec<Builtin> {
             is_final: true,
             is_interface: false,
             methods: vec![
+                s(
+                    "stream",
+                    "([Ljava/lang/Object;)Ljava/util/stream/Stream;",
+                    f!(streams::stream_of_array),
+                ),
                 s(
                     "asList",
                     "([Ljava/lang/Object;)Ljava/util/List;",

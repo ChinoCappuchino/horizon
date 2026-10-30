@@ -1677,6 +1677,7 @@ pub fn builtins() -> Vec<Builtin> {
         object.methods.extend(threads::object_methods());
     }
     out.extend(collections::builtins());
+    out.extend(collections::stream_builtins());
     out.extend(logging::builtins());
     out.extend(threads::builtins());
     out.extend(system::builtins());
