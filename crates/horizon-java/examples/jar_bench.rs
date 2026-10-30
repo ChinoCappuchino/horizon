@@ -380,6 +380,14 @@ fn native_check_report(classes: &[ClassFile]) -> Result<()> {
     for (w, n) in why.iter().take(15) {
         println!("  {n:>6}  {w}");
     }
+    // HORIZON_BENCH_STOPS=<text>: each stop whose place or reason has it.
+    if let Ok(filter) = std::env::var("HORIZON_BENCH_STOPS") {
+        for why in horizon_java::rt::stop_reasons() {
+            if why.contains(&filter) {
+                println!("  stop: {why}");
+            }
+        }
+    }
     let total: usize = native.stops.values().sum();
     println!("{total} instructions compiled as stops; by kind and package:");
     let mut groups: std::collections::BTreeMap<String, usize> = Default::default();

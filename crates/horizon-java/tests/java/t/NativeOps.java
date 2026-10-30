@@ -1,0 +1,58 @@
+package t;
+
+import java.util.function.IntUnaryOperator;
+
+/** Cases the native backend once stopped on (tests/native.rs). */
+public class NativeOps {
+    /** `a[i]++` on a long array: dup2_x2 with a wide value over two narrow ones. */
+    public static long postIncLong(long[] a, int i) {
+        long before = a[i]++;
+        return before * 1000 + a[i];
+    }
+
+    public static double postIncDouble(double[] a, int i) {
+        double before = a[i]++;
+        return before * 1000 + a[i];
+    }
+
+    public static long postIncLongs(int i) {
+        long[] a = {10, 20, 30};
+        return postIncLong(a, i) + a[i];
+    }
+
+    public static double postIncDoubles(int i) {
+        double[] a = {1.5, 2.5, 3.5};
+        return postIncDouble(a, i) + a[i];
+    }
+
+    /** A lambda in an abstract class: its body is a private instance method. */
+    abstract static class Shape {
+        int k;
+
+        abstract int size();
+
+        IntUnaryOperator op() {
+            return y -> y * k + size();
+        }
+    }
+
+    static class One extends Shape {
+        int size() {
+            return 1;
+        }
+    }
+
+    static class Two extends Shape {
+        int size() {
+            return 2;
+        }
+    }
+
+    public static int lambdaInAbstract(int x) {
+        Shape a = new One();
+        a.k = 3;
+        Shape b = new Two();
+        b.k = 5;
+        return a.op().applyAsInt(x) * 100 + b.op().applyAsInt(x);
+    }
+}

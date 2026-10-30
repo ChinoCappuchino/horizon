@@ -1451,18 +1451,27 @@ fn bridge(
         let call = b.ins().call_indirect(sr, fp, args);
         Ok(b.inst_results(call).first().copied())
     };
-    let result = match l.kind {
+    // A private instance target (javac's `lambda$...` bodies) is never
+    // overridden: called directly, as `invokespecial` would.
+    let private = l.kind == 5
+        && w.by_name.get(l.owner.as_str()).is_some_and(|cf| {
+            cf.methods.iter().any(|m| {
+                m.name == l.target && m.descriptor == l.target_desc && m.access & PRIVATE != 0
+            })
+        });
+    let kind = if private { 7 } else { l.kind };
+    let result = match kind {
         6 | 7 if w.resolve(&l.owner, &l.target, &l.target_desc).is_none() => {
             let (f, is_static, _) = w
                 .builtin_method(&l.owner, &l.target, &l.target_desc)
                 .ok_or("no target")?;
-            if is_static != (l.kind == 6) {
+            if is_static != (kind == 6) {
                 return Err("a target of the wrong kind".into());
             }
-            if l.kind == 7 {
+            if kind == 7 {
                 b.ins().trapz(args[0], NULL);
             }
-            builtin_call(&mut b, module, f, l.kind == 7, &args)?
+            builtin_call(&mut b, module, f, kind == 7, &args)?
         }
         8 if !w.by_name.contains_key(l.owner.as_str()) => {
             let layout = w
@@ -1485,7 +1494,7 @@ fn bridge(
             let declaring = w
                 .resolve(&l.owner, &l.target, &l.target_desc)
                 .ok_or("no target")?;
-            if l.kind == 6 {
+            if kind == 6 {
                 init_in(&mut b, module, w, &declaring);
             } else {
                 b.ins().trapz(args[0], NULL);
@@ -2737,7 +2746,14 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
 
     /// Code the prototype does not compile: a stop (a trap), counted by why.
     fn stop(&mut self, why: String) {
+        // Reached, it says where and why before the trap.
+        let id = rt::stop_reason(format!(
+            "{}.{}{}: {why}",
+            self.owner, self.method.name, self.method.descriptor
+        ));
         *self.w.stops.borrow_mut().entry(why).or_default() += 1;
+        let id = self.b.ins().iconst(types::I32, i64::from(id));
+        let _ = self.call_builtin(rt::stopped as *const () as usize, "(I)V", false, &[id]);
         self.b.ins().trap(UNSUPPORTED);
     }
 
@@ -3352,7 +3368,25 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 (d, d - 3),
             ],
             0x5F => vec![(d - 1, d), (d - 2, d - 1), (d, d - 2)],
-            _ => return Err("dup2_x2 (not in the prototype)".into()),
+            // dup2_x2's four forms, by which of the top values are wide.
+            0x5E if wide(0) && wide(1) => vec![(d - 1, d), (d - 2, d - 1), (d, d - 2)],
+            0x5E if wide(0) => vec![(d - 1, d), (d - 2, d - 1), (d - 3, d - 2), (d, d - 3)],
+            0x5E if wide(2) => vec![
+                (d - 1, d + 1),
+                (d - 2, d),
+                (d - 3, d - 1),
+                (d + 1, d - 2),
+                (d, d - 3),
+            ],
+            0x5E => vec![
+                (d - 1, d + 1),
+                (d - 2, d),
+                (d - 3, d - 1),
+                (d - 4, d - 2),
+                (d + 1, d - 3),
+                (d, d - 4),
+            ],
+            _ => return Err(format!("stack opcode {op:#x}")),
         };
         // Types by original position; copies above the stack take the type
         // of what they copy.

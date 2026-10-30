@@ -18,6 +18,7 @@ use std::{
 };
 
 mod collections;
+mod logging;
 pub use collections::array_clone;
 
 /// A built-in class.
@@ -140,6 +141,28 @@ pub extern "C" fn throw_new(vtable: u64) {
     let e = alloc(24, vtable);
     // SAFETY: globals[2] is the exception slot.
     unsafe { *rt().globals.add(2) = e };
+}
+
+/// Why each stop compiled (`native::MethodGen::stop`), by its number.
+static STOP_REASONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Numbers a stop's reason for `stopped`.
+pub fn stop_reason(why: String) -> u32 {
+    let mut reasons = STOP_REASONS.lock().unwrap();
+    reasons.push(why);
+    (reasons.len() - 1) as u32
+}
+
+/// Every stop compiled so far: where and why.
+pub fn stop_reasons() -> Vec<String> {
+    STOP_REASONS.lock().unwrap().clone()
+}
+
+/// Compiled code reached a stop: says which before it traps.
+pub extern "C" fn stopped(id: i32) {
+    let reasons = STOP_REASONS.lock().unwrap();
+    let why = reasons.get(id as usize).map_or("?", String::as_str);
+    eprintln!("native code stopped in {why}");
 }
 
 fn pending() -> bool {
@@ -1630,6 +1653,7 @@ pub fn builtins() -> Vec<Builtin> {
         });
     }
     out.extend(collections::builtins());
+    out.extend(logging::builtins());
     out
 }
 
