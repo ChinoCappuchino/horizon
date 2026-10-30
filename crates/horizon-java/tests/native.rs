@@ -244,3 +244,12 @@ fn functional_interfaces_compose_as_java_does() {
         !bits & ((1 << 7) - 1)
     );
 }
+
+#[test]
+fn lambda_sites_at_the_same_offset_of_two_methods_stay_apart() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/NativeOps.sameOffsetLambdas()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    assert_eq!(f(native.context()), 5 * 10 + "s4".len() as i32);
+}

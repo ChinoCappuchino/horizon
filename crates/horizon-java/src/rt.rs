@@ -215,6 +215,24 @@ pub fn stop_reasons() -> Vec<String> {
     STOP_REASONS.lock().unwrap().clone()
 }
 
+/// A virtual call reached a class without the method: says which method
+/// and which class before it traps.
+pub extern "C" fn stopped_on(id: i32, receiver: u64) {
+    let reasons = STOP_REASONS.lock().unwrap();
+    let why = reasons.get(id as usize).map_or("?", String::as_str);
+    let class = if receiver == 0 {
+        "null".to_owned()
+    } else {
+        // SAFETY: an object's vtable starts with its class id.
+        let id = unsafe { word(word(receiver, 0), 0) } as usize;
+        rt().names
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| format!("class {id}"))
+    };
+    eprintln!("native code stopped in {why} (on a {class})");
+}
+
 /// Compiled code reached a stop: says which before it traps.
 pub extern "C" fn stopped(id: i32) {
     let reasons = STOP_REASONS.lock().unwrap();

@@ -661,7 +661,8 @@ impl Native {
             class_names[ids[n] as usize] = (*n).to_owned();
         }
         for (i, l) in lambdas.iter().enumerate() {
-            class_names[names.len() + 1 + i] = format!("{}$$Lambda", l.interface);
+            class_names[names.len() + 1 + i] =
+                format!("{}$$Lambda{i} -> {}.{}", l.interface, l.owner, l.target);
         }
         for b in &builtins {
             class_names[ids[b] as usize] = (*b).to_owned();
@@ -920,7 +921,10 @@ impl Native {
         // implementation: it says which method was called, then traps.
         let mut absent: HashMap<usize, FuncId> = HashMap::new();
         for ((mname, mdesc), &sel) in &selectors {
+            // (The thread's context and the receiver; the other arguments
+            // are left alone.)
             let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
             sig.params.push(AbiParam::new(types::I64));
             let id = module
                 .declare_function(&format!("absent {sel}"), Linkage::Local, &sig)
@@ -934,12 +938,16 @@ impl Native {
             let why = rt::stop_reason(format!(
                 "a virtual call to {mname}{mdesc}, which the object's class does not implement"
             ));
+            let receiver = fb.block_params(e)[1];
             let mut raw = module.make_signature();
             raw.params.push(AbiParam::new(types::I32));
+            raw.params.push(AbiParam::new(types::I64));
             let sr = fb.import_signature(raw);
-            let f = fb.ins().iconst(types::I64, rt::stopped as *const () as i64);
+            let f = fb
+                .ins()
+                .iconst(types::I64, rt::stopped_on as *const () as i64);
             let id_value = fb.ins().iconst(types::I32, i64::from(why));
-            fb.ins().call_indirect(sr, f, &[id_value]);
+            fb.ins().call_indirect(sr, f, &[id_value, receiver]);
             fb.ins().trap(UNSUPPORTED);
             fb.finalize(module.target_config());
             module
@@ -1265,7 +1273,7 @@ fn prepass(
     classes: &[ClassFile],
 ) -> (
     Vec<LambdaSite>,
-    HashMap<(String, u32), usize>,
+    HashMap<(String, String, u32), usize>,
     Vec<(String, String)>,
 ) {
     let mut sites = Vec::new();
@@ -1287,7 +1295,9 @@ fn prepass(
                     }
                     (0xBA, Operand::Constant(i)) => {
                         if let Some(site) = lambda_site(c, *i) {
-                            at.insert((owner.to_owned(), x.at), sites.len());
+                            // By method too: an offset is its method's own.
+                            let method = format!("{}{}", m.name, m.descriptor);
+                            at.insert((owner.to_owned(), method, x.at), sites.len());
                             sites.push(site);
                         }
                     }
@@ -1440,7 +1450,8 @@ struct World<'a> {
     flags_at: usize,
     ptr: Type,
     lambdas: &'a [LambdaSite],
-    lambda_at: &'a HashMap<(String, u32), usize>,
+    /// Each lambda site, by class, method and offset.
+    lambda_at: &'a HashMap<(String, String, u32), usize>,
     lambda_vt: &'a [i64],
     singleton_at: &'a [Option<i64>],
     /// Whether a method keeps its own object inside it (by method and the
@@ -3569,7 +3580,11 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 let site = self
                     .w
                     .lambda_at
-                    .get(&(self.owner.to_owned(), insn.at))
+                    .get(&(
+                        self.owner.to_owned(),
+                        format!("{}{}", self.method.name, self.method.descriptor),
+                        insn.at,
+                    ))
                     .copied();
                 let Some(n) = site else {
                     self.stop("invokedynamic (another bootstrap)".into());

@@ -110,4 +110,17 @@ public class NativeOps {
         Greeter g = () -> "bo";
         return g.greet().get().length();
     }
+
+    /** Two lambda sites at the same offset of two methods (offset 1 in each). */
+    static java.util.function.Supplier<String> supplierAt1(int x) {
+        return () -> "s" + x;
+    }
+
+    static java.util.function.Function<Integer, Integer> functionAt1(int x) {
+        return y -> y + x;
+    }
+
+    public static int sameOffsetLambdas() {
+        return functionAt1(2).apply(3) * 10 + supplierAt1(4).get().length();
+    }
 }
