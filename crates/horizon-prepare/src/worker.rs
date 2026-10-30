@@ -19,6 +19,7 @@ impl Worker {
         let mut child = java::command(&run.jdk.java)
             .args([
                 "-Xmx2G",
+                &run.jobs.cpus_flag(),
                 "-cp",
                 &format!(
                     "{}{}{}",

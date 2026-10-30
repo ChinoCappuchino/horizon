@@ -5,7 +5,7 @@
 
 use crate::artifacts::{self, Lock};
 use crate::pyjson::Value;
-use crate::{digest, Log};
+use crate::{Log, digest};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -325,7 +325,7 @@ fn copy_indexed(
         }
     }
     let mut total: u64 = 0;
-    let mut copies = Vec::with_capacity(wanted.len());
+    let mut jobs = Vec::with_capacity(wanted.len());
     for (name, info) in &wanted {
         let hash = info
             .get("hash")
@@ -340,30 +340,49 @@ fn copy_indexed(
             .ok_or_else(|| format!("Unsafe asset name {name:?} in the asset index"))?;
         let source = object_path(&assets.store, hash)?;
         let destination = assets.target.join("assets").join(relative);
-        let import = crate::files::Import::stage(
-            &source,
-            &destination,
-            hash,
-            "sha1",
-            assets.verified.contains(&destination),
-        )
-        .map_err(|error| {
-            if !source.is_file() {
-                format!(
-                    "Missing asset object {}. Play the pinned version once in your launcher.",
-                    source.display()
-                )
-            } else if error.contains(" is not the pinned file:") {
-                format!(
-                    "Corrupt asset object {}; let the launcher repair it: {error}",
-                    source.display()
-                )
-            } else {
-                error
-            }
-        })?;
-        copies.push((import, destination));
+        let verified = assets.verified.contains(&destination);
+        jobs.push((hash, source, destination, verified));
         total += size;
+    }
+    // Copied and checked on every core: one after another, the sounds alone
+    // (377 MB) took seconds on one.
+    let stage = |(hash, source, destination, verified): &(&str, PathBuf, PathBuf, bool)| {
+        crate::files::Import::stage(source, destination, hash, "sha1", *verified)
+            .map(|import| (import, destination.clone()))
+            .map_err(|error| {
+                if !source.is_file() {
+                    format!(
+                        "Missing asset object {}. Play the pinned version once in your launcher.",
+                        source.display()
+                    )
+                } else if error.contains(" is not the pinned file:") {
+                    format!(
+                        "Corrupt asset object {}; let the launcher repair it: {error}",
+                        source.display()
+                    )
+                } else {
+                    error
+                }
+            })
+    };
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let chunk = jobs.len().div_ceil(threads).max(1);
+    let staged: Vec<Result<Vec<_>, String>> = std::thread::scope(|s| {
+        let parts: Vec<_> = jobs
+            .chunks(chunk)
+            .map(|part| s.spawn(move || part.iter().map(stage).collect()))
+            .collect();
+        parts
+            .into_iter()
+            .map(|p| {
+                p.join()
+                    .unwrap_or_else(|_| Err("an asset copy stopped unexpectedly".into()))
+            })
+            .collect()
+    });
+    let mut copies = Vec::with_capacity(jobs.len());
+    for part in staged {
+        copies.extend(part?);
     }
     // Check the entire set before replacing any placeholders: a missing late face
     // must not leave a mixture of real textures and gray faces in either entry point.
@@ -547,9 +566,11 @@ mod tests {
             lines.borrow_mut().push(l.to_string())
         })
         .unwrap();
-        assert!(fs::read(target.join("assets/pack.mcmeta"))
-            .unwrap()
-            .starts_with(b"{\"language\""));
+        assert!(
+            fs::read(target.join("assets/pack.mcmeta"))
+                .unwrap()
+                .starts_with(b"{\"language\"")
+        );
         assert_eq!(
             fs::read(target.join("assets/minecraft/lang/fr_fr.json")).unwrap(),
             b"{}"
@@ -610,10 +631,11 @@ mod tests {
         fs::write(f.object(1), b"not the sound").unwrap();
         let error = f.run().unwrap_err();
         assert!(error.starts_with("Corrupt asset object"), "{error}");
-        assert!(!f
-            .root
-            .join(".local/horizon-client/9.9/assets/minecraft/sounds/ambient/cave1.ogg")
-            .exists());
+        assert!(
+            !f.root
+                .join(".local/horizon-client/9.9/assets/minecraft/sounds/ambient/cave1.ogg")
+                .exists()
+        );
         fs::remove_file(f.object(1)).unwrap();
         assert!(f.run().unwrap_err().starts_with("Missing asset object"));
     }
@@ -651,14 +673,18 @@ mod tests {
             .join(f.objects[FIRST_FACE].0);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"placeholder").unwrap();
-        assert!(panorama(&f.root, Some(&f.minecraft), &|_| {})
-            .unwrap_err()
-            .starts_with("Corrupt asset object"));
+        assert!(
+            panorama(&f.root, Some(&f.minecraft), &|_| {})
+                .unwrap_err()
+                .starts_with("Corrupt asset object")
+        );
         assert_eq!(fs::read(path).unwrap(), b"placeholder");
         fs::remove_file(f.object(FIRST_FACE)).unwrap();
-        assert!(panorama(&f.root, Some(&f.minecraft), &|_| {})
-            .unwrap_err()
-            .starts_with("Missing asset object"));
+        assert!(
+            panorama(&f.root, Some(&f.minecraft), &|_| {})
+                .unwrap_err()
+                .starts_with("Missing asset object")
+        );
     }
 
     #[test]
@@ -774,9 +800,11 @@ mod tests {
         for (name, data) in &f.objects[FIRST_PACK..FIRST_FACE] {
             assert_eq!(&fs::read(target.join("assets").join(name)).unwrap(), data);
         }
-        assert!(target
-            .join("assets/minecraft/resourcepacks/programmer_art.zip")
-            .is_file());
+        assert!(
+            target
+                .join("assets/minecraft/resourcepacks/programmer_art.zip")
+                .is_file()
+        );
         assert_eq!(
             *lines.borrow(),
             ["Built-in pack assets ready: 2 files, 0.0 MB"]
@@ -835,10 +863,12 @@ mod tests {
             lines.borrow_mut().push(line.to_string())
         });
         assert_eq!(lines.borrow().len(), 4);
-        assert!(lines
-            .borrow()
-            .iter()
-            .all(|line| line.contains("assets ready")));
+        assert!(
+            lines
+                .borrow()
+                .iter()
+                .all(|line| line.contains("assets ready"))
+        );
         assets
             .copy(is_sound, "Sound", &["minecraft/sounds.json"], &|_| {})
             .unwrap();

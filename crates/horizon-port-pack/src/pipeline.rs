@@ -253,54 +253,119 @@ pub fn translate(
     );
     let by_key: BTreeMap<&str, &inventory::Record> =
         records.iter().map(|r| (r.key.as_str(), r)).collect();
+    // One mod after another took minutes on a pack: each mod is translated
+    // on its own (its group read and run apart), on as many threads as
+    // there are cores (`HORIZON_PORT_THREADS` sets fewer), the lines logged
+    // here as each finishes.
+    let threads = std::env::var("HORIZON_PORT_THREADS")
+        .ok()
+        .and_then(|t| t.parse::<usize>().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()))
+        .clamp(1, chosen.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (tx, rx) = std::sync::mpsc::channel::<Translated>();
     let mut done = 0;
-    for r in chosen {
-        // The mod after what it requires, by dependency layer.
-        let mut group: Vec<&inventory::Record> = Vec::new();
-        let mut todo = vec![r.key.as_str()];
-        while let Some(k) = todo.pop() {
-            let Some(rec) = by_key.get(k) else { continue };
-            if group.iter().any(|g| g.key == rec.key) || rec.jar.is_none() {
-                continue;
-            }
-            group.push(rec);
-            todo.extend(rec.depends.iter().map(String::as_str));
+    let mut failed = None;
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let tx = tx.clone();
+            let (next, chosen, by_key, game) = (&next, &chosen, &by_key, &game);
+            scope.spawn(move || {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(r) = chosen.get(i) else { break };
+                    let _ = tx.send(translate_one(work, r, by_key, game));
+                }
+            });
         }
-        group.sort_by_key(|g| (g.layer, g.key.clone()));
-        let mut jars = Vec::new();
-        for g in &group {
-            let jar = work.join(g.jar.as_ref().expect("a jar"));
-            jars.push(
-                horizon_neoforge::read_jar(&jar).map_err(|e| format!("{}: {e}", jar.display()))?,
-            );
-        }
-        let started = std::time::Instant::now();
-        match horizon_neoforge::translate_all(&jars, game.clone()) {
-            Ok(translations) => {
-                for (g, t) in group.iter().zip(&translations) {
-                    if g.key != r.key {
-                        continue;
-                    }
-                    horizon_neoforge::write(t, &carried(&g.key))
-                        .map_err(|e| format!("{}: {e}", g.key))?;
-                    log(format!(
-                        "{}: {} blocks, {} items, {} data files from its code ({} mods run, {:.1} s; {} kinds of calls not modelled, {} errors)",
-                        g.key,
-                        t.blocks.len(),
-                        t.items.len(),
-                        t.files.len(),
-                        group.len(),
-                        started.elapsed().as_secs_f64(),
-                        t.unknown.len(),
-                        translations[0].errors.len(),
-                    ));
+        drop(tx);
+        for message in rx {
+            match message {
+                Translated::Done(line) => {
+                    log(line);
                     done += 1;
                 }
+                Translated::DidNotRun(line) => log(line),
+                Translated::Failed(e) => {
+                    failed.get_or_insert(e);
+                }
             }
-            Err(e) => log(format!("{}: {e:#}", r.key)),
         }
+    });
+    if let Some(e) = failed {
+        return Err(e);
     }
     Ok(done)
+}
+
+/// How one mod of `translate` went.
+enum Translated {
+    Done(String),
+    /// Its code didn't run: that mod's line, the others go on.
+    DidNotRun(String),
+    /// A jar unread or a file unwritten: the port stops.
+    Failed(String),
+}
+
+fn translate_one(
+    work: &Path,
+    r: &inventory::Record,
+    by_key: &BTreeMap<&str, &inventory::Record>,
+    game: &std::sync::Arc<horizon_neoforge::GameData>,
+) -> Translated {
+    translate_mod(work, r, by_key, game).unwrap_or_else(|why| why)
+}
+
+fn translate_mod(
+    work: &Path,
+    r: &inventory::Record,
+    by_key: &BTreeMap<&str, &inventory::Record>,
+    game: &std::sync::Arc<horizon_neoforge::GameData>,
+) -> Result<Translated, Translated> {
+    let carried = |key: &str| work.join("mods").join(key).join("carry");
+    // The mod after what it requires, by dependency layer.
+    let mut group: Vec<&inventory::Record> = Vec::new();
+    let mut todo = vec![r.key.as_str()];
+    while let Some(k) = todo.pop() {
+        let Some(rec) = by_key.get(k) else { continue };
+        if group.iter().any(|g| g.key == rec.key) || rec.jar.is_none() {
+            continue;
+        }
+        group.push(rec);
+        todo.extend(rec.depends.iter().map(String::as_str));
+    }
+    group.sort_by_key(|g| (g.layer, g.key.clone()));
+    let mut jars = Vec::new();
+    for g in &group {
+        let jar = work.join(g.jar.as_ref().expect("a jar"));
+        jars.push(
+            horizon_neoforge::read_jar(&jar)
+                .map_err(|e| Translated::Failed(format!("{}: {e}", jar.display())))?,
+        );
+    }
+    let started = std::time::Instant::now();
+    let translations = horizon_neoforge::translate_all(&jars, game.clone())
+        .map_err(|e| Translated::DidNotRun(format!("{}: {e:#}", r.key)))?;
+    let Some((g, t)) = group
+        .iter()
+        .zip(&translations)
+        .find(|(g, _)| g.key == r.key)
+    else {
+        return Err(Translated::DidNotRun(format!("{}: not translated", r.key)));
+    };
+    horizon_neoforge::write(t, &carried(&g.key))
+        .map_err(|e| Translated::Failed(format!("{}: {e}", g.key)))?;
+    Ok(Translated::Done(format!(
+        "{}: {} blocks, {} items, {} data files from its code ({} mods run, {:.1} s; {} kinds of calls not modelled, {} errors)",
+        g.key,
+        t.blocks.len(),
+        t.items.len(),
+        t.files.len(),
+        group.len(),
+        started.elapsed().as_secs_f64(),
+        t.unknown.len(),
+        translations[0].errors.len(),
+    )))
 }
 
 /// Which carried-over mods (`mods/<key>/carry` folders) the game loads together, in the order
