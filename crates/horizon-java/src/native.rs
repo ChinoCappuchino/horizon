@@ -298,6 +298,12 @@ impl Native {
     pub fn compile(classes: &[ClassFile]) -> Result<Native, String> {
         let mut flags = settings::builder();
         flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
+        // The verifier checks the compiler, not the program: debug builds only.
+        if !cfg!(debug_assertions) {
+            flags
+                .set("enable_verifier", "false")
+                .map_err(|e| e.to_string())?;
+        }
         let isa = cranelift_native::builder()
             .map_err(|e| e.to_string())?
             .finish(settings::Flags::new(flags))

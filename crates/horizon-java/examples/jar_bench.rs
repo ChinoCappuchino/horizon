@@ -392,8 +392,9 @@ fn native_bench(classes: &[ClassFile], bench: &[String]) -> Result<()> {
         let t = Instant::now();
         let sum = run(ctx, made, n);
         println!(
-            "pass {pass}: {:.1} ms sum={sum}d",
-            t.elapsed().as_secs_f64() * 1e3
+            "pass {pass}: {:.1} ms sum={sum}d, heap {} MB",
+            t.elapsed().as_secs_f64() * 1e3,
+            native.heap().used() >> 20
         );
     }
     Ok(())
