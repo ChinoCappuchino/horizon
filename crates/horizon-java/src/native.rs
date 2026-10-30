@@ -688,6 +688,7 @@ impl Native {
             class_vt,
             other_classes: std::cell::RefCell::new(Vec::new()),
             stops: std::cell::RefCell::new(HashMap::new()),
+            nothrow: std::cell::RefCell::new(HashMap::new()),
         };
         let mut unsupported = Vec::new();
         let mut ctx = module.make_context();
@@ -784,6 +785,13 @@ impl Native {
                 caller: id,
             })
             .map_err(|e| format!("{name}: inlining: {e:?}"))?;
+            // HORIZON_NATIVE_CLIF=<text>: the code of each method whose name
+            // has it, after inlining.
+            if let Ok(filter) = std::env::var("HORIZON_NATIVE_CLIF")
+                && name.contains(&filter)
+            {
+                eprintln!("{name}:\n{}", ctx.func.display());
+            }
             module
                 .define_function(id, &mut ctx)
                 .map_err(|e| format!("{name}: {e:?}"))?;
@@ -1350,10 +1358,96 @@ struct World<'a> {
     other_classes: std::cell::RefCell<Vec<(String, Box<[u64]>, Box<[u64]>)>>,
     /// The stops compiled, by why.
     stops: std::cell::RefCell<HashMap<String, usize>>,
+    /// Methods that cannot throw (`World::cannot_throw`), by export name.
+    nothrow: std::cell::RefCell<HashMap<String, bool>>,
 }
 
 impl World<'_> {
     /// The class (of `owner` or a superclass) that declares method `name desc`.
+    /// Whether `class.name desc` can never throw, so its callers need not
+    /// test for an exception after calling it. Conservative: its code has
+    /// no `athrow`, array access, integer division, cast, allocation, field
+    /// access but reading `this`'s and its own class's statics, nor calls
+    /// but static ones to methods that cannot throw either.
+    fn cannot_throw(&self, class: &str, name: &str, desc: &str) -> bool {
+        let key = export_name(class, name, desc);
+        if let Some(&known) = self.nothrow.borrow().get(&key) {
+            return known;
+        }
+        // (A method calling itself, directly or not: it may throw.)
+        self.nothrow.borrow_mut().insert(key.clone(), false);
+        let answer = (|| -> Option<bool> {
+            let cf = self.by_name.get(class)?;
+            let m = cf
+                .methods
+                .iter()
+                .find(|m| m.name == name && m.descriptor == desc)?;
+            let insns = decode(&m.code()?.code).ok()?;
+            let instance = m.access & STATIC == 0;
+            for (k, insn) in insns.iter().enumerate() {
+                let ok = match insn.opcode {
+                    // Constants, local loads and stores, stack shuffles.
+                    0x00..=0x2D | 0x36..=0x4E | 0x57..=0x5F => true,
+                    // Integer division and remainder (by zero).
+                    0x6C | 0x6D | 0x70 | 0x71 => false,
+                    // Arithmetic, conversions, comparisons, branches,
+                    // switches, returns.
+                    0x60..=0xA7 | 0xAA..=0xB1 => true,
+                    // Its own class's statics (initialized before it runs).
+                    0xB2 | 0xB3 => {
+                        let Operand::Constant(c) = insn.operand else {
+                            return Some(false);
+                        };
+                        cf.member_ref(c).ok()?.0 == class
+                    }
+                    // A field of `this`.
+                    0xB4 => instance && k > 0 && insns[k - 1].opcode == 0x2A,
+                    0xB8 => {
+                        let Operand::Constant(c) = insn.operand else {
+                            return Some(false);
+                        };
+                        let (owner, callee, cdesc) = cf.member_ref(c).ok()?;
+                        let declaring = self.resolve(owner, callee, cdesc)?;
+                        (declaring == class || !self.inits.contains_key(&declaring))
+                            && self.cannot_throw(&declaring, callee, cdesc)
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    return Some(false);
+                }
+            }
+            Some(true)
+        })()
+        .unwrap_or(false);
+        self.nothrow.borrow_mut().insert(key, answer);
+        answer
+    }
+
+    /// Whether no implementation of `name desc` in the program can throw
+    /// (a virtual call to it needs no test after it). The runtime
+    /// library's own implementations count as able to.
+    fn no_implementation_throws(&self, name: &str, desc: &str) -> bool {
+        let key = format!("* {name}{desc}");
+        if let Some(&known) = self.nothrow.borrow().get(&key) {
+            return known;
+        }
+        let in_library = self.builtin.values().any(|b| {
+            b.methods
+                .iter()
+                .any(|m| !m.is_static && m.name == name && m.desc == desc)
+        });
+        let answer = !in_library
+            && self.by_name.iter().all(|(class, cf)| {
+                cf.methods
+                    .iter()
+                    .filter(|m| m.name == name && m.descriptor == desc && m.access & ABSTRACT == 0)
+                    .all(|_| self.cannot_throw(class, name, desc))
+            });
+        self.nothrow.borrow_mut().insert(key, answer);
+        answer
+    }
+
     fn resolve(&self, owner: &str, name: &str, desc: &str) -> Option<String> {
         let mut x = Some(owner.to_owned());
         while let Some(c) = x {
@@ -3708,6 +3802,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             args.push(self.get(base + k, t));
         }
         let ret = (m.ret != "V").then(|| desc_type(&m.ret)).flatten();
+        // A direct call to a method that cannot throw: no test after it.
+        let mut nothrow = false;
         // An array's clone: a copy; its other methods are Object's.
         if owner.starts_with('[') && name == "clone" {
             self.null_check(args[0]);
@@ -3788,6 +3884,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 let fr = self.module.declare_func_in_func(id, self.b.func);
                 let all = self.with_ctx(&args);
                 let call = self.b.ins().call(fr, &all);
+                nothrow = self.w.cannot_throw(&declaring, &name, &desc);
                 self.b.inst_results(call).first().copied()
             }
             _ if self.w.resolve(&owner, &name, &desc).is_none()
@@ -3823,6 +3920,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         let fr = self.module.declare_func_in_func(id, self.b.func);
                         let all = self.with_ctx(&args);
                         let call = self.b.ins().call(fr, &all);
+                        nothrow = self.w.cannot_throw(&declaring, &name, &desc);
                         self.b.inst_results(call).first().copied()
                     }
                     (None, Some(&sel)) => {
@@ -3840,6 +3938,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         let sr = self.b.import_signature(sig);
                         let all = self.with_ctx(&args);
                         let call = self.b.ins().call_indirect(sr, fp, &all);
+                        nothrow = self.w.no_implementation_throws(&name, &desc);
                         self.b.inst_results(call).first().copied()
                     }
                     (None, None) => {
@@ -3850,7 +3949,9 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             }
         };
         // It may have thrown.
-        self.after_call(i)?;
+        if !nothrow {
+            self.after_call(i)?;
+        }
         if let (Some(t), Some(v)) = (ret, result) {
             self.set(base, t, v);
         }
