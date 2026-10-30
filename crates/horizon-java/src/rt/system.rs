@@ -785,6 +785,15 @@ extern "C" fn char_string(c: i32) -> u64 {
     super::new_string(&[c as u16])
 }
 
+/// `Character.compareTo`: the difference of the two chars.
+extern "C" fn char_compare_to(a: u64, b: u64) -> i32 {
+    if b == 0 {
+        super::throw("java/lang/NullPointerException", None);
+        return 0;
+    }
+    super::box_int(a) - super::box_int(b)
+}
+
 /// `Character`'s static methods beyond rt.rs's boxing.
 pub fn character_methods() -> Vec<Method> {
     let s = |name, desc, f: usize| Method {
@@ -833,6 +842,14 @@ pub fn character_methods() -> Vec<Method> {
         s("hashCode", "(C)I", f!(char_hash)),
         s("toString", "(C)Ljava/lang/String;", f!(char_string)),
     ]);
+    for desc in ["(Ljava/lang/Character;)I", "(Ljava/lang/Object;)I"] {
+        out.push(Method {
+            name: "compareTo",
+            desc,
+            is_static: false,
+            f: f!(char_compare_to),
+        });
+    }
     out
 }
 

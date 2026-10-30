@@ -2,6 +2,7 @@ package t;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -69,6 +70,25 @@ public class Streams {
                 .get() == 3) bits |= 1024;
 
         if (Stream.of(3, 1, 2).sorted((a, b) -> b - a).toList().get(0) == 3) bits |= 2048;
+        return bits;
+    }
+
+    /** Collections' algorithms: each check one bit. */
+    public static int collectionsChecks() {
+        int bits = 0;
+        List<Character> letters = new ArrayList<>(List.of('c', 'a', 'z', 'b'));
+        if (Collections.max(letters) == 'z' && Collections.min(letters) == 'a') bits |= 1;
+        if (Collections.min(letters, (a, b) -> b - a) == 'z') bits |= 2;
+        List<String> copies = Collections.nCopies(3, "x");
+        if (copies.size() == 3 && copies.get(2).equals("x")) bits |= 4;
+        Collections.reverse(letters);
+        if (letters.get(0) == 'b' && letters.get(3) == 'c') bits |= 8;
+        if (Collections.frequency(List.of(1, 2, 1, 1), 1) == 3) bits |= 16;
+        if (Collections.singletonList(5).get(0) == 5
+                && Collections.singleton("s").contains("s")
+                && Collections.singletonMap("k", 9).get("k") == 9) bits |= 32;
+        Collections.sort(letters);
+        if (letters.get(0) == 'a' && letters.get(3) == 'z') bits |= 64;
         return bits;
     }
 }

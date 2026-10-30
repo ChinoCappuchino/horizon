@@ -594,6 +594,109 @@ fn list_of(items: &[u64]) -> u64 {
     }
     fixed_list(LIST_N, items)
 }
+// ---- Collections' algorithms --------------------------------------------------------
+
+/// The greatest (`sign` 1) or least (-1) element by `cmp` (natural order
+/// when 0): the first of equals wins, as Java's does.
+fn extreme(c: u64, cmp: u64, sign: i32) -> u64 {
+    let Some(items) = elements(c) else { return 0 };
+    let Some((&first, rest)) = items.split_first() else {
+        throw("java/util/NoSuchElementException", None);
+        return 0;
+    };
+    let mut best = first;
+    for &e in rest {
+        let r = if cmp == 0 {
+            call1_i(e, COMPARE_TO, best)
+        } else {
+            call2_i(cmp, COMPARE, e, best)
+        };
+        if pending() {
+            return 0;
+        }
+        if (sign > 0 && r > 0) || (sign < 0 && r < 0) {
+            best = e;
+        }
+    }
+    best
+}
+extern "C" fn collections_max(c: u64) -> u64 {
+    extreme(c, 0, 1)
+}
+extern "C" fn collections_max_by(c: u64, cmp: u64) -> u64 {
+    extreme(c, cmp, 1)
+}
+extern "C" fn collections_min(c: u64) -> u64 {
+    extreme(c, 0, -1)
+}
+extern "C" fn collections_min_by(c: u64, cmp: u64) -> u64 {
+    extreme(c, cmp, -1)
+}
+/// `Collections.sort(list[, cmp])`: the list's own `sort`.
+extern "C" fn collections_sort(l: u64) {
+    call1(l, "sort (Ljava/util/Comparator;)V", 0);
+}
+extern "C" fn collections_sort_by(l: u64, cmp: u64) {
+    call1(l, "sort (Ljava/util/Comparator;)V", cmp);
+}
+extern "C" fn collections_reverse(l: u64) {
+    let Some(items) = elements(l) else { return };
+    for (i, &e) in items.iter().rev().enumerate() {
+        call2(
+            l,
+            "set (ILjava/lang/Object;)Ljava/lang/Object;",
+            i as u64,
+            e,
+        );
+        if pending() {
+            return;
+        }
+    }
+}
+extern "C" fn collections_frequency(c: u64, o: u64) -> i32 {
+    elements(c).map_or(0, |items| {
+        items.iter().filter(|&&e| objects_equals(e, o)).count() as i32
+    })
+}
+extern "C" fn collections_singleton_list(e: u64) -> u64 {
+    let l = new_array_list();
+    al_add(l, e);
+    l
+}
+extern "C" fn collections_singleton(e: u64) -> u64 {
+    let set = new_of("java/util/HashSet", 16);
+    hs_init(set);
+    hs_add(set, e);
+    set
+}
+extern "C" fn collections_singleton_map(k: u64, v: u64) -> u64 {
+    let m = new_hash_map();
+    hm_put_c(m, k, v);
+    m
+}
+extern "C" fn collections_n_copies(n: i32, e: u64) -> u64 {
+    if n < 0 {
+        throw(
+            "java/lang/IllegalArgumentException",
+            Some(&format!("List length = {n}")),
+        );
+        return 0;
+    }
+    let l = new_array_list();
+    for _ in 0..n {
+        al_add(l, e);
+    }
+    l
+}
+/// The `unmodifiable*` views: the collection itself (code that doesn't
+/// try to change them sees no difference).
+extern "C" fn collections_same(c: u64) -> u64 {
+    if c == 0 {
+        npe();
+    }
+    c
+}
+
 extern "C" fn list_of0() -> u64 {
     once("emptyList", || fixed_list(LIST_N, &[]))
 }
@@ -3109,6 +3212,78 @@ pub fn builtins() -> Vec<Builtin> {
                 s("emptyList", "()Ljava/util/List;", f!(list_of0)),
                 s("emptySet", "()Ljava/util/Set;", f!(set_of0)),
                 s("emptyMap", "()Ljava/util/Map;", f!(map_of0)),
+                s(
+                    "max",
+                    "(Ljava/util/Collection;)Ljava/lang/Object;",
+                    f!(collections_max),
+                ),
+                s(
+                    "max",
+                    "(Ljava/util/Collection;Ljava/util/Comparator;)Ljava/lang/Object;",
+                    f!(collections_max_by),
+                ),
+                s(
+                    "min",
+                    "(Ljava/util/Collection;)Ljava/lang/Object;",
+                    f!(collections_min),
+                ),
+                s(
+                    "min",
+                    "(Ljava/util/Collection;Ljava/util/Comparator;)Ljava/lang/Object;",
+                    f!(collections_min_by),
+                ),
+                s("sort", "(Ljava/util/List;)V", f!(collections_sort)),
+                s(
+                    "sort",
+                    "(Ljava/util/List;Ljava/util/Comparator;)V",
+                    f!(collections_sort_by),
+                ),
+                s("reverse", "(Ljava/util/List;)V", f!(collections_reverse)),
+                s(
+                    "frequency",
+                    "(Ljava/util/Collection;Ljava/lang/Object;)I",
+                    f!(collections_frequency),
+                ),
+                s(
+                    "singletonList",
+                    "(Ljava/lang/Object;)Ljava/util/List;",
+                    f!(collections_singleton_list),
+                ),
+                s(
+                    "singleton",
+                    "(Ljava/lang/Object;)Ljava/util/Set;",
+                    f!(collections_singleton),
+                ),
+                s(
+                    "singletonMap",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;",
+                    f!(collections_singleton_map),
+                ),
+                s(
+                    "nCopies",
+                    "(ILjava/lang/Object;)Ljava/util/List;",
+                    f!(collections_n_copies),
+                ),
+                s(
+                    "unmodifiableList",
+                    "(Ljava/util/List;)Ljava/util/List;",
+                    f!(collections_same),
+                ),
+                s(
+                    "unmodifiableSet",
+                    "(Ljava/util/Set;)Ljava/util/Set;",
+                    f!(collections_same),
+                ),
+                s(
+                    "unmodifiableMap",
+                    "(Ljava/util/Map;)Ljava/util/Map;",
+                    f!(collections_same),
+                ),
+                s(
+                    "unmodifiableCollection",
+                    "(Ljava/util/Collection;)Ljava/util/Collection;",
+                    f!(collections_same),
+                ),
             ],
         },
         Builtin {
