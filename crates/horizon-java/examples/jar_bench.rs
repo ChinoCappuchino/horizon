@@ -211,6 +211,7 @@ fn main() -> Result<()> {
     let mut imports = false;
     let mut native: Option<String> = None;
     let mut run_native = false;
+    let mut native_check = false;
     let mut paths = Vec::new();
     let mut it = inputs.iter();
     while let Some(a) = it.next() {
@@ -226,6 +227,7 @@ fn main() -> Result<()> {
             "--imports" => imports = true,
             "--native" => native = it.next().cloned(),
             "--run-native" => run_native = true,
+            "--native-check" => native_check = true,
             p => paths.push(p.to_owned()),
         }
     }
@@ -243,6 +245,9 @@ fn main() -> Result<()> {
     );
     for (m, why) in &compiled.skipped {
         eprintln!("not compiled: {m}: {why}");
+    }
+    if native_check {
+        return native_check_report(&classes);
     }
     if run_native {
         return native_bench(&classes, &bench[1..]);
@@ -347,5 +352,64 @@ fn native_bench(classes: &[ClassFile], bench: &[String]) -> Result<()> {
 
 #[cfg(not(feature = "native"))]
 fn native_bench(_: &[ClassFile], _: &[String]) -> Result<()> {
+    bail!("built without the native backend: --features native")
+}
+
+/// Compiles the classes natively and reports what did not compile and the
+/// stops in what did, grouped by package (classes outside the set).
+#[cfg(feature = "native")]
+fn native_check_report(classes: &[ClassFile]) -> Result<()> {
+    let methods: usize = classes
+        .iter()
+        .map(|c| c.methods.iter().filter(|m| m.code().is_some()).count())
+        .sum();
+    let started = Instant::now();
+    let native = horizon_java::native::Native::compile(classes).map_err(anyhow)?;
+    println!(
+        "{} classes, {methods} methods with code, compiled in {:.1} s: {} whole methods not compiled",
+        classes.len(),
+        started.elapsed().as_secs_f64(),
+        native.unsupported.len()
+    );
+    let mut why: std::collections::BTreeMap<String, usize> = Default::default();
+    for (_, w) in &native.unsupported {
+        *why.entry(w.clone()).or_default() += 1;
+    }
+    let mut why: Vec<_> = why.into_iter().collect();
+    why.sort_by_key(|x| std::cmp::Reverse(x.1));
+    for (w, n) in why.iter().take(15) {
+        println!("  {n:>6}  {w}");
+    }
+    let total: usize = native.stops.values().sum();
+    println!("{total} instructions compiled as stops; by kind and package:");
+    let mut groups: std::collections::BTreeMap<String, usize> = Default::default();
+    for (w, n) in &native.stops {
+        // "call to net/minecraft/world/level/Level.getBlockState" -> "call to net/minecraft/world"
+        let (kind, rest) = w
+            .split_once(" of ")
+            .or_else(|| w.split_once(" to "))
+            .or_else(|| w.split_once(' '))
+            .unwrap_or((w, ""));
+        let pkg: Vec<&str> = rest
+            .split(['.', ' '])
+            .next()
+            .unwrap_or("")
+            .split('/')
+            .take(3)
+            .collect();
+        *groups
+            .entry(format!("{kind}: {}", pkg.join("/")))
+            .or_default() += n;
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by_key(|x| std::cmp::Reverse(x.1));
+    for (g, n) in groups.iter().take(25) {
+        println!("  {n:>7}  {g}");
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "native"))]
+fn native_check_report(_: &[ClassFile]) -> Result<()> {
     bail!("built without the native backend: --features native")
 }

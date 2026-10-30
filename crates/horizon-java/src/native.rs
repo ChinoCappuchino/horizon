@@ -163,6 +163,9 @@ pub struct Native {
     exports: HashMap<String, FuncId>,
     /// Methods that compile to a trap, with why.
     pub unsupported: Vec<(String, String)>,
+    /// Instructions compiled as stops (code outside the compiled classes or
+    /// not compiled yet), by why.
+    pub stops: HashMap<String, usize>,
     // Memory the code points at, kept alive.
     _arena: Vec<u8>,
     _globals: Box<Globals>,
@@ -701,6 +704,7 @@ impl Native {
             class_at: &class_at,
             class_vt,
             other_classes: std::cell::RefCell::new(Vec::new()),
+            stops: std::cell::RefCell::new(HashMap::new()),
         };
         let mut unsupported = Vec::new();
         let mut ctx = module.make_context();
@@ -968,6 +972,7 @@ impl Native {
         }
         let strings = world.strings.take();
         let other_classes = world.other_classes.take();
+        let stops = world.stops.take();
         // The runtime library: the class names, the built-in vtables, the
         // selectors it calls back through, the cached boxes.
         let builtin_vtables: HashMap<&'static str, u64> = builtin_list
@@ -1017,6 +1022,7 @@ impl Native {
             _boxes: boxes,
             _classes: class_boxes,
             _other_classes: other_classes,
+            stops,
         })
     }
 
@@ -1240,6 +1246,8 @@ struct World<'a> {
     class_at: &'a HashMap<String, i64>,
     class_vt: u64,
     other_classes: std::cell::RefCell<Vec<(String, Box<[u64]>, Box<[u64]>)>>,
+    /// The stops compiled, by why.
+    stops: std::cell::RefCell<HashMap<String, usize>>,
 }
 
 impl World<'_> {
@@ -2727,6 +2735,12 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         self.throw_if(null, "java/lang/NullPointerException");
     }
 
+    /// Code the prototype does not compile: a stop (a trap), counted by why.
+    fn stop(&mut self, why: String) {
+        *self.w.stops.borrow_mut().entry(why).or_default() += 1;
+        self.b.ins().trap(UNSUPPORTED);
+    }
+
     /// Throws a new `class` (a built-in exception) when `cond` is nonzero.
     fn throw_if(&mut self, cond: Value, class: &str) {
         let Some(vt) = self.w.layouts.get(class).map(|l| l.vtable as i64) else {
@@ -2745,7 +2759,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 self.b.ins().jump(go, &[]);
             }
             Err(_) => {
-                self.b.ins().trap(UNSUPPORTED);
+                self.stop("exception dispatch".into());
             }
         }
         self.b.switch_to_block(on);
@@ -2851,7 +2865,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         (self.b.ins().iconst(i64t, at), i64t)
                     }
                     _ => {
-                        self.b.ins().trap(UNSUPPORTED);
+                        self.stop("ldc of a method handle, method type or dynamic constant".into());
                         return Ok(true);
                     }
                 };
@@ -3098,7 +3112,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 };
                 let (owner, name, _) = self.class.member_ref(c).map_err(me)?;
                 let Some((declaring, at, t)) = self.w.static_field(owner, name) else {
-                    self.b.ins().trap(UNSUPPORTED);
+                    self.stop(format!("static field of {owner}"));
                     return Ok(true);
                 };
                 self.init(&declaring);
@@ -3121,7 +3135,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 let (owner, name, _) = self.class.member_ref(c).map_err(me)?;
                 let Some(&(at, t)) = self.w.layouts.get(owner).and_then(|l| l.fields.get(name))
                 else {
-                    self.b.ins().trap(UNSUPPORTED);
+                    self.stop(format!("field of {owner}"));
                     return Ok(true);
                 };
                 let object = if op == 0xB4 { d - 1 } else { d - 2 };
@@ -3158,7 +3172,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                     .get(&(self.owner.to_owned(), insn.at))
                     .copied();
                 let Some(n) = site else {
-                    self.b.ins().trap(UNSUPPORTED);
+                    self.stop("invokedynamic (another bootstrap)".into());
                     return Ok(true);
                 };
                 let l = &self.w.lambdas[n];
@@ -3188,7 +3202,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 };
                 let class = self.class.class_name(c).map_err(me)?.to_owned();
                 let Some(l) = self.w.layouts.get(&class) else {
-                    self.b.ins().trap(UNSUPPORTED);
+                    self.stop(format!("new {class}"));
                     return Ok(true);
                 };
                 let (size, vt) = (l.size, l.vtable as i64);
@@ -3290,7 +3304,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             }
             0xC2 | 0xC3 => {}
             _ => {
-                self.b.ins().trap(UNSUPPORTED);
+                self.stop(format!("opcode {op:#x}"));
                 return Ok(true);
             }
         }
@@ -3579,7 +3593,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                             return Ok(false);
                         }
                         _ => {
-                            self.b.ins().trap(UNSUPPORTED);
+                            self.stop(format!("call to {owner}.{name}"));
                             return Ok(true);
                         }
                     }
@@ -3645,7 +3659,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         self.b.inst_results(call).first().copied()
                     }
                     (None, None) => {
-                        self.b.ins().trap(UNSUPPORTED);
+                        self.stop(format!("virtual call to {owner}.{name}"));
                         return Ok(true);
                     }
                 }
