@@ -420,6 +420,154 @@ extern "C" fn locale_tag(l: u64) -> u64 {
     str_of(if tag.is_empty() { "und" } else { &tag })
 }
 
+// ---- DateTimeFormatter -----------------------------------------------------------
+//
+// [vtable][pattern String][locale][zone]: the pattern kept for formatting,
+// which comes with java.time's types.
+
+const FORMATTER: &str = "java/time/format/DateTimeFormatter";
+
+fn formatter(pattern: u64, locale: u64, zone: u64) -> u64 {
+    let f = alloc(32, vt(FORMATTER));
+    // SAFETY: a fresh formatter.
+    unsafe {
+        *((f + 8) as *mut u64) = pattern;
+        *((f + 16) as *mut u64) = locale;
+        *((f + 24) as *mut u64) = zone;
+    }
+    f
+}
+extern "C" fn formatter_of_pattern(pattern: u64) -> u64 {
+    formatter(pattern, locale_root(), 0)
+}
+extern "C" fn formatter_of_pattern_locale(pattern: u64, locale: u64) -> u64 {
+    formatter(pattern, locale, 0)
+}
+extern "C" fn formatter_with_locale(f: u64, locale: u64) -> u64 {
+    // SAFETY: f is a formatter.
+    unsafe { formatter(word(f, 8), locale, word(f, 24)) }
+}
+extern "C" fn formatter_with_zone(f: u64, zone: u64) -> u64 {
+    // SAFETY: as above.
+    unsafe { formatter(word(f, 8), word(f, 16), zone) }
+}
+
+// ---- UUID ---------------------------------------------------------------------------
+//
+// [vtable][most significant bits][least significant bits].
+
+const UUID: &str = "java/util/UUID";
+
+fn uuid_bits(u: u64) -> (i64, i64) {
+    // SAFETY: u is a UUID.
+    unsafe { (word(u, 8) as i64, word(u, 16) as i64) }
+}
+fn new_uuid(msb: i64, lsb: i64) -> u64 {
+    let u = alloc(24, vt(UUID));
+    uuid_init(u, msb, lsb);
+    u
+}
+extern "C" fn uuid_init(u: u64, msb: i64, lsb: i64) {
+    // SAFETY: u is a UUID.
+    unsafe {
+        *((u + 8) as *mut i64) = msb;
+        *((u + 16) as *mut i64) = lsb;
+    }
+}
+extern "C" fn uuid_msb(u: u64) -> i64 {
+    uuid_bits(u).0
+}
+extern "C" fn uuid_lsb(u: u64) -> i64 {
+    uuid_bits(u).1
+}
+extern "C" fn uuid_hash(u: u64) -> i32 {
+    let (m, l) = uuid_bits(u);
+    let x = m ^ l;
+    ((x >> 32) as i32) ^ (x as i32)
+}
+extern "C" fn uuid_equals(u: u64, o: u64) -> i32 {
+    // SAFETY: o is an object (or null).
+    (o != 0 && unsafe { word(o, 0) } == vt(UUID) && uuid_bits(u) == uuid_bits(o)).into()
+}
+extern "C" fn uuid_compare(u: u64, o: u64) -> i32 {
+    match uuid_bits(u).cmp(&uuid_bits(o)) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+fn uuid_text(msb: i64, lsb: i64) -> String {
+    let (m, l) = (msb as u64, lsb as u64);
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        m >> 32,
+        (m >> 16) & 0xFFFF,
+        m & 0xFFFF,
+        l >> 48,
+        l & 0xFFFF_FFFF_FFFF
+    )
+}
+extern "C" fn uuid_to_string(u: u64) -> u64 {
+    let (m, l) = uuid_bits(u);
+    str_of(&uuid_text(m, l))
+}
+/// The five dash-separated hex groups (Java accepts shorter groups too).
+fn parse_uuid(text: &str) -> Option<(i64, i64)> {
+    let parts: Vec<u64> = text
+        .split('-')
+        .map(|p| u64::from_str_radix(p, 16).ok())
+        .collect::<Option<_>>()?;
+    let [a, b, c, d, e] = parts[..] else {
+        return None;
+    };
+    let msb = (a << 32) | ((b & 0xFFFF) << 16) | (c & 0xFFFF);
+    let lsb = ((d & 0xFFFF) << 48) | (e & 0xFFFF_FFFF_FFFF);
+    Some((msb as i64, lsb as i64))
+}
+extern "C" fn uuid_from_string(s: u64) -> u64 {
+    let text = String::from_utf16_lossy(text(s));
+    match parse_uuid(&text) {
+        Some((m, l)) => new_uuid(m, l),
+        None => {
+            super::throw(
+                "java/lang/IllegalArgumentException",
+                Some(&format!("Invalid UUID string: {text}")),
+            );
+            0
+        }
+    }
+}
+/// 16 random bytes from the system.
+fn random_bytes() -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    #[cfg(unix)]
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut bytes))
+        .is_ok()
+    {
+        return bytes;
+    }
+    // Elsewhere: the standard library's per-process random keys.
+    for (k, chunk) in bytes.chunks_mut(8).enumerate() {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_usize(k);
+        chunk.copy_from_slice(&h.finish().to_le_bytes());
+    }
+    bytes
+}
+extern "C" fn uuid_random() -> u64 {
+    let mut b = random_bytes();
+    b[6] = (b[6] & 0x0F) | 0x40; // version 4
+    b[8] = (b[8] & 0x3F) | 0x80; // IETF variant
+    let msb = i64::from_be_bytes(b[..8].try_into().unwrap());
+    let lsb = i64::from_be_bytes(b[8..].try_into().unwrap());
+    new_uuid(msb, lsb)
+}
+extern "C" fn uuid_version(u: u64) -> i32 {
+    ((uuid_bits(u).0 >> 12) & 0x0F) as i32
+}
+
 /// The JDK's static fields this library provides: `owner name` → its
 /// getter and the getter's descriptor.
 pub fn static_getter(owner: &str, name: &str) -> Option<(usize, &'static str)> {
@@ -480,6 +628,69 @@ pub fn builtins() -> Vec<Builtin> {
             ],
         },
         Builtin {
+            name: UUID,
+            super_name: Some(O),
+            interfaces: &["java/lang/Comparable"],
+            size: 24,
+            is_final: true,
+            is_interface: false,
+            methods: vec![
+                m("<init>", "(JJ)V", f!(uuid_init)),
+                m("getMostSignificantBits", "()J", f!(uuid_msb)),
+                m("getLeastSignificantBits", "()J", f!(uuid_lsb)),
+                m("hashCode", "()I", f!(uuid_hash)),
+                m("equals", "(Ljava/lang/Object;)Z", f!(uuid_equals)),
+                m("compareTo", "(Ljava/util/UUID;)I", f!(uuid_compare)),
+                m("compareTo", "(Ljava/lang/Object;)I", f!(uuid_compare)),
+                m("toString", "()Ljava/lang/String;", f!(uuid_to_string)),
+                m("version", "()I", f!(uuid_version)),
+                Method {
+                    name: "fromString",
+                    desc: "(Ljava/lang/String;)Ljava/util/UUID;",
+                    is_static: true,
+                    f: f!(uuid_from_string),
+                },
+                Method {
+                    name: "randomUUID",
+                    desc: "()Ljava/util/UUID;",
+                    is_static: true,
+                    f: f!(uuid_random),
+                },
+            ],
+        },
+        Builtin {
+            name: FORMATTER,
+            super_name: Some(O),
+            interfaces: &[],
+            size: 32,
+            is_final: true,
+            is_interface: false,
+            methods: vec![
+                Method {
+                    name: "ofPattern",
+                    desc: "(Ljava/lang/String;)Ljava/time/format/DateTimeFormatter;",
+                    is_static: true,
+                    f: f!(formatter_of_pattern),
+                },
+                Method {
+                    name: "ofPattern",
+                    desc: "(Ljava/lang/String;Ljava/util/Locale;)Ljava/time/format/DateTimeFormatter;",
+                    is_static: true,
+                    f: f!(formatter_of_pattern_locale),
+                },
+                m(
+                    "withLocale",
+                    "(Ljava/util/Locale;)Ljava/time/format/DateTimeFormatter;",
+                    f!(formatter_with_locale),
+                ),
+                m(
+                    "withZone",
+                    "(Ljava/time/ZoneId;)Ljava/time/format/DateTimeFormatter;",
+                    f!(formatter_with_zone),
+                ),
+            ],
+        },
+        Builtin {
             name: LOCALE,
             super_name: Some(O),
             interfaces: &[],
@@ -533,6 +744,22 @@ pub fn builtins() -> Vec<Builtin> {
 #[cfg(test)]
 mod tests {
     use super::convert;
+
+    #[test]
+    fn uuids_print_and_parse_as_java_does() {
+        use super::{parse_uuid, uuid_text};
+        let (m, l) = (
+            0x123e4567_e89b_12d3_u64 as i64,
+            0xa456_426614174000_u64 as i64,
+        );
+        assert_eq!(uuid_text(m, l), "123e4567-e89b-12d3-a456-426614174000");
+        assert_eq!(
+            parse_uuid("123e4567-e89b-12d3-a456-426614174000"),
+            Some((m, l))
+        );
+        assert_eq!(uuid_text(0, 0), "00000000-0000-0000-0000-000000000000");
+        assert_eq!(parse_uuid("not-a-uuid"), None);
+    }
 
     #[test]
     fn float_max_and_min_follow_java() {
