@@ -209,6 +209,17 @@ fn element(array: &str) -> (i32, Type) {
     }
 }
 
+/// Code that cannot run: says why (stop reason `why`), then traps.
+fn say_and_trap(b: &mut FunctionBuilder<'_>, why: u32) {
+    let mut raw = Signature::new(b.func.signature.call_conv);
+    raw.params.push(AbiParam::new(types::I32));
+    let sr = b.import_signature(raw);
+    let f = b.ins().iconst(types::I64, rt::stopped as *const () as i64);
+    let id = b.ins().iconst(types::I32, i64::from(why));
+    b.ins().call_indirect(sr, f, &[id]);
+    b.ins().trap(UNSUPPORTED);
+}
+
 fn export_name(owner: &str, name: &str, desc: &str) -> String {
     format!("{owner}.{name}{desc}")
 }
@@ -719,6 +730,7 @@ impl Native {
                     // Start over with a body that traps (and a clean context).
                     ctx.func.clear();
                     fctx = FunctionBuilderContext::new();
+                    let why = rt::stop_reason(format!("{name}, not compiled: {e}"));
                     unsupported.push((name.clone(), e));
                     ctx.func.signature = sigs[&name].clone();
                     let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
@@ -726,7 +738,7 @@ impl Native {
                     b.append_block_params_for_function_params(e);
                     b.switch_to_block(e);
                     b.seal_block(e);
-                    b.ins().trap(UNSUPPORTED);
+                    say_and_trap(&mut b, why);
                     b.finalize(module.target_config());
                 }
                 bodies.insert(id, (name, ctx.func.clone()));
@@ -756,6 +768,10 @@ impl Native {
                 ctx.func.clear();
                 // The failed builder left its context half used.
                 fctx = FunctionBuilderContext::new();
+                let why = rt::stop_reason(format!(
+                    "lambda {i} -> {}.{}, not compiled: {e}",
+                    l.owner, l.target
+                ));
                 unsupported.push((format!("lambda {i} -> {}.{}", l.owner, l.target), e));
                 ctx.func.signature = signature(&module, true, &l.sam).expect("declared");
                 let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
@@ -763,7 +779,7 @@ impl Native {
                 b.append_block_params_for_function_params(e);
                 b.switch_to_block(e);
                 b.seal_block(e);
-                b.ins().trap(UNSUPPORTED);
+                say_and_trap(&mut b, why);
                 b.finalize(module.target_config());
             }
             bodies.insert(id, (format!("lambda {i}"), ctx.func.clone()));
@@ -1771,7 +1787,7 @@ fn bridge(
     };
     // A private instance target (javac's `lambda$...` bodies) is never
     // overridden: called directly, as `invokespecial` would.
-    let private = l.kind == 5
+    let private = matches!(l.kind, 5 | 9)
         && w.by_name.get(l.owner.as_str()).is_some_and(|cf| {
             cf.methods.iter().any(|m| {
                 m.name == l.target && m.descriptor == l.target_desc && m.access & PRIVATE != 0

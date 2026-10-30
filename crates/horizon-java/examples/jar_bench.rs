@@ -29,6 +29,41 @@ fn anyhow(m: impl std::fmt::Display) -> Error {
     Error::msg(m.to_string())
 }
 
+/// The first `roots` classes and those whose names start with one of
+/// `only`, with their supertypes among `all`.
+fn with_supertypes(all: Vec<ClassFile>, roots: usize, only: &[String]) -> Vec<ClassFile> {
+    let names: Vec<String> = all
+        .iter()
+        .map(|c| c.name().unwrap_or_default().to_owned())
+        .collect();
+    let index: std::collections::HashMap<&str, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    let mut keep = vec![false; all.len()];
+    let mut todo: Vec<usize> = (0..all.len())
+        .filter(|&i| i < roots || only.iter().any(|p| names[i].starts_with(p.as_str())))
+        .collect();
+    while let Some(i) = todo.pop() {
+        if std::mem::replace(&mut keep[i], true) {
+            continue;
+        }
+        let c = &all[i];
+        let supers = c
+            .super_name()
+            .ok()
+            .flatten()
+            .into_iter()
+            .chain(c.interfaces.iter().filter_map(|&k| c.class_name(k).ok()));
+        todo.extend(supers.filter_map(|s| index.get(s).copied()));
+    }
+    all.into_iter()
+        .zip(keep)
+        .filter_map(|(c, k)| k.then_some(c))
+        .collect()
+}
+
 fn read(path: &Path, only: &[String], out: &mut Vec<ClassFile>) -> Result<()> {
     if path.is_dir() {
         for e in std::fs::read_dir(path)? {
@@ -232,8 +267,18 @@ fn main() -> Result<()> {
         }
     }
     let mut classes = Vec::new();
+    let mut roots = 0;
     for p in &paths {
-        read(Path::new(p), &only, &mut classes)?;
+        read(Path::new(p), &[], &mut classes)?;
+        // Class directories are kept whole.
+        if Path::new(p).is_dir() {
+            roots = classes.len();
+        }
+    }
+    // `--only`: the classes it names, and every class they extend or
+    // implement (a class is never compiled without its supertypes).
+    if !only.is_empty() {
+        classes = with_supertypes(classes, roots, &only);
     }
     let started = Instant::now();
     let compiled = compile(&classes).map_err(anyhow)?;

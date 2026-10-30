@@ -443,6 +443,29 @@ extern "C" fn formatter_of_pattern(pattern: u64) -> u64 {
 extern "C" fn formatter_of_pattern_locale(pattern: u64, locale: u64) -> u64 {
     formatter(pattern, locale, 0)
 }
+/// The JDK's predefined formatters, by name (their name is kept as the
+/// pattern until formatting is here).
+fn predefined(name: &'static str) -> u64 {
+    once(name, || formatter(str_of(name), locale_root(), 0))
+}
+macro_rules! predefined {
+    ($($fn_name:ident = $name:expr;)*) => {
+        $(extern "C" fn $fn_name() -> u64 {
+            predefined($name)
+        })*
+    };
+}
+predefined! {
+    iso_instant = "ISO_INSTANT";
+    iso_local_date = "ISO_LOCAL_DATE";
+    iso_local_time = "ISO_LOCAL_TIME";
+    iso_local_date_time = "ISO_LOCAL_DATE_TIME";
+    iso_offset_date_time = "ISO_OFFSET_DATE_TIME";
+    iso_date_time = "ISO_DATE_TIME";
+    basic_iso_date = "BASIC_ISO_DATE";
+    rfc_1123 = "RFC_1123_DATE_TIME";
+}
+
 extern "C" fn formatter_with_locale(f: u64, locale: u64) -> u64 {
     // SAFETY: f is a formatter.
     unsafe { formatter(word(f, 8), locale, word(f, 24)) }
@@ -859,7 +882,17 @@ pub fn static_getter(owner: &str, name: &str) -> Option<(usize, &'static str)> {
     const UNIT: &str = "()Ljava/util/concurrent/TimeUnit;";
     let f = |f: extern "C" fn() -> u64| f as *const () as usize;
     const L: &str = "()Ljava/util/Locale;";
+    const F: &str = "()Ljava/time/format/DateTimeFormatter;";
+    const DTF: &str = "java/time/format/DateTimeFormatter";
     Some(match (owner, name) {
+        (DTF, "ISO_INSTANT") => (f(iso_instant), F),
+        (DTF, "ISO_LOCAL_DATE") => (f(iso_local_date), F),
+        (DTF, "ISO_LOCAL_TIME") => (f(iso_local_time), F),
+        (DTF, "ISO_LOCAL_DATE_TIME") => (f(iso_local_date_time), F),
+        (DTF, "ISO_OFFSET_DATE_TIME") => (f(iso_offset_date_time), F),
+        (DTF, "ISO_DATE_TIME") => (f(iso_date_time), F),
+        (DTF, "BASIC_ISO_DATE") => (f(basic_iso_date), F),
+        (DTF, "RFC_1123_DATE_TIME") => (f(rfc_1123), F),
         ("java/util/Locale", "ROOT") => (f(locale_root), L),
         ("java/util/Locale", "ENGLISH") => (f(locale_english), L),
         ("java/util/Locale", "US") => (f(locale_us), L),

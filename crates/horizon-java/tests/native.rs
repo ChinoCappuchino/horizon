@@ -220,3 +220,12 @@ fn strings_split_join_and_format_as_java_does() {
         !bits & ((1 << 8) - 1)
     );
 }
+
+#[test]
+fn a_lambda_calls_a_private_interface_method() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/NativeOps.interfaceLambda()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    assert_eq!(f(native.context()), "hi bo".len() as i32);
+}

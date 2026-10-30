@@ -92,4 +92,22 @@ public class NativeOps {
         return m.length * 1000 + m[0].length * 100 + m[a - 1][b - 1] + c[1][2][3] + none.length
                 + c[0][0].length * 10000;
     }
+
+    /** A lambda in an interface's default method calling a private interface method. */
+    interface Greeter {
+        String name();
+
+        default java.util.function.Supplier<String> greet() {
+            return () -> hello();
+        }
+
+        private String hello() {
+            return "hi " + name();
+        }
+    }
+
+    public static int interfaceLambda() {
+        Greeter g = () -> "bo";
+        return g.greet().get().length();
+    }
 }
