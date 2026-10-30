@@ -178,3 +178,15 @@ fn streams_and_collectors_give_javas_results() {
         !bits & ((1 << 12) - 1)
     );
 }
+
+#[test]
+fn multi_dimensional_arrays_are_nested_arrays() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/NativeOps.multi(II)I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context, i32, i32) -> i32 = unsafe { std::mem::transmute(f) };
+    assert_eq!(
+        f(native.context(), 3, 4),
+        4 * 10000 + 3000 + 400 + 7 + 'z' as i32
+    );
+}

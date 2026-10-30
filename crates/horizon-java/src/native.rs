@@ -3628,6 +3628,35 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 self.b.ins().store(MemFlagsData::trusted(), len64, arr, 8);
                 self.set(d - 1, i64t, arr);
             }
+            0xC5 => {
+                let Operand::Dimensions(c, dims) = insn.operand else {
+                    unreachable!()
+                };
+                let desc = self.class.class_name(c).map_err(me)?.to_owned();
+                let dims = usize::from(dims);
+                if !(1..=4).contains(&dims) || desc.len() < dims + 1 {
+                    self.stop(format!("multianewarray of {dims} dimensions"));
+                    return Ok(true);
+                }
+                let (inner, _) = element(&desc[dims - 1..]);
+                let mut args = vec![
+                    self.b.ins().iconst(i64t, i64::from(inner)),
+                    self.b.ins().iconst(i32t, dims as i64),
+                ];
+                for k in 0..4 {
+                    args.push(if k < dims {
+                        self.get(d - dims + k, i32t)
+                    } else {
+                        self.b.ins().iconst(i32t, 0)
+                    });
+                }
+                let f = rt::multi_array as *const () as usize;
+                let arr = self
+                    .call_builtin(f, "(JIIIII)Ljava/lang/Object;", false, &args)?
+                    .ok_or("no array")?;
+                self.after_call(i)?;
+                self.set(d - dims, i64t, arr);
+            }
             0xBE => {
                 let arr = self.get(d - 1, i64t);
                 self.null_check(arr);

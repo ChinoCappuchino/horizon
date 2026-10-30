@@ -592,6 +592,250 @@ extern "C" fn provider_scheme(p: u64) -> u64 {
     unsafe { word(p, 8) }
 }
 
+// ---- HexFormat ------------------------------------------------------------------------
+//
+// [vtable][upper case]; two made once.
+
+const HEX: &str = "java/util/HexFormat";
+
+fn hex_format(upper: bool) -> u64 {
+    once(
+        if upper {
+            "HexFormat.upper"
+        } else {
+            "HexFormat.lower"
+        },
+        || {
+            let h = alloc(16, vt(HEX));
+            // SAFETY: a fresh HexFormat.
+            unsafe { *((h + 8) as *mut u64) = u64::from(upper) };
+            h
+        },
+    )
+}
+fn hex_upper(h: u64) -> bool {
+    // SAFETY: h is a HexFormat.
+    unsafe { word(h, 8) != 0 }
+}
+/// `v`'s low `digits` hex digits.
+fn hex_digits(h: u64, v: u64, digits: u32) -> u64 {
+    let text = if hex_upper(h) {
+        format!("{:0w$X}", v, w = digits as usize)
+    } else {
+        format!("{:0w$x}", v, w = digits as usize)
+    };
+    let keep = text.len() - digits as usize;
+    str_of(&text[keep..])
+}
+extern "C" fn hex_of() -> u64 {
+    hex_format(false)
+}
+extern "C" fn hex_with_upper(_h: u64) -> u64 {
+    hex_format(true)
+}
+extern "C" fn hex_with_lower(_h: u64) -> u64 {
+    hex_format(false)
+}
+extern "C" fn hex_is_upper(h: u64) -> i32 {
+    hex_upper(h).into()
+}
+extern "C" fn hex_byte(h: u64, v: i32) -> u64 {
+    hex_digits(h, (v as u8).into(), 2)
+}
+extern "C" fn hex_char(h: u64, v: i32) -> u64 {
+    hex_digits(h, (v as u16).into(), 4)
+}
+extern "C" fn hex_int(h: u64, v: i32) -> u64 {
+    hex_digits(h, (v as u32).into(), 8)
+}
+extern "C" fn hex_long(h: u64, v: i64) -> u64 {
+    hex_digits(h, v as u64, 16)
+}
+/// `toHexDigits(long, digits)`: the low `digits` (0 to 16) hex digits.
+extern "C" fn hex_long_digits(h: u64, v: i64, digits: i32) -> u64 {
+    if !(0..=16).contains(&digits) {
+        super::throw(
+            "java/lang/IllegalArgumentException",
+            Some(&format!("number of digits: {digits}")),
+        );
+        return 0;
+    }
+    if digits == 0 {
+        return str_of("");
+    }
+    hex_digits(h, v as u64, digits as u32)
+}
+/// `formatHex(byte[])`: two digits a byte.
+extern "C" fn hex_format_bytes(h: u64, bytes: u64) -> u64 {
+    if bytes == 0 {
+        super::throw("java/lang/NullPointerException", None);
+        return 0;
+    }
+    // SAFETY: a byte array: its length, then its bytes.
+    let data = unsafe {
+        let n = word(bytes, 8) as usize;
+        std::slice::from_raw_parts((bytes + 16) as *const u8, n)
+    };
+    let upper = hex_upper(h);
+    let text: String = data
+        .iter()
+        .map(|b| {
+            if upper {
+                format!("{b:02X}")
+            } else {
+                format!("{b:02x}")
+            }
+        })
+        .collect();
+    str_of(&text)
+}
+
+// ---- Character ------------------------------------------------------------------------
+//
+// Its static methods (a char and a code point are both an int here).
+
+fn ch(c: i32) -> Option<char> {
+    char::from_u32(c as u32)
+}
+macro_rules! char_test {
+    ($($name:ident = $test:expr;)*) => {
+        $(extern "C" fn $name(c: i32) -> i32 {
+            let test: fn(char) -> bool = $test;
+            ch(c).is_some_and(test).into()
+        })*
+    };
+}
+char_test! {
+    char_is_digit = |c| c.is_ascii_digit() || (!c.is_ascii() && c.is_numeric());
+    char_is_letter = |c| c.is_alphabetic() && !c.is_numeric();
+    char_is_letter_or_digit = |c| c.is_alphanumeric();
+    char_is_alphabetic = |c| c.is_alphabetic();
+    char_is_upper = |c| c.is_uppercase();
+    char_is_lower = |c| c.is_lowercase();
+    // Java's: no non-breaking spaces; the separators below space count.
+    char_is_whitespace = |c| match c {
+        '\u{A0}' | '\u{2007}' | '\u{202F}' | '\u{85}' => false,
+        '\t'..='\r' | '\u{1C}'..='\u{1F}' => true,
+        c => c.is_whitespace(),
+    };
+    char_is_space_char = |c| matches!(c,
+        ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'..='\u{200A}'
+        | '\u{2028}' | '\u{2029}' | '\u{202F}' | '\u{205F}' | '\u{3000}');
+    char_is_identifier_start = |c| c.is_alphabetic() || c == '_' || c == '$';
+    char_is_identifier_part = |c| c.is_alphanumeric() || c == '_' || c == '$';
+}
+extern "C" fn char_is_iso_control(c: i32) -> i32 {
+    matches!(c, 0..=0x1F | 0x7F..=0x9F).into()
+}
+extern "C" fn char_is_high_surrogate(c: i32) -> i32 {
+    (0xD800..=0xDBFF).contains(&c).into()
+}
+extern "C" fn char_is_low_surrogate(c: i32) -> i32 {
+    (0xDC00..=0xDFFF).contains(&c).into()
+}
+extern "C" fn char_is_surrogate(c: i32) -> i32 {
+    (0xD800..=0xDFFF).contains(&c).into()
+}
+/// The one-char mapping, or the char itself when it maps to several.
+fn single(mut mapped: impl Iterator<Item = char>, c: i32) -> i32 {
+    match (mapped.next(), mapped.next()) {
+        (Some(m), None) => m as i32,
+        _ => c,
+    }
+}
+extern "C" fn char_to_upper(c: i32) -> i32 {
+    ch(c).map_or(c, |x| single(x.to_uppercase(), c))
+}
+extern "C" fn char_to_lower(c: i32) -> i32 {
+    ch(c).map_or(c, |x| single(x.to_lowercase(), c))
+}
+extern "C" fn char_to_upper_c(c: i32) -> i32 {
+    char_to_upper(c) & 0xFFFF
+}
+extern "C" fn char_to_lower_c(c: i32) -> i32 {
+    char_to_lower(c) & 0xFFFF
+}
+extern "C" fn char_digit(c: i32, radix: i32) -> i32 {
+    if !(2..=36).contains(&radix) {
+        return -1;
+    }
+    ch(c)
+        .and_then(|x| x.to_digit(radix as u32))
+        .map_or(-1, |d| d as i32)
+}
+extern "C" fn char_for_digit(d: i32, radix: i32) -> i32 {
+    if !(2..=36).contains(&radix) || !(0..radix).contains(&d) {
+        return 0;
+    }
+    char::from_digit(d as u32, radix as u32).map_or(0, |x| x as i32)
+}
+extern "C" fn char_numeric_value(c: i32) -> i32 {
+    ch(c).and_then(|x| x.to_digit(36)).map_or(-1, |d| d as i32)
+}
+extern "C" fn char_count(c: i32) -> i32 {
+    if c >= 0x10000 { 2 } else { 1 }
+}
+extern "C" fn char_compare(a: i32, b: i32) -> i32 {
+    a - b
+}
+extern "C" fn char_hash(c: i32) -> i32 {
+    c
+}
+extern "C" fn char_string(c: i32) -> u64 {
+    super::new_string(&[c as u16])
+}
+
+/// `Character`'s static methods beyond rt.rs's boxing.
+pub fn character_methods() -> Vec<Method> {
+    let s = |name, desc, f: usize| Method {
+        name,
+        desc,
+        is_static: true,
+        f,
+    };
+    macro_rules! f {
+        ($f:expr) => {
+            $f as *const () as usize
+        };
+    }
+    let mut out = Vec::new();
+    for (name, f) in [
+        ("isDigit", f!(char_is_digit)),
+        ("isLetter", f!(char_is_letter)),
+        ("isLetterOrDigit", f!(char_is_letter_or_digit)),
+        ("isUpperCase", f!(char_is_upper)),
+        ("isLowerCase", f!(char_is_lower)),
+        ("isWhitespace", f!(char_is_whitespace)),
+        ("isSpaceChar", f!(char_is_space_char)),
+        ("isISOControl", f!(char_is_iso_control)),
+        ("isJavaIdentifierStart", f!(char_is_identifier_start)),
+        ("isJavaIdentifierPart", f!(char_is_identifier_part)),
+    ] {
+        out.push(s(name, "(C)Z", f));
+        out.push(s(name, "(I)Z", f));
+    }
+    out.extend([
+        s("isAlphabetic", "(I)Z", f!(char_is_alphabetic)),
+        s("isHighSurrogate", "(C)Z", f!(char_is_high_surrogate)),
+        s("isLowSurrogate", "(C)Z", f!(char_is_low_surrogate)),
+        s("isSurrogate", "(C)Z", f!(char_is_surrogate)),
+        s("toUpperCase", "(C)C", f!(char_to_upper_c)),
+        s("toLowerCase", "(C)C", f!(char_to_lower_c)),
+        s("toUpperCase", "(I)I", f!(char_to_upper)),
+        s("toLowerCase", "(I)I", f!(char_to_lower)),
+        s("digit", "(CI)I", f!(char_digit)),
+        s("digit", "(II)I", f!(char_digit)),
+        s("forDigit", "(II)C", f!(char_for_digit)),
+        s("getNumericValue", "(C)I", f!(char_numeric_value)),
+        s("getNumericValue", "(I)I", f!(char_numeric_value)),
+        s("charCount", "(I)I", f!(char_count)),
+        s("compare", "(CC)I", f!(char_compare)),
+        s("hashCode", "(C)I", f!(char_hash)),
+        s("toString", "(C)Ljava/lang/String;", f!(char_string)),
+    ]);
+    out
+}
+
 /// The JDK's static fields this library provides: `owner name` → its
 /// getter and the getter's descriptor.
 pub fn static_getter(owner: &str, name: &str) -> Option<(usize, &'static str)> {
@@ -649,6 +893,40 @@ pub fn builtins() -> Vec<Builtin> {
                 m("totalMemory", "()J", f!(runtime_total_memory)),
                 m("freeMemory", "()J", f!(runtime_free_memory)),
                 m("gc", "()V", f!(runtime_gc)),
+            ],
+        },
+        Builtin {
+            name: HEX,
+            super_name: Some(O),
+            interfaces: &[],
+            size: 16,
+            is_final: true,
+            is_interface: false,
+            methods: vec![
+                Method {
+                    name: "of",
+                    desc: "()Ljava/util/HexFormat;",
+                    is_static: true,
+                    f: f!(hex_of),
+                },
+                m(
+                    "withUpperCase",
+                    "()Ljava/util/HexFormat;",
+                    f!(hex_with_upper),
+                ),
+                m(
+                    "withLowerCase",
+                    "()Ljava/util/HexFormat;",
+                    f!(hex_with_lower),
+                ),
+                m("isUpperCase", "()Z", f!(hex_is_upper)),
+                m("toHexDigits", "(B)Ljava/lang/String;", f!(hex_byte)),
+                m("toHexDigits", "(C)Ljava/lang/String;", f!(hex_char)),
+                m("toHexDigits", "(S)Ljava/lang/String;", f!(hex_char)),
+                m("toHexDigits", "(I)Ljava/lang/String;", f!(hex_int)),
+                m("toHexDigits", "(J)Ljava/lang/String;", f!(hex_long)),
+                m("toHexDigits", "(JI)Ljava/lang/String;", f!(hex_long_digits)),
+                m("formatHex", "([B)Ljava/lang/String;", f!(hex_format_bytes)),
             ],
         },
         Builtin {
@@ -785,6 +1063,27 @@ pub fn builtins() -> Vec<Builtin> {
 #[cfg(test)]
 mod tests {
     use super::convert;
+
+    #[test]
+    fn characters_classify_as_java_does() {
+        use super::*;
+        assert_eq!(char_is_whitespace(' ' as i32), 1);
+        assert_eq!(char_is_whitespace(0xA0), 0, "a non-breaking space is not");
+        assert_eq!(char_is_whitespace(0x1F), 1);
+        assert_eq!(char_is_iso_control(0x9F), 1);
+        assert_eq!(char_is_iso_control('a' as i32), 0);
+        assert_eq!(char_to_upper_c('a' as i32), 'A' as i32);
+        assert_eq!(
+            char_to_upper_c('\u{DF}' as i32),
+            0xDF,
+            "ß has no one-char upper case"
+        );
+        assert_eq!(char_digit('f' as i32, 16), 15);
+        assert_eq!(char_digit('g' as i32, 16), -1);
+        assert_eq!(char_for_digit(11, 16), 'b' as i32);
+        assert_eq!(char_is_digit('7' as i32), 1);
+        assert_eq!(char_is_letter('7' as i32), 0);
+    }
 
     #[test]
     fn uuids_print_and_parse_as_java_does() {

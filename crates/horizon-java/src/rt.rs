@@ -164,6 +164,41 @@ pub extern "C" fn throw_new(vtable: u64) {
     unsafe { (*ctx()).exception = e };
 }
 
+/// `multianewarray`: nested arrays for the first `dims` of `counts` (the
+/// outer levels hold references; the innermost one's elements are
+/// `inner_size` bytes). Below a count of 0 nothing is made, as in the JVM.
+pub extern "C" fn multi_array(
+    inner_size: i64,
+    dims: i32,
+    c0: i32,
+    c1: i32,
+    c2: i32,
+    c3: i32,
+) -> u64 {
+    let counts = [c0, c1, c2, c3];
+    let counts = &counts[..dims.clamp(1, 4) as usize];
+    if let Some(&n) = counts.iter().find(|&&n| n < 0) {
+        throw("java/lang/NegativeArraySizeException", Some(&n.to_string()));
+        return 0;
+    }
+    fn level(counts: &[i32], inner_size: u64) -> u64 {
+        let n = counts[0] as u64;
+        let size = if counts.len() == 1 { inner_size } else { 8 };
+        let a = alloc((A_DATA as u64 + size * n) as usize, size);
+        // SAFETY: a fresh array of n elements.
+        unsafe { set_word(a, A_LEN, n) };
+        if counts.len() > 1 {
+            for i in 0..n {
+                let inner = level(&counts[1..], inner_size);
+                // SAFETY: as above.
+                unsafe { set_word(a, A_DATA + 8 * i as usize, inner) };
+            }
+        }
+        a
+    }
+    level(counts, inner_size as u64)
+}
+
 /// Why each stop compiled (`native::MethodGen::stop`), by its number.
 static STOP_REASONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -1684,6 +1719,9 @@ pub fn builtins() -> Vec<Builtin> {
     out.extend(executors::builtins());
     if let Some(system) = out.iter_mut().find(|b| b.name == "java/lang/System") {
         system.methods.extend(system::system_methods());
+    }
+    if let Some(c) = out.iter_mut().find(|b| b.name == "java/lang/Character") {
+        c.methods.extend(system::character_methods());
     }
     if let Some(math) = out.iter_mut().find(|b| b.name == "java/lang/Math") {
         math.methods.extend(system::math_methods());

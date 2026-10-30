@@ -81,4 +81,15 @@ public class NativeOps {
         }
         return sum;
     }
+
+    /** multianewarray: 2-D ints, 3-D chars, an outer count of 0. */
+    public static int multi(int a, int b) {
+        int[][] m = new int[a][b];
+        m[a - 1][b - 1] = 7;
+        char[][][] c = new char[2][3][4];
+        c[1][2][3] = 'z';
+        long[][] none = new long[0][5];
+        return m.length * 1000 + m[0].length * 100 + m[a - 1][b - 1] + c[1][2][3] + none.length
+                + c[0][0].length * 10000;
+    }
 }
