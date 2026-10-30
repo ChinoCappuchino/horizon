@@ -143,4 +143,11 @@ fn java_threads_share_monitors_atomics_and_class_initialization() {
         8 * 42 + 1000,
         "one initialization, seen by all"
     );
+    let pool: extern "C" fn(*mut Context, i32, i32) -> i64 =
+        unsafe { std::mem::transmute(get("t/Threads.pool(II)J")) };
+    assert_eq!(
+        pool(ctx, 4, 1000),
+        1000 * 1_000_000 + 7 * 10_000 + 4 * 100 + 4 * 10 + 1,
+        "a ForkJoinPool with the program's own workers"
+    );
 }

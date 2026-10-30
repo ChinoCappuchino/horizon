@@ -19,6 +19,7 @@ use std::{
 };
 
 mod collections;
+mod executors;
 mod logging;
 mod system;
 pub use system::static_getter;
@@ -1679,6 +1680,7 @@ pub fn builtins() -> Vec<Builtin> {
     out.extend(logging::builtins());
     out.extend(threads::builtins());
     out.extend(system::builtins());
+    out.extend(executors::builtins());
     if let Some(system) = out.iter_mut().find(|b| b.name == "java/lang/System") {
         system.methods.extend(system::system_methods());
     }

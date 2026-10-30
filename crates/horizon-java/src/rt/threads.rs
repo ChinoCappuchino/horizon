@@ -190,7 +190,7 @@ const T_TARGET: usize = 8;
 const T_NAME: usize = 16;
 const T_DAEMON: usize = 24;
 const T_NUMBER: usize = 32;
-const THREAD_SIZE: i32 = 40;
+pub(super) const THREAD_SIZE: i32 = 40;
 
 /// What the runtime knows of a started thread.
 #[derive(Default)]
@@ -213,7 +213,7 @@ fn set_word(o: u64, at: usize, v: u64) {
     unsafe { super::set_word(o, at, v) };
 }
 
-fn named(t: u64, name: u64) {
+pub(super) fn named(t: u64, name: u64) {
     let n = NUMBERS.fetch_add(1, Ordering::Relaxed);
     set_word(t, T_NUMBER, n);
     let name = if name != 0 {
@@ -249,7 +249,7 @@ extern "C" fn thread_run(t: u64) {
 }
 
 /// `o.run()` through its class.
-fn call_run(o: u64) {
+pub(super) fn call_run(o: u64) {
     match method(o, "run ()V") {
         Some(f) => {
             // SAFETY: the selector's slot holds a (receiver) -> void method.
@@ -264,7 +264,7 @@ fn call_run(o: u64) {
 }
 
 /// `Thread.start()`: `run()` on a new OS thread with its own context.
-extern "C" fn thread_start(t: u64) {
+pub(super) extern "C" fn thread_start(t: u64) {
     let state = Arc::new(Started::default());
     {
         let mut started = STARTED.lock().unwrap();

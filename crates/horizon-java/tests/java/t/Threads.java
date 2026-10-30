@@ -1,5 +1,9 @@
 package t;
 
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinWorkerThread;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** Threads, monitors, atomics and class initialization (tests/native.rs). */
@@ -142,5 +146,39 @@ public class Threads {
         int sum = 0;
         for (int v : seen) sum += v;
         return sum + Slow.inits * 1000;
+    }
+
+    static final AtomicInteger STARTS = new AtomicInteger();
+    static final AtomicInteger ENDS = new AtomicInteger();
+
+    static final class PoolWorker extends ForkJoinWorkerThread {
+        PoolWorker(ForkJoinPool pool) {
+            super(pool);
+        }
+
+        @Override
+        protected void onStart() {
+            STARTS.incrementAndGet();
+        }
+
+        @Override
+        protected void onTermination(Throwable e) {
+            ENDS.incrementAndGet();
+        }
+    }
+
+    /** tasks * 1e6 + submitted value * 1e4 + starts * 100 + ends * 10 + ended in time. */
+    public static long pool(int workers, int tasks) throws Exception {
+        STARTS.set(0);
+        ENDS.set(0);
+        AtomicInteger done = new AtomicInteger();
+        ForkJoinPool pool = new ForkJoinPool(workers, PoolWorker::new, null, true);
+        for (int i = 0; i < tasks; i++) pool.execute(() -> done.incrementAndGet());
+        Future<Integer> seven = pool.submit(() -> 7);
+        int value = seven.get();
+        pool.shutdown();
+        boolean ended = pool.awaitTermination(10, TimeUnit.SECONDS);
+        return done.get() * 1_000_000L + value * 10_000L + STARTS.get() * 100L + ENDS.get() * 10L
+                + (ended ? 1 : 0);
     }
 }

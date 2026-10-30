@@ -87,6 +87,15 @@ unit_to!(unit_to_minutes, 4);
 unit_to!(unit_to_hours, 5);
 unit_to!(unit_to_days, 6);
 
+/// `d` of TimeUnit `unit` in nanoseconds (for timeouts).
+pub(super) fn to_nanos(d: i64, unit: u64) -> i64 {
+    if unit == 0 {
+        d
+    } else {
+        convert(d, ordinal(unit), 0)
+    }
+}
+
 extern "C" fn unit_convert(u: u64, d: i64, from: u64) -> i64 {
     convert(d, ordinal(from), ordinal(u))
 }

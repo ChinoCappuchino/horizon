@@ -80,6 +80,7 @@ fn jdk_super(class: &str) -> Option<&'static str> {
         | "java/lang/SecurityException"
         | "java/lang/MatchException"
         | "java/util/ConcurrentModificationException"
+        | "java/util/concurrent/RejectedExecutionException"
         | "java/util/NoSuchElementException"
         | "java/io/UncheckedIOException" => "java/lang/RuntimeException",
         "java/lang/NumberFormatException" | "java/lang/IllegalThreadStateException" => {
@@ -131,6 +132,7 @@ const JDK_EXCEPTIONS: &[&str] = &[
     "java/lang/OutOfMemoryError",
     "java/lang/IllegalMonitorStateException",
     "java/lang/IllegalThreadStateException",
+    "java/util/concurrent/RejectedExecutionException",
 ];
 
 extern "C" fn host_catches(exc: u64, catch: u32) -> u32 {
@@ -1031,10 +1033,21 @@ impl Native {
         }
         // Selectors nothing implements: a call stops with a message.
         let missing = host_missing as *const u8 as u64;
+        // HORIZON_NATIVE_MISSING=<text>: the selectors left to it, for each
+        // class whose name has the text.
+        let report = std::env::var("HORIZON_NATIVE_MISSING").ok();
+        let by_selector: HashMap<usize, String> = selectors
+            .iter()
+            .map(|((n, d), &i)| (i, format!("{n}{d}")))
+            .collect();
         for vt in &mut vtables {
-            for slot in vt.iter_mut().skip(1) {
+            let class = class_names.get(vt[0] as usize).cloned().unwrap_or_default();
+            for (k, slot) in vt.iter_mut().enumerate().skip(1) {
                 if *slot == 0 {
                     *slot = missing;
+                    if report.as_ref().is_some_and(|r| class.contains(r.as_str())) {
+                        eprintln!("{class}: no {}", by_selector[&(k - 1)]);
+                    }
                 }
             }
         }

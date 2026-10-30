@@ -275,6 +275,13 @@ fn al_grow(l: u64, min: usize) {
     set(l, AL_DATA, b);
 }
 extern "C" fn al_init(_l: u64) {}
+
+/// A new, empty `ArrayList` (for the runtime's own results).
+pub(super) fn new_array_list() -> u64 {
+    let l = alloc(32, vt(ARRAY_LIST));
+    al_init(l);
+    l
+}
 extern "C" fn al_init_cap(l: u64, cap: i32) {
     if cap < 0 {
         throw(
