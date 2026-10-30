@@ -4,8 +4,8 @@
 //! mods in `home/horizon-mods/`, each downloaded and checked against the index like any
 //! registry mod, turned on or off as the pack says. The pack's overrides (settings, resource
 //! packs, a mod's saved settings) are copied in once, when it is installed.
-use super::{fetch, index, install_version, local, newest, Index};
-use crate::browser::{java, FileRef};
+use super::{Index, fetch, index, install_version, local, newest};
+use crate::browser::{FileRef, java};
 use horizon_mods::{index as idx, modpack::Modpack};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -55,9 +55,11 @@ fn read(work: &Path) -> Option<Installed> {
     Some(pack)
 }
 
-/// Whether `work` is a registry pack's folder.
+/// Whether `work` is a registry pack's folder: one of `packs_dir()` with
+/// its record. (A pack ported from another launcher keeps a `pack.json` of
+/// its own, under `ports/`: it is not one.)
 pub fn is_pack(work: &Path) -> bool {
-    work.join(RECORD).is_file()
+    work.parent() == Some(packs_dir().as_path()) && work.join(RECORD).is_file()
 }
 
 /// The profile's game folder.
@@ -185,6 +187,15 @@ pub fn remove(work: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ported_packs_own_record_is_not_a_registry_pack() {
+        let work = std::env::temp_dir().join(format!("horizon-port-{}", std::process::id()));
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join(RECORD), "{}").unwrap();
+        assert!(!is_pack(&work), "a port's pack.json outside horizon-packs/");
+        fs::remove_dir_all(&work).unwrap();
+    }
     use std::io::Write;
 
     /// A local registry: the mod and a pack of it, as `file://` files.
@@ -280,9 +291,11 @@ mod tests {
             "renderDistance:12\n"
         );
         // Not a modpack, and not there.
-        assert!(install_in(&index, true, "coords_hud", &packs, &|_, _| {})
-            .unwrap_err()
-            .contains("not a modpack"));
+        assert!(
+            install_in(&index, true, "coords_hud", &packs, &|_, _| {})
+                .unwrap_err()
+                .contains("not a modpack")
+        );
         assert!(install_in(&index, true, "nope", &packs, &|_, _| {}).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
