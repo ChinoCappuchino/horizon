@@ -1077,6 +1077,12 @@ impl Native {
                 if let Some(f) = found {
                     // SAFETY: as above.
                     unsafe { *vt.add(1 + sel) = module.get_finalized_function(f) as u64 };
+                } else if let Some(p) =
+                    interface_default(&names_by_id[names.len() + 1 + i], mname, mdesc)
+                {
+                    // A runtime interface's default (Comparator.reversed...).
+                    // SAFETY: as above.
+                    unsafe { *vt.add(1 + sel) = p };
                 }
             }
         }

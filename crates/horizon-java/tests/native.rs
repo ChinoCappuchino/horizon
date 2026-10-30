@@ -229,3 +229,18 @@ fn a_lambda_calls_a_private_interface_method() {
     let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
     assert_eq!(f(native.context()), "hi bo".len() as i32);
 }
+
+#[test]
+fn functional_interfaces_compose_as_java_does() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/Streams.functionChecks()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    let bits = f(native.context());
+    assert_eq!(
+        bits,
+        (1 << 7) - 1,
+        "failed checks: {:#b}",
+        !bits & ((1 << 7) - 1)
+    );
+}

@@ -11,6 +11,7 @@ use super::{
 };
 use crate::heap::Context;
 
+mod functions;
 mod streams;
 
 // ---- Helpers ---------------------------------------------------------------
@@ -127,6 +128,20 @@ fn call1_i(o: u64, nd: &str, a: u64) -> i32 {
         None => {
             missing(o, nd);
             0
+        }
+    }
+}
+/// A method of `o` taking one reference and returning a double.
+fn call1_d(o: u64, nd: &str, a: u64) -> f64 {
+    match method(o, nd) {
+        Some(f) => {
+            // SAFETY: the selector's slot holds a method of this shape.
+            let f: extern "C" fn(*mut Context, u64, u64) -> f64 = unsafe { std::mem::transmute(f) };
+            f(ctx(), o, a)
+        }
+        None => {
+            missing(o, nd);
+            0.0
         }
     }
 }
@@ -2547,9 +2562,12 @@ macro_rules! f {
 }
 
 /// The collections' and utilities' built-in classes.
-/// Streams and Collectors (collections/streams.rs).
+/// Streams and Collectors, and the functional interfaces' methods
+/// (collections/streams.rs, collections/functions.rs).
 pub fn stream_builtins() -> Vec<Builtin> {
-    streams::builtins()
+    let mut out = streams::builtins();
+    out.extend(functions::builtins());
+    out
 }
 
 pub fn builtins() -> Vec<Builtin> {

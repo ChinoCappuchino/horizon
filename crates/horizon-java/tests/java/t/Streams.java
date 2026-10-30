@@ -3,6 +3,9 @@ package t;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -106,6 +109,33 @@ public class Streams {
         if ("a.b.c".lastIndexOf('.') == 3 && "abcabc".indexOf("c", 3) == 5) bits |= 32;
         if ("ab".repeat(3).equals("ababab") && "  x ".strip().equals("x") && "   ".isBlank()) bits |= 64;
         if ("%s is %d".formatted("x", 5).equals("x is 5")) bits |= 128;
+        return bits;
+    }
+
+    /** The functional interfaces' methods: each check one bit. */
+    public static int functionChecks() {
+        int bits = 0;
+        List<String> words = new ArrayList<>(List.of("pear", "fig", "apple", "kiwi", "date"));
+        words.sort(Comparator.comparingInt(String::length).thenComparing(Function.identity()));
+        if (String.join(",", words).equals("fig,date,kiwi,pear,apple")) bits |= 1;
+        Comparator<String> byLength = (a, b) -> a.length() - b.length();
+        words.sort(byLength.reversed().thenComparing(Comparator.reverseOrder()));
+        if (words.get(0).equals("apple") && words.get(1).equals("pear") && words.get(4).equals("fig")) bits |= 2;
+        List<String> withNull = new ArrayList<>(java.util.Arrays.asList("b", null, "a"));
+        withNull.sort(Comparator.nullsFirst(Comparator.naturalOrder()));
+        if (withNull.get(0) == null && withNull.get(1).equals("a")) bits |= 4;
+        List<Double> ds = new ArrayList<>(List.of(2.5, -0.0, 0.0, -1.0));
+        ds.sort(Comparator.comparingDouble(d -> d));
+        if (ds.get(0) == -1.0 && 1 / ds.get(1) < 0 && 1 / ds.get(2) > 0) bits |= 8;
+        Predicate<Integer> even = x -> x % 2 == 0;
+        Predicate<Integer> big = x -> x > 10;
+        if (even.and(big).test(12) && !even.and(big).test(8) && even.negate().test(3)
+                && Predicate.not(big).test(1) && even.or(big).test(11)) bits |= 16;
+        Function<Integer, Integer> plus1 = x -> x + 1;
+        Function<Integer, Integer> times2 = x -> x * 2;
+        if (plus1.andThen(times2).apply(3) == 8 && plus1.compose(times2).apply(3) == 7
+                && Function.<Integer>identity().apply(9) == 9) bits |= 32;
+        if (Comparator.<Integer>reverseOrder().compare(1, 2) > 0) bits |= 64;
         return bits;
     }
 }
