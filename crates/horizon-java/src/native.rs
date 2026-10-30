@@ -24,7 +24,7 @@ use crate::{
 };
 use cranelift_codegen::{
     ir::{
-        AbiParam, Block, InstBuilder, MemFlagsData, Signature, TrapCode, Type, Value,
+        AbiParam, Block, BlockArg, InstBuilder, MemFlagsData, Signature, TrapCode, Type, Value,
         condcodes::FloatCC, condcodes::IntCC, types,
     },
     settings::{self, Configurable},
@@ -220,6 +220,31 @@ fn element(array: &str) -> (i32, Type) {
     }
 }
 
+/// A function's size for inlining: the instructions of the blocks from
+/// which it returns normally. A path that only ends in a throw, a trap or
+/// an exception's way out (cold blocks) is not what a caller pays for.
+fn hot_size(f: &cranelift_codegen::ir::Function) -> usize {
+    use cranelift_codegen::flowgraph::ControlFlowGraph;
+    let cfg = ControlFlowGraph::with_function(f);
+    let mut hot = std::collections::HashSet::new();
+    let mut todo: Vec<Block> = f
+        .layout
+        .blocks()
+        .filter(|&b| {
+            !f.layout.is_cold(b)
+                && f.layout
+                    .last_inst(b)
+                    .is_some_and(|i| f.dfg.insts[i].opcode().is_return())
+        })
+        .collect();
+    while let Some(b) = todo.pop() {
+        if !f.layout.is_cold(b) && hot.insert(b) {
+            todo.extend(cfg.pred_iter(b).map(|p| p.block));
+        }
+    }
+    hot.iter().map(|&b| f.layout.block_insts(b).count()).sum()
+}
+
 /// Code that cannot run: says why (stop reason `why`), then traps.
 fn say_and_trap(b: &mut FunctionBuilder<'_>, why: u32) {
     let mut raw = Signature::new(b.func.signature.call_conv);
@@ -304,7 +329,7 @@ impl Native {
             .collect();
         let superclass = |c: &str| -> Option<&str> { by_name.get(c)?.super_name().ok().flatten() };
 
-        let (lambdas, lambda_at, called) = prepass(classes);
+        let (lambdas, lambda_at, called, created) = prepass(classes);
         // The built-in classes (rt.rs), and the JDK's exception classes (all
         // with Throwable's fields), unless the program has its own.
         let mut builtin_list = rt::builtins();
@@ -636,7 +661,11 @@ impl Native {
             bridges.push(match signature(&module, true, &l.sam) {
                 Some(sig) => Some(
                     module
-                        .declare_function(&format!("lambda {i}"), Linkage::Local, &sig)
+                        .declare_function(
+                            &format!("lambda {i} -> {}.{}", l.owner, l.target),
+                            Linkage::Local,
+                            &sig,
+                        )
                         .map_err(|e| e.to_string())?,
                 ),
                 None => None,
@@ -724,6 +753,8 @@ impl Native {
             other_classes: std::cell::RefCell::new(Vec::new()),
             stops: std::cell::RefCell::new(HashMap::new()),
             nothrow: std::cell::RefCell::new(HashMap::new()),
+            created: &created,
+            guards: std::cell::RefCell::new(HashMap::new()),
         };
         let mut unsupported = Vec::new();
         let mut ctx = module.make_context();
@@ -803,15 +834,7 @@ impl Native {
         // Small methods inlined into their callers, then every method defined.
         let sizes: HashMap<FuncId, usize> = bodies
             .iter()
-            .map(|(&id, (_, f))| {
-                (
-                    id,
-                    f.layout
-                        .blocks()
-                        .map(|b| f.layout.block_insts(b).count())
-                        .sum(),
-                )
-            })
+            .map(|(&id, (_, f))| (id, hot_size(f)))
             .collect();
         let trace = std::env::var_os("HORIZON_NATIVE_TRACE").is_some();
         for (&id, (name, func)) in &bodies {
@@ -917,7 +940,11 @@ impl Native {
                     continue;
                 };
                 let id = module
-                    .declare_function(&format!("thunk {}", thunks.len()), Linkage::Local, &sig)
+                    .declare_function(
+                        &format!("thunk {} {}.{}{}", thunks.len(), b.name, m.name, m.desc),
+                        Linkage::Local,
+                        &sig,
+                    )
                     .map_err(|e| e.to_string())?;
                 ctx.func.signature = sig;
                 let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fctx);
@@ -1320,10 +1347,13 @@ fn prepass(
     Vec<LambdaSite>,
     HashMap<(String, String, u32), usize>,
     Vec<(String, String)>,
+    HashMap<String, usize>,
 ) {
     let mut sites = Vec::new();
     let mut at = HashMap::new();
     let mut called = Vec::new();
+    // How many places create each class (`new`, constructor references).
+    let mut created: HashMap<String, usize> = HashMap::new();
     for c in classes {
         let Ok(owner) = c.name() else { continue };
         for m in &c.methods {
@@ -1338,8 +1368,16 @@ fn prepass(
                             called.push((n.to_owned(), d.to_owned()));
                         }
                     }
+                    (0xBB, Operand::Constant(i)) => {
+                        if let Ok(class) = c.class_name(*i) {
+                            *created.entry(class.to_owned()).or_default() += 1;
+                        }
+                    }
                     (0xBA, Operand::Constant(i)) => {
                         if let Some(site) = lambda_site(c, *i) {
+                            if site.kind == 8 {
+                                *created.entry(site.owner.clone()).or_default() += 1;
+                            }
                             // By method too: an offset is its method's own.
                             let method = format!("{}{}", m.name, m.descriptor);
                             at.insert((owner.to_owned(), method, x.at), sites.len());
@@ -1351,7 +1389,7 @@ fn prepass(
             }
         }
     }
-    (sites, at, called)
+    (sites, at, called, created)
 }
 
 fn lambda_site(c: &ClassFile, index: u16) -> Option<LambdaSite> {
@@ -1521,6 +1559,10 @@ struct World<'a> {
     stops: std::cell::RefCell<HashMap<String, usize>>,
     /// Methods that cannot throw (`World::cannot_throw`), by export name.
     nothrow: std::cell::RefCell<HashMap<String, bool>>,
+    /// How many places create each class.
+    created: &'a HashMap<String, usize>,
+    /// The implementations a virtual call tries first (`World::guards`).
+    guards: std::cell::RefCell<HashMap<(String, String), Vec<String>>>,
 }
 
 impl World<'_> {
@@ -1583,6 +1625,64 @@ impl World<'_> {
         .unwrap_or(false);
         self.nothrow.borrow_mut().insert(key, answer);
         answer
+    }
+
+    /// Whether `class` is `Enum` or one of the program's enums.
+    fn is_enum(&self, class: &str) -> bool {
+        let mut c = Some(class);
+        while let Some(name) = c {
+            if name == "java/lang/Enum" {
+                return true;
+            }
+            c = self
+                .by_name
+                .get(name)
+                .and_then(|cf| cf.super_name().ok().flatten());
+        }
+        false
+    }
+
+    /// The classes declaring the implementations of `name desc` that a
+    /// virtual call tries directly before its vtable: the ones the classes
+    /// the program creates most use (at most two). A guess: the call tests
+    /// the vtable's method against each, so a wrong one costs only time.
+    fn guards(&self, name: &str, desc: &str) -> Vec<String> {
+        let key = (name.to_owned(), desc.to_owned());
+        if let Some(g) = self.guards.borrow().get(&key) {
+            return g.clone();
+        }
+        let mut weight: HashMap<String, usize> = HashMap::new();
+        for (class, &n) in self.created {
+            let Some(cf) = self.by_name.get(class.as_str()) else {
+                continue;
+            };
+            if cf.access & (INTERFACE | ABSTRACT) != 0 {
+                continue;
+            }
+            // An instance method with code (not a static one of that name).
+            if let Some(declaring) = self.resolve(class, name, desc)
+                && self
+                    .funcs
+                    .contains_key(&export_name(&declaring, name, desc))
+                && self.by_name.get(declaring.as_str()).is_some_and(|d| {
+                    d.methods.iter().any(|m| {
+                        m.name == name
+                            && m.descriptor == desc
+                            && m.access & (STATIC | ABSTRACT) == 0
+                    })
+                })
+            {
+                *weight.entry(declaring).or_default() += n;
+            }
+        }
+        let mut ranked: Vec<(String, usize)> = weight.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if std::env::var_os("HORIZON_NATIVE_GUARDS").is_some() {
+            eprintln!("guards {name}{desc}: {ranked:?}");
+        }
+        let picked: Vec<String> = ranked.into_iter().take(2).map(|(c, _)| c).collect();
+        self.guards.borrow_mut().insert(key, picked.clone());
+        picked
     }
 
     /// Whether no implementation of `name desc` in the program can throw
@@ -2594,6 +2694,8 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
         }
         let here = self.b.current_block();
         let d = self.b.create_block();
+        // Exceptions are the rare path (and so not counted for inlining).
+        self.b.set_cold_block(d);
         self.dispatches.insert((self.body, covering.clone()), d);
         self.b.switch_to_block(d);
         let g = self.ctx;
@@ -4085,6 +4187,22 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
             args.push(self.get(base + k, t));
         }
         let ret = (m.ret != "V").then(|| desc_type(&m.ret)).flatten();
+        // An enum's ordinal() and name() (final in Enum): its field, no call.
+        if matches!(op, 0xB6 | 0xB9)
+            && ((name == "ordinal" && desc == "()I")
+                || (name == "name" && desc == "()Ljava/lang/String;"))
+            && self.w.is_enum(&owner)
+        {
+            self.null_check(args[0]);
+            let (t, at) = if name == "ordinal" {
+                (types::I32, 16)
+            } else {
+                (types::I64, 8)
+            };
+            let v = self.b.ins().load(t, MemFlagsData::trusted(), args[0], at);
+            self.set(base, t, v);
+            return Ok(false);
+        }
         // A direct call to a method that cannot throw: no test after it.
         let mut nothrow = false;
         // An array's clone: a copy; its other methods are Object's.
@@ -4218,11 +4336,47 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                             (8 * (1 + sel)) as i32,
                         );
                         let sig = signature(self.module, true, &desc).ok_or("a bad signature")?;
-                        let sr = self.b.import_signature(sig);
                         let all = self.with_ctx(&args);
-                        let call = self.b.ins().call_indirect(sr, fp, &all);
                         nothrow = self.w.no_implementation_throws(&name, &desc);
-                        self.b.inst_results(call).first().copied()
+                        // The likely implementations called directly (and so
+                        // inlined) when the vtable holds them.
+                        let join = self.b.create_block();
+                        if let Some(t) = ret {
+                            self.b.append_block_param(join, t);
+                        }
+                        for declaring in self.w.guards(&name, &desc) {
+                            let id = self.w.funcs[&export_name(&declaring, &name, &desc)];
+                            let fr = self.module.declare_func_in_func(id, self.b.func);
+                            let at = self.b.ins().func_addr(types::I64, fr);
+                            let hit = self.b.ins().icmp(IntCC::Equal, fp, at);
+                            let direct = self.b.create_block();
+                            let next = self.b.create_block();
+                            self.b.ins().brif(hit, direct, &[], next, &[]);
+                            self.b.switch_to_block(direct);
+                            self.b.seal_block(direct);
+                            let call = self.b.ins().call(fr, &all);
+                            let out: Vec<BlockArg> = self
+                                .b
+                                .inst_results(call)
+                                .iter()
+                                .map(|&v| v.into())
+                                .collect();
+                            self.b.ins().jump(join, &out);
+                            self.b.switch_to_block(next);
+                            self.b.seal_block(next);
+                        }
+                        let sr = self.b.import_signature(sig);
+                        let call = self.b.ins().call_indirect(sr, fp, &all);
+                        let out: Vec<BlockArg> = self
+                            .b
+                            .inst_results(call)
+                            .iter()
+                            .map(|&v| v.into())
+                            .collect();
+                        self.b.ins().jump(join, &out);
+                        self.b.switch_to_block(join);
+                        self.b.seal_block(join);
+                        self.b.block_params(join).first().copied()
                     }
                     (None, None) => {
                         self.stop(format!("virtual call to {owner}.{name}"));
