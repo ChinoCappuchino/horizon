@@ -3,7 +3,7 @@
 //! until the game window takes over where the splash's pool turned into it.
 use horizon_client::splash::{
     gpu::{Assets, Gpu},
-    timeline::{Look, Timeline},
+    timeline::{Look, Moment, Timeline},
 };
 use std::{path::Path, sync::Arc, time::Instant};
 use winit::{
@@ -40,6 +40,34 @@ impl SplashRun {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let opening = Instant::now();
         let assets = Assets::load(resources)?;
+        // Carrying on from the setup's splash (`setup_splash`), when it
+        // showed one.
+        let resume = super::setup_splash::moment();
+        Self::open_with(
+            event_loop,
+            assets,
+            opening,
+            names,
+            mods,
+            still,
+            game_window,
+            resume,
+        )
+    }
+
+    /// `open` with the assets loaded (`opening`: since when), and where to
+    /// carry on from; the fox waits for `add_fox` when they have none.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn open_with(
+        event_loop: &ActiveEventLoop,
+        assets: Assets,
+        opening: Instant,
+        names: Vec<String>,
+        mods: bool,
+        still: bool,
+        game_window: Option<(f64, f64)>,
+        resume: Option<Moment>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let assets_ms = opening.elapsed().as_millis();
         let monitor = event_loop
             .primary_monitor()
@@ -134,6 +162,11 @@ impl SplashRun {
         );
         let timeline = Timeline::new(w, h, rect, names, mods, look);
         let timeline = if fills { timeline.centred() } else { timeline };
+        let timeline = match resume {
+            Some(m) => timeline.resume(m),
+            None if !assets.has_fox() => timeline.without_fox(),
+            None => timeline,
+        };
         log::info!(
             "Horizon: startup splash shown ({}x{} pixels, {:?}, {}; assets {assets_ms} ms, window {window_ms} ms, device {} ms)",
             w,
@@ -174,6 +207,20 @@ impl SplashRun {
             .map_or(60.0, |mhz| f64::from(mhz) / 1000.0)
             .clamp(30.0, 240.0);
         self.last + std::time::Duration::from_secs_f64(1.0 / hz)
+    }
+
+    /// The setup's line and bar.
+    pub(super) fn set_status(&mut self, text: String, progress: f32) {
+        self.timeline.set_status(text, progress);
+    }
+    /// The fox's model from the prepared resources: it runs in.
+    pub(super) fn add_fox(&mut self, resources: &Path) {
+        if !self.assets.has_fox() && self.assets.add_fox(resources) {
+            self.timeline.fox_arrives();
+        }
+    }
+    pub(super) fn moment(&self) -> Moment {
+        self.timeline.moment()
     }
 
     pub(super) fn id(&self) -> WindowId {

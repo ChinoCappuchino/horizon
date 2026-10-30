@@ -13,9 +13,11 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// What the splash draws with, from the prepared resources.
+/// What the splash draws with, from the prepared resources (or, while the
+/// setup prepares them, the font and the fox's texture from Minecraft's jar:
+/// the fox's model comes with the resources).
 pub struct Assets {
-    fox: Part,
+    fox: Option<Part>,
     fox_texture: Image,
     font: Image,
     /// Character → (column, row, advance in font pixels).
@@ -27,8 +29,8 @@ struct Image {
     height: u32,
 }
 
-fn read_png(path: &Path) -> Result<Image> {
-    let mut decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?));
+fn read_png(bytes: &[u8]) -> Result<Image> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info()?;
     let mut buf = vec![0; reader.output_buffer_size().ok_or("image too large")?];
@@ -51,16 +53,42 @@ fn read_png(path: &Path) -> Result<Image> {
 }
 
 impl Assets {
+    /// The splash's files, under the prepared resources or Minecraft's jar.
+    const FOX_TEXTURE: &str = "assets/minecraft/textures/entity/fox/fox_snow.png";
+    const FONT: &str = "assets/minecraft/textures/font/ascii.png";
+    const FONT_PAGES: &str = "assets/minecraft/font/include/default.json";
+
     pub fn load(root: &Path) -> Result<Self> {
-        let fox = crate::mobs::load_model(root, "minecraft:fox#main").ok_or("no fox model")?;
-        let textures = root.join("assets/minecraft/textures");
-        let fox_texture = read_png(&textures.join("entity/fox/fox_snow.png"))?;
-        let font = read_png(&textures.join("font/ascii.png"))?;
+        let mut assets = Self::from_files(|name| Ok(std::fs::read(root.join(name))?))?;
+        if !assets.add_fox(root) {
+            return Err("no fox model".into());
+        }
+        Ok(assets)
+    }
+    /// From Minecraft's client jar, before the resources are prepared: all
+    /// but the fox (`add_fox` once they are).
+    pub fn from_jar(jar: &Path) -> Result<Self> {
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(jar)?)?;
+        Self::from_files(|name| {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut zip.by_name(name)?, &mut bytes)?;
+            Ok(bytes)
+        })
+    }
+    pub fn has_fox(&self) -> bool {
+        self.fox.is_some()
+    }
+    /// The fox's model from the prepared resources at `root`; whether it's there.
+    pub fn add_fox(&mut self, root: &Path) -> bool {
+        self.fox = crate::mobs::load_model(root, "minecraft:fox#main");
+        self.fox.is_some()
+    }
+    fn from_files(mut read: impl FnMut(&str) -> Result<Vec<u8>>) -> Result<Self> {
+        let fox_texture = read_png(&read(Self::FOX_TEXTURE)?)?;
+        let font = read_png(&read(Self::FONT)?)?;
         // The default font's ascii page: which character sits where.
         let mut glyphs = HashMap::new();
-        let providers: serde_json::Value = serde_json::from_slice(&std::fs::read(
-            root.join("assets/minecraft/font/include/default.json"),
-        )?)?;
+        let providers: serde_json::Value = serde_json::from_slice(&read(Self::FONT_PAGES)?)?;
         let cell = font.width / 16;
         for p in providers["providers"].as_array().into_iter().flatten() {
             if p["file"].as_str() != Some("minecraft:font/ascii.png") {
@@ -88,7 +116,7 @@ impl Assets {
             }
         }
         Ok(Assets {
-            fox,
+            fox: None,
             fox_texture,
             font,
             glyphs,
@@ -951,7 +979,9 @@ impl Gpu {
 /// down on the ground a little (so the lap's ellipse reads as a circle on the
 /// ground), orthographic; nearer is smaller depth.
 fn fox_vertices(assets: &Assets, fox: &Fox, out: &mut Vec<Vertex>) {
-    let part = &assets.fox;
+    let Some(part) = &assets.fox else {
+        return;
+    };
     let mut poses = anim::Poses::new(part);
     let state = anim::State {
         pos: fox.run,

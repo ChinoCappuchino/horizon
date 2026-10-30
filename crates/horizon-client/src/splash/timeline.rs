@@ -141,6 +141,25 @@ pub struct Timeline {
     lap_phase: f32,
     /// The pool's height on the surface, as a share of it.
     centre_y: f32,
+    /// When the fox started running in (infinite: not yet, its model is
+    /// still being prepared).
+    fox_from: f32,
+    /// What the setup is doing and how far it is, over the drops' own line
+    /// and bar (the setup's splash, `game/setup_splash.rs`).
+    status: Option<(String, f32)>,
+    /// The pool never settles smaller: the size the setup's splash left it
+    /// at, when the game's splash takes over from it.
+    pool_floor: f32,
+}
+
+/// Where the setup's splash was, for the game's splash to carry on from it
+/// (the fox mid-lap, the pool at its size): seconds since it opened, when
+/// its fox came, its pool's radius.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Moment {
+    pub t: f32,
+    pub fox_from: f32,
+    pub pool: f32,
 }
 
 impl Timeline {
@@ -173,7 +192,47 @@ impl Timeline {
             fox_at: (0.0, 0.0),
             lap_phase: 0.0,
             centre_y: 0.47,
+            fox_from: 0.0,
+            status: None,
+            pool_floor: 0.0,
         }
+    }
+    /// No fox until `fox_arrives`.
+    pub fn without_fox(mut self) -> Self {
+        self.fox_from = f32::INFINITY;
+        self
+    }
+    /// The fox runs in now (when it hasn't yet).
+    pub fn fox_arrives(&mut self) {
+        if self.fox_from.is_infinite() {
+            self.fox_from = self.t;
+        }
+    }
+    /// The setup's line and bar, in place of the drops' own.
+    pub fn set_status(&mut self, text: String, progress: f32) {
+        self.status = Some((text, progress.clamp(0.0, 1.0)));
+    }
+    /// Where this splash is, for `resume`.
+    pub fn moment(&self) -> Moment {
+        Moment {
+            t: self.t,
+            fox_from: self.fox_from,
+            pool: self.pool.0,
+        }
+    }
+    /// Carries on from another splash's moment: its clock (the pool's wobble
+    /// and the fox's lap go on where they were), its fox, and its pool's size.
+    pub fn resume(mut self, m: Moment) -> Self {
+        self.t = m.t.max(0.0);
+        // Its fox, or (when it never came) one running in now.
+        self.fox_from = if m.fox_from.is_finite() {
+            m.fox_from
+        } else {
+            self.t
+        };
+        self.pool = (m.pool.max(0.0), 0.0);
+        self.pool_floor = m.pool.max(0.0);
+        self
     }
     /// The pool in the exact middle: when the splash fills the game
     /// window's own rectangle, the window it turns into matches its edges.
@@ -270,7 +329,8 @@ impl Timeline {
             self.k * (8.0 + 60.0 * (1.0 - (-3.4 * p).exp()) / (1.0 - (-3.4f32).exp()))
         } else {
             0.0
-        };
+        }
+        .max(self.pool_floor);
         let d = dt.clamp(0.0, 0.05);
         if self.look.still {
             self.pool = (target, 0.0);
@@ -380,13 +440,15 @@ impl Timeline {
             .get(shown.saturating_sub(1))
             .cloned()
             .unwrap_or_default();
-        let text = if shown >= n {
-            "Loaded · opening the game".to_owned()
+        let (text, progress) = if let Some((text, progress)) = &self.status {
+            (text.clone(), *progress)
+        } else if shown >= n {
+            ("Loaded · opening the game".to_owned(), progress)
         } else if self.mods {
-            format!("Loading mods {shown} / {n} · {name}")
+            (format!("Loading mods {shown} / {n} · {name}"), progress)
         } else {
             // The stages say it themselves ("Loading assets").
-            name
+            (name, progress)
         };
         let text_alpha = if t > finale {
             (1.0 - (t - finale) * 3.0).max(0.0)
@@ -438,11 +500,13 @@ impl Timeline {
             age: t * 20.0,
             behind: false,
         };
-        if t < FOX_IN.0 {
+        // Its run in and lap from when it came.
+        let since = t - self.fox_from;
+        if since < FOX_IN.0 {
             return None;
         }
-        if t < FOX_IN.1 {
-            let u = ease((t - FOX_IN.0) / (FOX_IN.1 - FOX_IN.0));
+        if since < FOX_IN.1 {
+            let u = ease((since - FOX_IN.0) / (FOX_IN.1 - FOX_IN.0));
             let x0 = -70.0 * k;
             let fox = Fox {
                 x: x0 + (cx - x0) * u,
@@ -455,7 +519,7 @@ impl Timeline {
         }
         if t < finale {
             // Anticlockwise on screen: rightward along the near side.
-            let th = std::f32::consts::FRAC_PI_2 - (t - FOX_IN.1) * omega;
+            let th = std::f32::consts::FRAC_PI_2 - (since - FOX_IN.1) * omega;
             self.lap_phase = th;
             let depth = th.sin();
             let fox = Fox {
@@ -647,5 +711,61 @@ mod tests {
         );
         run(&mut t, 30.0, |_| (1.0, true));
         assert!(t.frame().fox.is_none(), "the fox dived behind the window");
+    }
+
+    #[test]
+    fn the_setups_splash_waits_for_its_fox_and_says_its_steps() {
+        let names: Vec<String> = (0..30).map(|i| format!("step {i}")).collect();
+        let look = Look::default();
+        let mut t =
+            Timeline::new(1920.0, 1080.0, (1280.0, 720.0), names, false, look).without_fox();
+        t.set_status("Preparing · Exporting mob data".into(), 0.4);
+        run(&mut t, 10.0, |_| (0.4, false));
+        let f = t.frame();
+        assert!(f.fox.is_none(), "no fox before its model is prepared");
+        assert_eq!(f.text, "Preparing · Exporting mob data");
+        assert!((f.progress - 0.4).abs() < 1e-6);
+        assert!(f.pool > 0.0, "the drops so far made a pool");
+        t.fox_arrives();
+        run(&mut t, 13.0, |_| (0.5, false));
+        assert!(t.frame().fox.is_some(), "the fox ran in");
+        assert!(t.finale().is_none(), "the setup never plays the finale");
+    }
+
+    #[test]
+    fn the_games_splash_carries_on_from_the_setups() {
+        let look = Look::default();
+        let mut setup = Timeline::new(
+            1920.0,
+            1080.0,
+            (1280.0, 720.0),
+            (0..30).map(|i| format!("step {i}")).collect(),
+            false,
+            look,
+        )
+        .without_fox();
+        run(&mut setup, 6.0, |_| (1.0, false));
+        setup.fox_arrives();
+        run(&mut setup, 12.0, |_| (1.0, false));
+        let m = setup.moment();
+        let before = setup.frame();
+        let mods: Vec<String> = (0..7).map(|i| format!("mod {i}")).collect();
+        let mut game = Timeline::new(1920.0, 1080.0, (1280.0, 720.0), mods, true, look).resume(m);
+        let after = game.frame();
+        let (a, b) = (before.fox.unwrap(), after.fox.unwrap());
+        assert!(
+            (a.x - b.x).abs() < 1.0 && (a.y - b.y).abs() < 1.0,
+            "the fox goes on where it was"
+        );
+        assert!(
+            (after.pool - before.pool).abs() < 1e-3,
+            "the pool keeps its size"
+        );
+        // Before the game's own drops land, the pool doesn't shrink.
+        run(&mut game, m.t + 0.5, |_| (0.0, false));
+        assert!(game.frame().pool > before.pool * 0.9);
+        // And the game's finale still comes.
+        run(&mut game, m.t + 20.0, |_| (1.0, true));
+        assert!(game.handover());
     }
 }

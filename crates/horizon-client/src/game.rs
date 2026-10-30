@@ -182,6 +182,7 @@ mod spawner;
 mod spear;
 mod spectator;
 mod spill;
+mod setup_splash;
 mod splash_window;
 mod startup_menu;
 mod station_control;
@@ -15368,6 +15369,8 @@ impl Loading {
             }
         };
         horizon_client::telemetry::note_display(&window);
+        // (The setup's splash closes on this, when there was none of the game's.)
+        log::info!("Horizon: the game window opened");
         let offscreen = self.options.as_ref().is_some_and(|o| o.offscreen);
         match loading_renderer(
             window.clone(),
@@ -15721,6 +15724,12 @@ fn run_loading(
         }
     }
     Ok(())
+}
+
+/// `--setup-splash`: the setup under the startup splash (`setup_splash`);
+/// its exit code.
+pub fn setup_splash(args: &[String]) -> i32 {
+    setup_splash::run(args)
 }
 
 pub fn run() -> Result<()> {

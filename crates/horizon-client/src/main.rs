@@ -13,6 +13,11 @@ fn main() {
     std::hint::black_box(&MOD_API_LEVEL);
     horizon_client::telemetry::mark_start();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The setup under the startup splash: no log or game folder of its own
+    // (the setup makes them).
+    if args.first().is_some_and(|a| a == "--setup-splash") {
+        std::process::exit(game::setup_splash(&args[1..]));
+    }
     let game_args = args.iter().take_while(|a| *a != "--dedicated");
     let help = game_args.clone().any(|a| a == "--help" || a == "-h");
     // The dedicated server logs in its own folder, as vanilla's does; the game in its home.
