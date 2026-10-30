@@ -205,3 +205,18 @@ fn collections_algorithms_give_javas_results() {
         !bits & ((1 << 7) - 1)
     );
 }
+
+#[test]
+fn strings_split_join_and_format_as_java_does() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/Streams.stringChecks()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    let bits = f(native.context());
+    assert_eq!(
+        bits,
+        (1 << 8) - 1,
+        "failed checks: {:#b}",
+        !bits & ((1 << 8) - 1)
+    );
+}

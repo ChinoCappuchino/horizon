@@ -91,4 +91,21 @@ public class Streams {
         if (letters.get(0) == 'a' && letters.get(3) == 'z') bits |= 64;
         return bits;
     }
+
+    /** Strings: each check one bit. */
+    public static int stringChecks() {
+        int bits = 0;
+        String[] parts = "a,b,,c,,".split(",");
+        if (parts.length == 4 && parts[3].equals("c") && parts[2].isEmpty()) bits |= 1;
+        if (String.join("-", List.of("x", "y", "z")).equals("x-y-z")) bits |= 2;
+        if (String.format("%5.2f|%-4s|%04d|%x|%,d", 3.14159, "ab", 42, -1, 1234567)
+                .equals(" 3.14|ab  |0042|ffffffff|1,234,567")) bits |= 4;
+        if ("MiXeD".toLowerCase().equals("mixed") && "MiXeD".toUpperCase().equals("MIXED")) bits |= 8;
+        char[] cs = "hey".toCharArray();
+        if (cs.length == 3 && cs[1] == 'e' && String.valueOf(cs).equals("hey")) bits |= 16;
+        if ("a.b.c".lastIndexOf('.') == 3 && "abcabc".indexOf("c", 3) == 5) bits |= 32;
+        if ("ab".repeat(3).equals("ababab") && "  x ".strip().equals("x") && "   ".isBlank()) bits |= 64;
+        if ("%s is %d".formatted("x", 5).equals("x is 5")) bits |= 128;
+        return bits;
+    }
 }

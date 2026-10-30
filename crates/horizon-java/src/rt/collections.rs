@@ -171,6 +171,11 @@ const SIZE: &str = "size ()I";
 const COMPARE_TO: &str = "compareTo (Ljava/lang/Object;)I";
 const COMPARE: &str = "compare (Ljava/lang/Object;Ljava/lang/Object;)I";
 
+/// The elements of any Iterable, in its iteration order (`String.join`).
+pub(super) fn iterate(it: u64) -> Option<Vec<u64>> {
+    elements(it)
+}
+
 /// The elements of any Collection, in its iteration order.
 fn elements(c: u64) -> Option<Vec<u64>> {
     if c == 0 {

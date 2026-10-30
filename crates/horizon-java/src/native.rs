@@ -83,9 +83,9 @@ fn jdk_super(class: &str) -> Option<&'static str> {
         | "java/util/concurrent/RejectedExecutionException"
         | "java/util/NoSuchElementException"
         | "java/io/UncheckedIOException" => "java/lang/RuntimeException",
-        "java/lang/NumberFormatException" | "java/lang/IllegalThreadStateException" => {
-            "java/lang/IllegalArgumentException"
-        }
+        "java/lang/NumberFormatException"
+        | "java/lang/IllegalThreadStateException"
+        | "java/util/IllegalFormatException" => "java/lang/IllegalArgumentException",
         "java/lang/ArrayIndexOutOfBoundsException"
         | "java/lang/StringIndexOutOfBoundsException" => "java/lang/IndexOutOfBoundsException",
         "java/lang/ClassNotFoundException" | "java/lang/NoSuchMethodException" => {
@@ -133,6 +133,7 @@ const JDK_EXCEPTIONS: &[&str] = &[
     "java/lang/IllegalMonitorStateException",
     "java/lang/IllegalThreadStateException",
     "java/util/concurrent/RejectedExecutionException",
+    "java/util/IllegalFormatException",
 ];
 
 extern "C" fn host_catches(exc: u64, catch: u32) -> u32 {
