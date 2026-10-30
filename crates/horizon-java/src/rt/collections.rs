@@ -850,15 +850,38 @@ extern "C" fn uoe_remove(_m: u64, _k: u64) -> u64 {
     0
 }
 
-/// An object the runtime makes once (by one thread: the others wait for
-/// it, and every caller gets the same object). `make` must not call `once`.
+/// The objects `once` is making, by which thread, and their condition.
+static MAKING: std::sync::LazyLock<(
+    std::sync::Mutex<std::collections::HashMap<&'static str, std::thread::ThreadId>>,
+    std::sync::Condvar,
+)> = std::sync::LazyLock::new(Default::default);
+
+/// An object the runtime makes once: one thread makes it while the others
+/// wait for it, and every caller gets the same object. No lock is held
+/// while it is made, so `make` may make other such objects.
 pub(super) fn once(name: &'static str, make: impl FnOnce() -> u64) -> u64 {
-    let mut made = rt().once.lock().unwrap();
-    if let Some(&o) = made.get(name) {
-        return o;
+    let (making, done) = &*MAKING;
+    let me = std::thread::current().id();
+    {
+        let mut busy = making.lock().unwrap();
+        loop {
+            if let Some(&o) = rt().once.lock().unwrap().get(name) {
+                return o;
+            }
+            match busy.get(name) {
+                None => {
+                    busy.insert(name, me);
+                    break;
+                }
+                Some(&t) if t == me => panic!("{name} is made from its own making"),
+                Some(_) => busy = done.wait(busy).unwrap(),
+            }
+        }
     }
     let o = make();
-    made.insert(name, o);
+    rt().once.lock().unwrap().insert(name, o);
+    making.lock().unwrap().remove(name);
+    done.notify_all();
     o
 }
 
