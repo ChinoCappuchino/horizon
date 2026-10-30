@@ -1874,6 +1874,51 @@ extern "C" fn optional_filter(o: u64, p: u64) -> u64 {
         optional_empty()
     }
 }
+/// `orElseThrow(Supplier)`: the value, or the supplier's exception thrown.
+extern "C" fn optional_or_else_throw(o: u64, supplier: u64) -> u64 {
+    let v = field(o, 8);
+    if v != 0 {
+        return v;
+    }
+    if supplier == 0 {
+        npe();
+        return 0;
+    }
+    let e = call0(supplier, SUPPLY);
+    if pending() {
+        return 0;
+    }
+    if e == 0 {
+        npe();
+        return 0;
+    }
+    // SAFETY: this thread's context: the exception it now throws.
+    unsafe { (*ctx()).exception = e };
+    0
+}
+extern "C" fn optional_if_present_or_else(o: u64, c: u64, r: u64) {
+    let v = field(o, 8);
+    if v != 0 {
+        call1(c, ACCEPT, v);
+    } else {
+        call0(r, "run ()V");
+    }
+}
+extern "C" fn optional_or(o: u64, supplier: u64) -> u64 {
+    if field(o, 8) != 0 {
+        return o;
+    }
+    call0(supplier, SUPPLY)
+}
+extern "C" fn optional_stream(o: u64) -> u64 {
+    let v = field(o, 8);
+    let a = obj_array(usize::from(v != 0));
+    if v != 0 {
+        put(a, 0, v);
+    }
+    streams::of_array(a)
+}
+
 extern "C" fn optional_if_present(o: u64, c: u64) {
     let v = opt(o);
     if v != 0 {
@@ -2902,6 +2947,22 @@ pub fn builtins() -> Vec<Builtin> {
                 m("isEmpty", "()Z", f!(optional_is_empty)),
                 m("get", "()Ljava/lang/Object;", f!(optional_get)),
                 m("orElseThrow", "()Ljava/lang/Object;", f!(optional_get)),
+                m(
+                    "orElseThrow",
+                    "(Ljava/util/function/Supplier;)Ljava/lang/Object;",
+                    f!(optional_or_else_throw),
+                ),
+                m(
+                    "ifPresentOrElse",
+                    "(Ljava/util/function/Consumer;Ljava/lang/Runnable;)V",
+                    f!(optional_if_present_or_else),
+                ),
+                m(
+                    "or",
+                    "(Ljava/util/function/Supplier;)Ljava/util/Optional;",
+                    f!(optional_or),
+                ),
+                m("stream", "()Ljava/util/stream/Stream;", f!(optional_stream)),
                 m(
                     "orElse",
                     "(Ljava/lang/Object;)Ljava/lang/Object;",
