@@ -3454,7 +3454,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         self.set(d, t, v);
                         return Ok(false);
                     }
-                    self.stop(format!("static field of {owner}"));
+                    self.stop(format!("static field of {owner}.{name}"));
                     return Ok(true);
                 };
                 self.init(&declaring);

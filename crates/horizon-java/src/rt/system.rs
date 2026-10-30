@@ -348,12 +348,91 @@ pub fn math_methods() -> Vec<Method> {
     ]
 }
 
+// ---- Locale ----------------------------------------------------------------------
+//
+// [vtable][language String][country String]; the constants made once.
+
+const LOCALE: &str = "java/util/Locale";
+const LOCALES: [(&str, &str, &str); 6] = [
+    ("ROOT", "", ""),
+    ("ENGLISH", "en", ""),
+    ("US", "en", "US"),
+    ("UK", "en", "GB"),
+    ("GERMAN", "de", ""),
+    ("FRENCH", "fr", ""),
+];
+
+fn locale(k: usize) -> u64 {
+    let all = once("Locale", || {
+        let array = alloc(16 + 8 * LOCALES.len(), 0);
+        for (i, (_, language, country)) in LOCALES.iter().enumerate() {
+            let l = alloc(24, vt(LOCALE));
+            // SAFETY: fresh objects of these sizes.
+            unsafe {
+                *((l + 8) as *mut u64) = str_of(language);
+                *((l + 16) as *mut u64) = str_of(country);
+                *((array + 16 + 8 * i as u64) as *mut u64) = l;
+            }
+        }
+        array
+    });
+    // SAFETY: the array of locales made above.
+    unsafe { word(all, 16 + 8 * k) }
+}
+
+macro_rules! locale_get {
+    ($($name:ident = $k:expr;)*) => {
+        $(extern "C" fn $name() -> u64 {
+            locale($k)
+        })*
+    };
+}
+locale_get! {
+    locale_root = 0;
+    locale_english = 1;
+    locale_us = 2;
+    locale_uk = 3;
+    locale_german = 4;
+    locale_french = 5;
+}
+extern "C" fn locale_language(l: u64) -> u64 {
+    // SAFETY: l is a Locale.
+    unsafe { word(l, 8) }
+}
+extern "C" fn locale_country(l: u64) -> u64 {
+    // SAFETY: as above.
+    unsafe { word(l, 16) }
+}
+fn locale_text(l: u64, sep: &str) -> String {
+    let language = String::from_utf16_lossy(text(locale_language(l)));
+    let country = String::from_utf16_lossy(text(locale_country(l)));
+    if country.is_empty() {
+        language
+    } else {
+        format!("{language}{sep}{country}")
+    }
+}
+extern "C" fn locale_to_string(l: u64) -> u64 {
+    str_of(&locale_text(l, "_"))
+}
+extern "C" fn locale_tag(l: u64) -> u64 {
+    let tag = locale_text(l, "-");
+    str_of(if tag.is_empty() { "und" } else { &tag })
+}
+
 /// The JDK's static fields this library provides: `owner name` → its
 /// getter and the getter's descriptor.
 pub fn static_getter(owner: &str, name: &str) -> Option<(usize, &'static str)> {
     const UNIT: &str = "()Ljava/util/concurrent/TimeUnit;";
     let f = |f: extern "C" fn() -> u64| f as *const () as usize;
+    const L: &str = "()Ljava/util/Locale;";
     Some(match (owner, name) {
+        ("java/util/Locale", "ROOT") => (f(locale_root), L),
+        ("java/util/Locale", "ENGLISH") => (f(locale_english), L),
+        ("java/util/Locale", "US") => (f(locale_us), L),
+        ("java/util/Locale", "UK") => (f(locale_uk), L),
+        ("java/util/Locale", "GERMAN") => (f(locale_german), L),
+        ("java/util/Locale", "FRENCH") => (f(locale_french), L),
         ("java/util/concurrent/TimeUnit", "NANOSECONDS") => (f(nanoseconds), UNIT),
         ("java/util/concurrent/TimeUnit", "MICROSECONDS") => (f(microseconds), UNIT),
         ("java/util/concurrent/TimeUnit", "MILLISECONDS") => (f(milliseconds), UNIT),
@@ -398,6 +477,28 @@ pub fn builtins() -> Vec<Builtin> {
                 m("totalMemory", "()J", f!(runtime_total_memory)),
                 m("freeMemory", "()J", f!(runtime_free_memory)),
                 m("gc", "()V", f!(runtime_gc)),
+            ],
+        },
+        Builtin {
+            name: LOCALE,
+            super_name: Some(O),
+            interfaces: &[],
+            size: 24,
+            is_final: true,
+            is_interface: false,
+            methods: vec![
+                // The default: the root locale (the game is not localized
+                // through the JDK's).
+                Method {
+                    name: "getDefault",
+                    desc: "()Ljava/util/Locale;",
+                    is_static: true,
+                    f: f!(locale_root),
+                },
+                m("getLanguage", "()Ljava/lang/String;", f!(locale_language)),
+                m("getCountry", "()Ljava/lang/String;", f!(locale_country)),
+                m("toString", "()Ljava/lang/String;", f!(locale_to_string)),
+                m("toLanguageTag", "()Ljava/lang/String;", f!(locale_tag)),
             ],
         },
         Builtin {
