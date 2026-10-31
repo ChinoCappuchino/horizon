@@ -161,6 +161,30 @@ Rules for level 2:
    from observed behavior. Compile the JDK classes only on the player's
    computer, from the player's Java runtime. Do not distribute them.
 
+Level 3 in practice (2026-10-31). The Create and Sable coverage check
+(Create, Sable, Aeronautics, Flywheel, Veil, NeoForge and Minecraft, 47,296
+classes) leaves about 2,600 JDK members that the Rust versions do not have:
+`TreeMap`, `LinkedHashMap`, `ConcurrentHashMap`, regular expressions, `File`
+and NIO, and others. They come from the player's Java runtime (its
+`lib/modules` image, read with the runtime's own `jimage`) at install. Which
+JDK class is compiled is decided by the tool, not by hand:
+
+1. Start from the JDK classes that the program uses and that have no Rust
+   version, and add the JDK classes they need, transitively. A class with a
+   Rust version ends the walk.
+2. A JDK class is compiled only when it uses a Rust class through its public
+   or protected API. A JDK class that extends a Rust class and uses its
+   package-private members (`LinkedHashMap` uses `HashMap`'s nodes and hooks)
+   is not compiled: the class and the classes that need it stay calls that
+   stop, and the install report lists them. The family then gets a Rust
+   version (level 2), or loses its Rust version and is compiled whole.
+3. The JDK's native methods and `jdk.internal.misc.Unsafe` become runtime
+   intrinsics on Horizon's object layout (a field offset is known at
+   install). A native method without one is a stop, in the report.
+
+The report of rule 2 and rule 3 lists, by count of uses, what to write in
+Rust next.
+
 ### 4.5 Mods of other game versions (the version bridge)
 
 Decision 2026-10-29 (owner): mods of older game versions run on the new
