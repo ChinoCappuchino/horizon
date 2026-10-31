@@ -91,9 +91,13 @@ fn jdk_super(class: &str) -> Option<&'static str> {
         "java/lang/ClassNotFoundException" | "java/lang/NoSuchMethodException" => {
             "java/lang/ReflectiveOperationException"
         }
-        "java/lang/AssertionError"
-        | "java/lang/StackOverflowError"
-        | "java/lang/OutOfMemoryError" => "java/lang/Error",
+        "java/lang/AssertionError" | "java/lang/VirtualMachineError" => "java/lang/Error",
+        "java/lang/StackOverflowError"
+        | "java/lang/OutOfMemoryError"
+        | "java/lang/InternalError" => "java/lang/VirtualMachineError",
+        "java/io/ObjectStreamException" => "java/io/IOException",
+        "java/io/InvalidObjectException" => "java/io/ObjectStreamException",
+        "java/nio/ReadOnlyBufferException" => "java/lang/UnsupportedOperationException",
         "java/lang/Throwable" => "java/lang/Object",
         _ => return None,
     })
@@ -128,6 +132,11 @@ const JDK_EXCEPTIONS: &[&str] = &[
     "java/lang/ClassNotFoundException",
     "java/lang/NoSuchMethodException",
     "java/lang/AssertionError",
+    "java/lang/VirtualMachineError",
+    "java/lang/InternalError",
+    "java/io/ObjectStreamException",
+    "java/io/InvalidObjectException",
+    "java/nio/ReadOnlyBufferException",
     "java/lang/StackOverflowError",
     "java/lang/OutOfMemoryError",
     "java/lang/IllegalMonitorStateException",
@@ -354,7 +363,7 @@ impl Native {
                 size: 24,
                 is_final: false,
                 is_interface: false,
-                methods: Vec::new(),
+                methods: rt::exception_methods(n),
             });
         }
         builtin_list.retain(|b| !by_name.contains_key(b.name));
@@ -1449,6 +1458,10 @@ impl Native {
         let mut boxes = Vec::new();
         let cache = rt::make_caches(&builtin_vtables, &mut boxes);
         let sel = |n: &str, d: &str| selectors.get(&(n.to_owned(), d.to_owned())).copied();
+        let sizes: Vec<u32> = class_names
+            .iter()
+            .map(|n| layouts.get(n.as_str()).map_or(0, |l| l.size.max(0) as u32))
+            .collect();
         let runtime = Box::new(rt::Rt {
             vtables: builtin_vtables,
             names: class_names,
@@ -1462,6 +1475,7 @@ impl Native {
                 .collect(),
             dispatch,
             offsets: offsets.clone(),
+            sizes,
             classes: class_objects,
             ancestors: names_by_id,
             enum_values: names

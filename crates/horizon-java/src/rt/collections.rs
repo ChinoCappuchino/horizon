@@ -2190,7 +2190,7 @@ extern "C" fn arrays_to_string_objects(a: u64) -> u64 {
     out.push(u16::from(b']'));
     new_string(&out)
 }
-extern "C" fn arrays_hash_objects(a: u64) -> i32 {
+pub(super) extern "C" fn arrays_hash_objects(a: u64) -> i32 {
     if a == 0 {
         return 0;
     }
@@ -2276,6 +2276,192 @@ extern "C" fn arrays_copy_of_objects(a: u64, n: i32) -> u64 {
         put(b, i, get(a, i));
     }
     b
+}
+// ---- Arrays: every element type (an array knows its element size) ----
+
+/// Whether `from..to` is a range of `a` (else the JDK's exception).
+fn range_ok(a: u64, from: i32, to: i32) -> bool {
+    if from > to {
+        throw(
+            "java/lang/IllegalArgumentException",
+            Some(&format!("fromIndex({from}) > toIndex({to})")),
+        );
+        false
+    } else if from < 0 || to as usize > len(a) {
+        throw(
+            "java/lang/ArrayIndexOutOfBoundsException",
+            Some(&format!("Array index out of range: {}", if from < 0 { from } else { to })),
+        );
+        false
+    } else {
+        true
+    }
+}
+/// Each element of `a` from `from` to `to` set to the low bytes of `bits`.
+fn fill_bits(a: u64, from: usize, to: usize, bits: u64) {
+    let size = elem_size(a);
+    let bytes = bits.to_le_bytes();
+    for i in from..to {
+        // SAFETY: element i of the array, `size` bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                (a as usize + A_DATA + size * i) as *mut u8,
+                size,
+            );
+        }
+    }
+}
+/// A new array of `a`'s element type and `n` elements, those from `from`
+/// copied from `a` (the rest zero).
+fn copy_range(a: u64, from: usize, n: usize) -> u64 {
+    let size = elem_size(a);
+    // SAFETY: an array's header is its element size.
+    let b = alloc(A_DATA + size * n, unsafe { word(a, 0) });
+    let have = len(a).saturating_sub(from).min(n);
+    // SAFETY: both arrays' elements.
+    unsafe {
+        set_word(b, A_LEN, n as u64);
+        std::ptr::copy_nonoverlapping(
+            (a as usize + A_DATA + size * from) as *const u8,
+            (b as usize + A_DATA) as *mut u8,
+            size * have,
+        );
+    }
+    b
+}
+extern "C" fn arrays_copy_of(a: u64, n: i32) -> u64 {
+    if a == 0 {
+        npe();
+        return 0;
+    }
+    if n < 0 {
+        throw("java/lang/NegativeArraySizeException", Some(&n.to_string()));
+        return 0;
+    }
+    copy_range(a, 0, n as usize)
+}
+extern "C" fn arrays_copy_of_range(a: u64, from: i32, to: i32) -> u64 {
+    if a == 0 {
+        npe();
+        return 0;
+    }
+    if from > to {
+        throw(
+            "java/lang/IllegalArgumentException",
+            Some(&format!("{from} > {to}")),
+        );
+        return 0;
+    }
+    if from < 0 || from as usize > len(a) {
+        throw(
+            "java/lang/ArrayIndexOutOfBoundsException",
+            Some(&format!("Array index out of range: {from}")),
+        );
+        return 0;
+    }
+    copy_range(a, from as usize, (to - from) as usize)
+}
+/// `Arrays.equals` of two primitive arrays: the same elements, bit for bit.
+/// (Java compares float and double elements by `floatToIntBits`, so two
+/// NaNs of other bits are equal there; not here.)
+extern "C" fn arrays_equals_prim(a: u64, b: u64) -> i32 {
+    if a == b {
+        return 1;
+    }
+    if a == 0 || b == 0 || len(a) != len(b) {
+        return 0;
+    }
+    let n = elem_size(a) * len(a);
+    // SAFETY: both arrays' elements, `n` bytes each.
+    unsafe {
+        let x = std::slice::from_raw_parts((a as usize + A_DATA) as *const u8, n);
+        let y = std::slice::from_raw_parts((b as usize + A_DATA) as *const u8, n);
+        i32::from(x == y)
+    }
+}
+macro_rules! array_kind {
+    ($fill:ident, $fill_range:ident, $hash:ident, $t:ty, $bits:expr, $elem_hash:expr) => {
+        extern "C" fn $fill(a: u64, v: $t) {
+            if a == 0 {
+                npe();
+                return;
+            }
+            fill_bits(a, 0, len(a), ($bits)(v));
+        }
+        extern "C" fn $fill_range(a: u64, from: i32, to: i32, v: $t) {
+            if a == 0 {
+                npe();
+                return;
+            }
+            if range_ok(a, from, to) {
+                fill_bits(a, from as usize, to as usize, ($bits)(v));
+            }
+        }
+        extern "C" fn $hash(a: u64) -> i32 {
+            if a == 0 {
+                return 0;
+            }
+            (0..len(a)).fold(1i32, |h, i| {
+                h.wrapping_mul(31).wrapping_add(($elem_hash)(prim::<$t>(a, i)))
+            })
+        }
+    };
+}
+// (The narrow kinds come in as ints; elements are read at their own width.)
+array_kind!(arrays_fill_long, arrays_fill_long_range, arrays_hash_long, i64,
+    |v: i64| v as u64, |v: i64| (v ^ ((v as u64) >> 32) as i64) as i32);
+array_kind!(arrays_fill_double, arrays_fill_double_range, arrays_hash_double, f64,
+    |v: f64| v.to_bits(), |v: f64| {
+        let b = if v.is_nan() { 0x7ff8_0000_0000_0000u64 } else { v.to_bits() };
+        (b ^ (b >> 32)) as i32
+    });
+array_kind!(arrays_fill_float, arrays_fill_float_range, arrays_hash_float, f32,
+    |v: f32| u64::from(v.to_bits()), |v: f32| if v.is_nan() { 0x7fc0_0000 } else { v.to_bits() as i32 });
+extern "C" fn arrays_fill_narrow(a: u64, v: i32) {
+    if a == 0 {
+        npe();
+        return;
+    }
+    fill_bits(a, 0, len(a), v as u32 as u64);
+}
+extern "C" fn arrays_fill_narrow_range(a: u64, from: i32, to: i32, v: i32) {
+    if a == 0 {
+        npe();
+        return;
+    }
+    if range_ok(a, from, to) {
+        fill_bits(a, from as usize, to as usize, v as u32 as u64);
+    }
+}
+extern "C" fn arrays_fill_objects_range(a: u64, from: i32, to: i32, v: u64) {
+    if a == 0 {
+        npe();
+        return;
+    }
+    if range_ok(a, from, to) {
+        for i in from as usize..to as usize {
+            put(a, i, v);
+        }
+    }
+}
+fn hash_narrow(a: u64, elem: impl Fn(u64, usize) -> i32) -> i32 {
+    if a == 0 {
+        return 0;
+    }
+    (0..len(a)).fold(1i32, |h, i| h.wrapping_mul(31).wrapping_add(elem(a, i)))
+}
+extern "C" fn arrays_hash_byte(a: u64) -> i32 {
+    hash_narrow(a, |a, i| i32::from(prim::<i8>(a, i)))
+}
+extern "C" fn arrays_hash_short(a: u64) -> i32 {
+    hash_narrow(a, |a, i| i32::from(prim::<i16>(a, i)))
+}
+extern "C" fn arrays_hash_char(a: u64) -> i32 {
+    hash_narrow(a, |a, i| i32::from(prim::<u16>(a, i)))
+}
+extern "C" fn arrays_hash_bool(a: u64) -> i32 {
+    hash_narrow(a, |a, i| if prim::<u8>(a, i) != 0 { 1231 } else { 1237 })
 }
 extern "C" fn arrays_copy_of_int(a: u64, n: i32) -> u64 {
     if n < 0 {
@@ -3624,6 +3810,52 @@ pub fn builtins() -> Vec<Builtin> {
                     f!(arrays_copy_of_objects),
                 ),
                 s("copyOf", "([II)[I", f!(arrays_copy_of_int)),
+                s("copyOf", "([JI)[J", f!(arrays_copy_of)),
+                s("copyOf", "([DI)[D", f!(arrays_copy_of)),
+                s("copyOf", "([FI)[F", f!(arrays_copy_of)),
+                s("copyOf", "([BI)[B", f!(arrays_copy_of)),
+                s("copyOf", "([SI)[S", f!(arrays_copy_of)),
+                s("copyOf", "([CI)[C", f!(arrays_copy_of)),
+                s("copyOf", "([ZI)[Z", f!(arrays_copy_of)),
+                s("copyOfRange", "([Ljava/lang/Object;II)[Ljava/lang/Object;", f!(arrays_copy_of_range)),
+                s("copyOfRange", "([III)[I", f!(arrays_copy_of_range)),
+                s("copyOfRange", "([JII)[J", f!(arrays_copy_of_range)),
+                s("copyOfRange", "([DII)[D", f!(arrays_copy_of_range)),
+                s("copyOfRange", "([FII)[F", f!(arrays_copy_of_range)),
+                s("copyOfRange", "([BII)[B", f!(arrays_copy_of_range)),
+                s("copyOfRange", "([SII)[S", f!(arrays_copy_of_range)),
+                s("copyOfRange", "([CII)[C", f!(arrays_copy_of_range)),
+                s("copyOfRange", "([ZII)[Z", f!(arrays_copy_of_range)),
+                s("equals", "([J[J)Z", f!(arrays_equals_prim)),
+                s("equals", "([D[D)Z", f!(arrays_equals_prim)),
+                s("equals", "([F[F)Z", f!(arrays_equals_prim)),
+                s("equals", "([B[B)Z", f!(arrays_equals_prim)),
+                s("equals", "([S[S)Z", f!(arrays_equals_prim)),
+                s("equals", "([C[C)Z", f!(arrays_equals_prim)),
+                s("equals", "([Z[Z)Z", f!(arrays_equals_prim)),
+                s("fill", "([JJ)V", f!(arrays_fill_long)),
+                s("fill", "([DD)V", f!(arrays_fill_double)),
+                s("fill", "([FF)V", f!(arrays_fill_float)),
+                s("fill", "([BB)V", f!(arrays_fill_narrow)),
+                s("fill", "([SS)V", f!(arrays_fill_narrow)),
+                s("fill", "([CC)V", f!(arrays_fill_narrow)),
+                s("fill", "([ZZ)V", f!(arrays_fill_narrow)),
+                s("fill", "([IIII)V", f!(arrays_fill_narrow_range)),
+                s("fill", "([JIIJ)V", f!(arrays_fill_long_range)),
+                s("fill", "([DIID)V", f!(arrays_fill_double_range)),
+                s("fill", "([FIIF)V", f!(arrays_fill_float_range)),
+                s("fill", "([BIIB)V", f!(arrays_fill_narrow_range)),
+                s("fill", "([SIIS)V", f!(arrays_fill_narrow_range)),
+                s("fill", "([CIIC)V", f!(arrays_fill_narrow_range)),
+                s("fill", "([ZIIZ)V", f!(arrays_fill_narrow_range)),
+                s("fill", "([Ljava/lang/Object;IILjava/lang/Object;)V", f!(arrays_fill_objects_range)),
+                s("hashCode", "([J)I", f!(arrays_hash_long)),
+                s("hashCode", "([D)I", f!(arrays_hash_double)),
+                s("hashCode", "([F)I", f!(arrays_hash_float)),
+                s("hashCode", "([B)I", f!(arrays_hash_byte)),
+                s("hashCode", "([S)I", f!(arrays_hash_short)),
+                s("hashCode", "([C)I", f!(arrays_hash_char)),
+                s("hashCode", "([Z)I", f!(arrays_hash_bool)),
             ],
         },
         Builtin {

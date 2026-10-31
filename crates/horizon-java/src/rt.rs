@@ -73,6 +73,8 @@ pub struct Rt {
     /// offsets (`i64::MIN`: no class responds to the selector).
     pub dispatch: Box<[u64]>,
     pub offsets: Vec<i64>,
+    /// Each class id's object size in bytes (0: not known here).
+    pub sizes: Vec<u32>,
     /// Each class id's `Class` object.
     pub classes: Vec<u64>,
     /// Each class id's ancestors by name (itself, superclasses, interfaces).
@@ -761,6 +763,39 @@ extern "C" fn object_equals(o: u64, other: u64) -> i32 {
     (o == other) as i32
 }
 /// The identity hash: from the address (objects do not move yet).
+/// `Object.clone`: a copy of the object's fields (an array: of its
+/// elements); `CloneNotSupportedException` for a class that is not
+/// `Cloneable`.
+extern "C" fn object_clone(o: u64) -> u64 {
+    // SAFETY: an object's header is its class record; an array's is its
+    // element size (1 to 8).
+    let header = unsafe { word(o, 0) };
+    if header <= 8 {
+        return collections::array_clone(o);
+    }
+    // SAFETY: a class record starts with the class id.
+    let id = unsafe { word(header, 0) } as usize;
+    let r = rt();
+    let size = r.sizes.get(id).copied().unwrap_or(0) as usize;
+    let cloneable = r
+        .ancestors
+        .get(id)
+        .is_some_and(|a| a.contains("java/lang/Cloneable"));
+    if size == 0 || !cloneable {
+        throw("java/lang/CloneNotSupportedException", None);
+        return 0;
+    }
+    let c = alloc(size, header);
+    // SAFETY: two objects of `size` bytes; the header is already set.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (o as usize + 8) as *const u8,
+            (c as usize + 8) as *mut u8,
+            size - 8,
+        );
+    }
+    c
+}
 pub extern "C" fn identity_hash(o: u64) -> i32 {
     ((o >> 3) ^ (o >> 35)) as i32 & 0x7FFF_FFFF
 }
@@ -1261,6 +1296,46 @@ extern "C" fn throwable_init_cause(t: u64, c: u64) {
     let m = if c == 0 { 0 } else { to_string(c) };
     throwable_init_message_cause(t, m, c);
 }
+/// `AssertionError(Object)`: the message is `String.valueOf(detail)`; a
+/// `Throwable` detail is the cause too.
+extern "C" fn assertion_init_object(t: u64, d: u64) {
+    let m = if d == 0 { str_of("null") } else { to_string(d) };
+    let c = if instance_of(d, "java/lang/Throwable") { d } else { 0 };
+    throwable_init_message_cause(t, m, c);
+}
+extern "C" fn assertion_init_bool(t: u64, d: i32) {
+    throwable_init_message(t, str_of(if d != 0 { "true" } else { "false" }));
+}
+extern "C" fn assertion_init_char(t: u64, d: i32) {
+    throwable_init_message(t, new_string(&[d as u16]));
+}
+extern "C" fn assertion_init_int(t: u64, d: i32) {
+    throwable_init_message(t, str_of(&d.to_string()));
+}
+extern "C" fn assertion_init_long(t: u64, d: i64) {
+    throwable_init_message(t, str_of(&d.to_string()));
+}
+extern "C" fn assertion_init_float(t: u64, d: f32) {
+    throwable_init_message(t, str_of(&java_float(d)));
+}
+extern "C" fn assertion_init_double(t: u64, d: f64) {
+    throwable_init_message(t, str_of(&java_double(d)));
+}
+/// A JDK exception class's own constructors (the others are Throwable's).
+pub fn exception_methods(class: &str) -> Vec<Method> {
+    match class {
+        "java/lang/AssertionError" => vec![
+            m("<init>", "(Ljava/lang/Object;)V", assertion_init_object as *const () as usize),
+            m("<init>", "(Z)V", assertion_init_bool as *const () as usize),
+            m("<init>", "(C)V", assertion_init_char as *const () as usize),
+            m("<init>", "(I)V", assertion_init_int as *const () as usize),
+            m("<init>", "(J)V", assertion_init_long as *const () as usize),
+            m("<init>", "(F)V", assertion_init_float as *const () as usize),
+            m("<init>", "(D)V", assertion_init_double as *const () as usize),
+        ],
+        _ => Vec::new(),
+    }
+}
 extern "C" fn throwable_message(t: u64) -> u64 {
     // SAFETY: as above.
     unsafe { word(t, 8) }
@@ -1307,6 +1382,89 @@ extern "C" fn objects_require_non_null_message(o: u64, m: u64) -> u64 {
     }
     o
 }
+extern "C" fn objects_to_string(o: u64) -> u64 {
+    if o == 0 { str_of("null") } else { to_string(o) }
+}
+extern "C" fn objects_to_string_or(o: u64, otherwise: u64) -> u64 {
+    if o == 0 { otherwise } else { to_string(o) }
+}
+extern "C" fn objects_is_null(o: u64) -> i32 {
+    i32::from(o == 0)
+}
+extern "C" fn objects_non_null(o: u64) -> i32 {
+    i32::from(o != 0)
+}
+extern "C" fn objects_require_non_null_else(o: u64, otherwise: u64) -> u64 {
+    if o != 0 {
+        o
+    } else if otherwise != 0 {
+        otherwise
+    } else {
+        throw("java/lang/NullPointerException", Some("defaultObj"));
+        0
+    }
+}
+extern "C" fn small_compare(a: i32, b: i32) -> i32 {
+    // Byte.compare and Short.compare: the difference.
+    a - b
+}
+extern "C" fn int_to_hex(i: i32) -> u64 {
+    str_of(&format!("{:x}", i as u32))
+}
+extern "C" fn int_to_binary(i: i32) -> u64 {
+    str_of(&format!("{:b}", i as u32))
+}
+extern "C" fn int_to_octal(i: i32) -> u64 {
+    str_of(&format!("{:o}", i as u32))
+}
+extern "C" fn long_to_hex(i: i64) -> u64 {
+    str_of(&format!("{:x}", i as u64))
+}
+extern "C" fn long_to_binary(i: i64) -> u64 {
+    str_of(&format!("{:b}", i as u64))
+}
+extern "C" fn long_static_to_string(i: i64) -> u64 {
+    str_of(&i.to_string())
+}
+extern "C" fn long_hash_static(i: i64) -> i32 {
+    (i ^ ((i as u64) >> 32) as i64) as i32
+}
+extern "C" fn long_sum(a: i64, b: i64) -> i64 {
+    a.wrapping_add(b)
+}
+extern "C" fn long_max(a: i64, b: i64) -> i64 {
+    a.max(b)
+}
+extern "C" fn long_min(a: i64, b: i64) -> i64 {
+    a.min(b)
+}
+extern "C" fn parse_long_radix(s: u64, radix: i32) -> i64 {
+    if s == 0 {
+        throw(
+            "java/lang/NumberFormatException",
+            Some("Cannot parse null string: null"),
+        );
+        return 0;
+    }
+    let text = String::from_utf16_lossy(units(s));
+    let ok = !text.is_empty() && text != "+" && text != "-";
+    match ok
+        .then(|| i64::from_str_radix(&text, radix as u32).ok())
+        .flatten()
+    {
+        Some(v) => v,
+        None => {
+            throw(
+                "java/lang/NumberFormatException",
+                Some(&format!("For input string: \"{text}\"")),
+            );
+            0
+        }
+    }
+}
+extern "C" fn parse_long(s: u64) -> i64 {
+    parse_long_radix(s, 10)
+}
 pub extern "C" fn objects_equals(a: u64, b: u64) -> i32 {
     (a == b || (a != 0 && equals(a, b))) as i32
 }
@@ -1350,6 +1508,7 @@ pub fn builtins() -> Vec<Builtin> {
                     object_equals as *const () as usize,
                 ),
                 m("hashCode", "()I", identity_hash as *const () as usize),
+                m("clone", "()Ljava/lang/Object;", object_clone as *const () as usize),
                 m(
                     "toString",
                     "()Ljava/lang/String;",
@@ -1658,6 +1817,28 @@ pub fn builtins() -> Vec<Builtin> {
                     "(Ljava/lang/Object;)I",
                     objects_hash_code as *const () as usize,
                 ),
+                s(
+                    "hash",
+                    "([Ljava/lang/Object;)I",
+                    collections::arrays_hash_objects as *const () as usize,
+                ),
+                s(
+                    "toString",
+                    "(Ljava/lang/Object;)Ljava/lang/String;",
+                    objects_to_string as *const () as usize,
+                ),
+                s(
+                    "toString",
+                    "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/String;",
+                    objects_to_string_or as *const () as usize,
+                ),
+                s("isNull", "(Ljava/lang/Object;)Z", objects_is_null as *const () as usize),
+                s("nonNull", "(Ljava/lang/Object;)Z", objects_non_null as *const () as usize),
+                s(
+                    "requireNonNullElse",
+                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                    objects_require_non_null_else as *const () as usize,
+                ),
             ],
         },
     ];
@@ -1954,6 +2135,48 @@ pub fn builtins() -> Vec<Builtin> {
     }
     if let Some(object) = out.iter_mut().find(|b| b.name == "java/lang/Object") {
         object.methods.extend(threads::object_methods());
+    }
+    // The boxes' other statics.
+    let s = |name, desc, f: usize| Method {
+        name,
+        desc,
+        is_static: true,
+        f,
+    };
+    for (class, extra) in [
+        ("java/lang/Byte", vec![s("compare", "(BB)I", small_compare as *const () as usize)]),
+        ("java/lang/Short", vec![s("compare", "(SS)I", small_compare as *const () as usize)]),
+        (
+            "java/lang/Integer",
+            vec![
+                s("toHexString", "(I)Ljava/lang/String;", int_to_hex as *const () as usize),
+                s("toBinaryString", "(I)Ljava/lang/String;", int_to_binary as *const () as usize),
+                s("toOctalString", "(I)Ljava/lang/String;", int_to_octal as *const () as usize),
+            ],
+        ),
+        (
+            "java/lang/Long",
+            vec![
+                s("toHexString", "(J)Ljava/lang/String;", long_to_hex as *const () as usize),
+                s("toBinaryString", "(J)Ljava/lang/String;", long_to_binary as *const () as usize),
+                s("toString", "(J)Ljava/lang/String;", long_static_to_string as *const () as usize),
+                s("hashCode", "(J)I", long_hash_static as *const () as usize),
+                s("sum", "(JJ)J", long_sum as *const () as usize),
+                s("max", "(JJ)J", long_max as *const () as usize),
+                s("min", "(JJ)J", long_min as *const () as usize),
+                s("parseLong", "(Ljava/lang/String;)J", parse_long as *const () as usize),
+                s("parseLong", "(Ljava/lang/String;I)J", parse_long_radix as *const () as usize),
+            ],
+        ),
+    ] {
+        if let Some(b) = out.iter_mut().find(|b| b.name == class) {
+            // (Only what it does not have yet.)
+            for m in extra {
+                if !b.methods.iter().any(|x| x.name == m.name && x.desc == m.desc) {
+                    b.methods.push(m);
+                }
+            }
+        }
     }
     out.extend(collections::builtins());
     out.extend(collections::stream_builtins());

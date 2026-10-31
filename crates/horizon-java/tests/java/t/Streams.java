@@ -236,4 +236,75 @@ public class Streams {
                 && Float.isInfinite(1 / zf)) bits |= 64;
         return bits;
     }
+
+    static final class Pair implements Cloneable {
+        int a;
+        String b;
+
+        Pair copy() {
+            try {
+                return (Pair) super.clone();
+            } catch (CloneNotSupportedException e) {
+                return null;
+            }
+        }
+    }
+
+    static final class Plain {
+        Object tryClone() throws CloneNotSupportedException {
+            return super.clone();
+        }
+    }
+
+    public static int runtimeChecks() {
+        int bits = 0;
+        Pair p = new Pair();
+        p.a = 7;
+        p.b = "x";
+        Pair q = p.copy();
+        q.a = 8;
+        if (q != p && p.a == 7 && q.a == 8 && q.b == p.b) bits |= 1;
+        boolean refused = false;
+        try {
+            new Plain().tryClone();
+        } catch (CloneNotSupportedException e) {
+            refused = true;
+        }
+        if (refused) bits |= 2;
+        AssertionError e1 = new AssertionError((Object) "boom");
+        IllegalStateException cause = new IllegalStateException("c");
+        AssertionError e2 = new AssertionError(cause);
+        if ("boom".equals(e1.getMessage()) && e2.getCause() == cause
+                && "7".equals(new AssertionError(7).getMessage())) bits |= 4;
+        if (System.out != null && System.err != null && Boolean.TRUE.booleanValue()
+                && !Boolean.FALSE.booleanValue()) bits |= 8;
+        long[] l = new long[4];
+        java.util.Arrays.fill(l, 5L);
+        java.util.Arrays.fill(l, 1, 3, 9L);
+        double[] d = java.util.Arrays.copyOf(new double[] {1.5, 2.5}, 3);
+        byte[] b = java.util.Arrays.copyOfRange(new byte[] {1, 2, 3, 4}, 1, 3);
+        char[] c = new char[3];
+        java.util.Arrays.fill(c, 'z');
+        if (l[0] == 5 && l[1] == 9 && l[2] == 9 && l[3] == 5 && d.length == 3 && d[1] == 2.5
+                && d[2] == 0 && b.length == 2 && b[0] == 2 && b[1] == 3 && c[2] == 'z') bits |= 16;
+        boolean range = false;
+        try {
+            java.util.Arrays.fill(new int[2], 2, 1, 0);
+        } catch (IllegalArgumentException e) {
+            range = true;
+        }
+        if (range && java.util.Arrays.equals(new long[] {1, 2}, new long[] {1, 2})
+                && !java.util.Arrays.equals(new byte[] {1}, new byte[] {2})
+                && java.util.Arrays.hashCode(new long[] {1L << 40}) == 31 + 256
+                && java.util.Arrays.hashCode(new boolean[] {true}) == 31 + 1231) bits |= 32;
+        if (java.util.Objects.hash("a", 1) == java.util.Arrays.hashCode(new Object[] {"a", 1})
+                && "null".equals(java.util.Objects.toString(null))
+                && "d".equals(java.util.Objects.toString(null, "d"))
+                && java.util.Objects.isNull(null) && java.util.Objects.nonNull("x")) bits |= 64;
+        if (Byte.compare((byte) 3, (byte) 5) == -2 && Short.compare((short) 9, (short) 4) == 5
+                && "ff".equals(Integer.toHexString(255)) && "ffffffff".equals(Integer.toHexString(-1))
+                && "101".equals(Integer.toBinaryString(5)) && Long.parseLong("-123") == -123L
+                && Long.parseLong("ff", 16) == 255 && "10000000000".equals(Long.toHexString(1L << 40))) bits |= 128;
+        return bits;
+    }
 }

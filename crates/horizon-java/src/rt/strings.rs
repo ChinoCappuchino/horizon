@@ -617,7 +617,7 @@ fn format_with(pattern: u64, args: u64) -> u64 {
         }
     }
 }
-extern "C" fn format(pattern: u64, args: u64) -> u64 {
+pub(super) extern "C" fn format(pattern: u64, args: u64) -> u64 {
     format_with(pattern, args)
 }
 extern "C" fn format_locale(_locale: u64, pattern: u64, args: u64) -> u64 {

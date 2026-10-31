@@ -878,6 +878,163 @@ pub fn character_methods() -> Vec<Method> {
 
 /// The JDK's static fields this library provides: `owner name` → its
 /// getter and the getter's descriptor.
+// ---- PrintStream (System.out and System.err) ----------------------------------
+
+/// A stream: [vtable][1 (stdout) or 2 (stderr)].
+fn print_stream(fd: u64) -> u64 {
+    let p = alloc(16, vt("java/io/PrintStream"));
+    // SAFETY: a fresh 16-byte object.
+    unsafe { *((p as usize + 8) as *mut u64) = fd };
+    p
+}
+extern "C" fn system_out() -> u64 {
+    once("System.out", || print_stream(1))
+}
+extern "C" fn system_err() -> u64 {
+    once("System.err", || print_stream(2))
+}
+extern "C" fn boolean_true() -> u64 {
+    super::bool_value_of(1)
+}
+extern "C" fn boolean_false() -> u64 {
+    super::bool_value_of(0)
+}
+fn emit(p: u64, s: &str, line: bool) {
+    use std::io::Write;
+    // SAFETY: a PrintStream: its target at 8.
+    let fd = unsafe { word(p, 8) };
+    let end = if line { "\n" } else { "" };
+    if fd == 2 {
+        let _ = write!(std::io::stderr(), "{s}{end}");
+    } else {
+        let _ = write!(std::io::stdout(), "{s}{end}");
+    }
+}
+/// `String.valueOf` of an object: "null" or its `toString()`.
+fn object_text(o: u64) -> String {
+    if o == 0 {
+        "null".to_owned()
+    } else {
+        String::from_utf16_lossy(text(super::to_string(o)))
+    }
+}
+fn string_text(s: u64) -> String {
+    if s == 0 { "null".to_owned() } else { String::from_utf16_lossy(text(s)) }
+}
+extern "C" fn ps_println(p: u64) {
+    emit(p, "", true);
+}
+extern "C" fn ps_println_string(p: u64, s: u64) {
+    emit(p, &string_text(s), true);
+}
+extern "C" fn ps_print_string(p: u64, s: u64) {
+    emit(p, &string_text(s), false);
+}
+extern "C" fn ps_println_object(p: u64, o: u64) {
+    emit(p, &object_text(o), true);
+}
+extern "C" fn ps_print_object(p: u64, o: u64) {
+    emit(p, &object_text(o), false);
+}
+extern "C" fn ps_println_int(p: u64, v: i32) {
+    emit(p, &v.to_string(), true);
+}
+extern "C" fn ps_print_int(p: u64, v: i32) {
+    emit(p, &v.to_string(), false);
+}
+extern "C" fn ps_println_long(p: u64, v: i64) {
+    emit(p, &v.to_string(), true);
+}
+extern "C" fn ps_print_long(p: u64, v: i64) {
+    emit(p, &v.to_string(), false);
+}
+extern "C" fn ps_println_double(p: u64, v: f64) {
+    emit(p, &super::java_double(v), true);
+}
+extern "C" fn ps_print_double(p: u64, v: f64) {
+    emit(p, &super::java_double(v), false);
+}
+extern "C" fn ps_println_float(p: u64, v: f32) {
+    emit(p, &super::java_float(v), true);
+}
+extern "C" fn ps_print_float(p: u64, v: f32) {
+    emit(p, &super::java_float(v), false);
+}
+extern "C" fn ps_println_char(p: u64, v: i32) {
+    emit(p, &String::from_utf16_lossy(&[v as u16]), true);
+}
+extern "C" fn ps_print_char(p: u64, v: i32) {
+    emit(p, &String::from_utf16_lossy(&[v as u16]), false);
+}
+extern "C" fn ps_println_bool(p: u64, v: i32) {
+    emit(p, if v != 0 { "true" } else { "false" }, true);
+}
+extern "C" fn ps_print_bool(p: u64, v: i32) {
+    emit(p, if v != 0 { "true" } else { "false" }, false);
+}
+extern "C" fn ps_printf(p: u64, f: u64, args: u64) -> u64 {
+    let s = super::strings::format(f, args);
+    if s != 0 {
+        emit(p, &string_text(s), false);
+    }
+    p
+}
+extern "C" fn ps_flush(_p: u64) {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+}
+fn print_stream_class() -> Builtin {
+    let m = |name, desc, f: usize| Method {
+        name,
+        desc,
+        is_static: false,
+        f,
+    };
+    macro_rules! f {
+        ($f:expr) => {
+            $f as *const () as usize
+        };
+    }
+    Builtin {
+        name: "java/io/PrintStream",
+        super_name: Some("java/lang/Object"),
+        interfaces: &[],
+        size: 16,
+        is_final: false,
+        is_interface: false,
+        methods: vec![
+            m("println", "()V", f!(ps_println)),
+            m("println", "(Ljava/lang/String;)V", f!(ps_println_string)),
+            m("print", "(Ljava/lang/String;)V", f!(ps_print_string)),
+            m("println", "(Ljava/lang/Object;)V", f!(ps_println_object)),
+            m("print", "(Ljava/lang/Object;)V", f!(ps_print_object)),
+            m("println", "(I)V", f!(ps_println_int)),
+            m("print", "(I)V", f!(ps_print_int)),
+            m("println", "(J)V", f!(ps_println_long)),
+            m("print", "(J)V", f!(ps_print_long)),
+            m("println", "(D)V", f!(ps_println_double)),
+            m("print", "(D)V", f!(ps_print_double)),
+            m("println", "(F)V", f!(ps_println_float)),
+            m("print", "(F)V", f!(ps_print_float)),
+            m("println", "(C)V", f!(ps_println_char)),
+            m("print", "(C)V", f!(ps_print_char)),
+            m("println", "(Z)V", f!(ps_println_bool)),
+            m("print", "(Z)V", f!(ps_print_bool)),
+            m(
+                "printf",
+                "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/io/PrintStream;",
+                f!(ps_printf),
+            ),
+            m(
+                "format",
+                "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/io/PrintStream;",
+                f!(ps_printf),
+            ),
+            m("flush", "()V", f!(ps_flush)),
+        ],
+    }
+}
+
 pub fn static_getter(owner: &str, name: &str) -> Option<(usize, &'static str)> {
     const UNIT: &str = "()Ljava/util/concurrent/TimeUnit;";
     let f = |f: extern "C" fn() -> u64| f as *const () as usize;
@@ -906,6 +1063,10 @@ pub fn static_getter(owner: &str, name: &str) -> Option<(usize, &'static str)> {
         ("java/util/concurrent/TimeUnit", "MINUTES") => (f(minutes), UNIT),
         ("java/util/concurrent/TimeUnit", "HOURS") => (f(hours), UNIT),
         ("java/util/concurrent/TimeUnit", "DAYS") => (f(days), UNIT),
+        ("java/lang/System", "out") => (f(system_out), "()Ljava/io/PrintStream;"),
+        ("java/lang/System", "err") => (f(system_err), "()Ljava/io/PrintStream;"),
+        ("java/lang/Boolean", "TRUE") => (f(boolean_true), "()Ljava/lang/Boolean;"),
+        ("java/lang/Boolean", "FALSE") => (f(boolean_false), "()Ljava/lang/Boolean;"),
         _ => return None,
     })
 }
@@ -1107,6 +1268,7 @@ pub fn builtins() -> Vec<Builtin> {
                 m("sleep", "(J)V", f!(unit_sleep)),
             ],
         },
+        print_stream_class(),
     ]
 }
 
