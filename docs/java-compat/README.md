@@ -4,6 +4,9 @@ Status: design and proof of concept, fork `afterwinter`, 2026-10-29.
 Writing standard: ASD-STE100 (Simplified Technical English) rules. See
 [Writing rules](#writing-rules-for-these-documents).
 
+The current status (what works, the numbers, the next steps) is in
+[status.md](status.md). Rendering of mods is in [rendering.md](rendering.md).
+
 ## 1. Purpose
 
 This system lets Horizon use mods that people wrote for NeoForge 1.21.1. You do
