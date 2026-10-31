@@ -262,6 +262,22 @@ fn pending() -> bool {
 
 // ---- Strings ----------------------------------------------------------
 
+/// A `String[]` of `items` (for a `main` method's arguments).
+pub fn string_array(items: &[&str]) -> u64 {
+    let a = collections::object_array(items.len());
+    for (i, item) in items.iter().enumerate() {
+        // SAFETY: element i of a reference array.
+        unsafe { set_word(a, A_DATA + 8 * i, str_of(item)) };
+    }
+    a
+}
+/// The exception the calling thread is throwing, as `Class: message`
+/// (after a call into the code returned), and clears it.
+pub fn take_exception() -> Option<String> {
+    // SAFETY: this thread's context.
+    let e = unsafe { std::mem::replace(&mut (*ctx()).exception, 0) };
+    (e != 0).then(|| String::from_utf16_lossy(units(to_string(e))))
+}
 pub fn new_string(units: &[u16]) -> u64 {
     let s = alloc(S_DATA + 2 * units.len(), vt("java/lang/String"));
     // SAFETY: the String was just made with room for the units.
@@ -2213,6 +2229,7 @@ pub fn builtins() -> Vec<Builtin> {
         }
     }
     out.extend(collections::builtins());
+    out.extend(collections::concurrent_builtins());
     out.extend(collections::stream_builtins());
     out.extend(logging::builtins());
     out.extend(threads::builtins());

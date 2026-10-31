@@ -308,6 +308,18 @@ public class Streams {
         StringBuffer sb = new StringBuffer();
         sb.append("ab").append('c').append(12);
         if ("abc12".equals(sb.toString()) && sb.length() == 5) bits |= 256;
+        java.util.concurrent.ConcurrentHashMap<String, Integer> chm = new java.util.concurrent.ConcurrentHashMap<>();
+        chm.put("a", 1);
+        chm.computeIfAbsent("b", k -> 2);
+        chm.merge("a", 5, Integer::sum);
+        boolean nullRefused = false;
+        try {
+            chm.put("c", null);
+        } catch (NullPointerException e) {
+            nullRefused = true;
+        }
+        if (chm.get("a") == 6 && chm.get("b") == 2 && chm.size() == 2 && chm.mappingCount() == 2
+                && nullRefused && chm.putIfAbsent("a", 9) == 6) bits |= 512;
         return bits;
     }
 

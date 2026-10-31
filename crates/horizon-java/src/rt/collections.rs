@@ -17,6 +17,10 @@ mod streams;
 // ---- Helpers ---------------------------------------------------------------
 
 /// An object array: element size 8 in its header.
+/// A new reference array of `n` elements (null).
+pub(super) fn object_array(n: usize) -> u64 {
+    obj_array(n)
+}
 fn obj_array(n: usize) -> u64 {
     let a = alloc(A_DATA + 8 * n, 8);
     // SAFETY: just made, with room for n elements.
@@ -1425,6 +1429,141 @@ extern "C" fn hm_values(m: u64) -> u64 {
 }
 extern "C" fn hm_entry_set(m: u64) -> u64 {
     view("java/util/HashMap$EntrySet", m)
+}
+
+// ---- ConcurrentHashMap ---------------------------------------------------------
+//
+// HashMap's layout and code, each operation under the map's monitor
+// (reentrant: a function a compute calls may use the map). Null keys and
+// values are refused, as the JDK documents. (Its iterators see the map as
+// it changes, as HashMap's do: the JDK's are weakly consistent instead.)
+
+fn no_nulls(k: u64, v: u64) -> bool {
+    if k == 0 || v == 0 {
+        npe();
+        false
+    } else {
+        true
+    }
+}
+macro_rules! locked {
+    ($name:ident, $inner:ident, ($($a:ident: $t:ty),*) $(-> $r:ty)?) => {
+        extern "C" fn $name(m: u64 $(, $a: $t)*) $(-> $r)? {
+            super::threads::monitor_enter(m);
+            let r = $inner(m $(, $a)*);
+            super::threads::monitor_exit(m);
+            r
+        }
+    };
+}
+locked!(chm_get, hm_get, (k: u64) -> u64);
+locked!(chm_get_or_default, hm_get_or_default, (k: u64, d: u64) -> u64);
+locked!(chm_contains_key, hm_contains_key, (k: u64) -> i32);
+locked!(chm_contains_value, hm_contains_value, (v: u64) -> i32);
+locked!(chm_remove, hm_remove, (k: u64) -> u64);
+locked!(chm_size, hm_size, () -> i32);
+locked!(chm_is_empty, hm_is_empty, () -> i32);
+locked!(chm_clear, hm_clear, ());
+locked!(chm_compute_if_absent, hm_compute_if_absent, (k: u64, f: u64) -> u64);
+locked!(chm_compute, hm_compute, (k: u64, f: u64) -> u64);
+locked!(chm_merge_inner, hm_merge, (k: u64, v: u64, f: u64) -> u64);
+locked!(chm_for_each, hm_for_each, (f: u64));
+locked!(chm_to_string, hm_to_string, () -> u64);
+locked!(chm_hash, hm_hash, () -> i32);
+locked!(chm_equals, hm_equals, (o: u64) -> i32);
+locked!(chm_put_inner, hm_put_c, (k: u64, v: u64) -> u64);
+locked!(chm_put_if_absent_inner, hm_put_if_absent, (k: u64, v: u64) -> u64);
+extern "C" fn chm_put(m: u64, k: u64, v: u64) -> u64 {
+    if no_nulls(k, v) { chm_put_inner(m, k, v) } else { 0 }
+}
+extern "C" fn chm_put_if_absent(m: u64, k: u64, v: u64) -> u64 {
+    if no_nulls(k, v) { chm_put_if_absent_inner(m, k, v) } else { 0 }
+}
+extern "C" fn chm_merge(m: u64, k: u64, v: u64, f: u64) -> u64 {
+    if no_nulls(k, v) { chm_merge_inner(m, k, v, f) } else { 0 }
+}
+extern "C" fn chm_init_cap_load(m: u64, cap: i32, _load: f32) {
+    hm_init_cap(m, cap);
+}
+extern "C" fn chm_init_cap_load_level(m: u64, cap: i32, _load: f32, _level: i32) {
+    hm_init_cap(m, cap);
+}
+extern "C" fn chm_mapping_count(m: u64) -> i64 {
+    i64::from(chm_size(m))
+}
+extern "C" fn chm_new_key_set() -> u64 {
+    // (A HashSet: the JDK's is backed by a ConcurrentHashMap.)
+    let set = new_of("java/util/HashSet", 16);
+    hs_init(set);
+    set
+}
+
+/// `java.util.concurrent.ConcurrentHashMap`.
+pub(super) fn concurrent_builtins() -> Vec<Builtin> {
+    macro_rules! f {
+        ($f:expr) => {
+            $f as *const () as usize
+        };
+    }
+    let m = |name, desc, f: usize| Method {
+        name,
+        desc,
+        is_static: false,
+        f,
+    };
+    let s = |name, desc, f: usize| Method {
+        name,
+        desc,
+        is_static: true,
+        f,
+    };
+    const O2: &str = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+    vec![class(
+        "java/util/concurrent/ConcurrentHashMap",
+        "java/lang/Object",
+        &["java/util/concurrent/ConcurrentMap", "java/util/Map"],
+        40,
+        vec![
+            m("<init>", "()V", f!(hm_init)),
+            m("<init>", "(I)V", f!(hm_init_cap)),
+            m("<init>", "(IF)V", f!(chm_init_cap_load)),
+            m("<init>", "(IFI)V", f!(chm_init_cap_load_level)),
+            m("get", "(Ljava/lang/Object;)Ljava/lang/Object;", f!(chm_get)),
+            m("getOrDefault", O2, f!(chm_get_or_default)),
+            m("containsKey", "(Ljava/lang/Object;)Z", f!(chm_contains_key)),
+            m("containsValue", "(Ljava/lang/Object;)Z", f!(chm_contains_value)),
+            m("put", O2, f!(chm_put)),
+            m("putIfAbsent", O2, f!(chm_put_if_absent)),
+            m("remove", "(Ljava/lang/Object;)Ljava/lang/Object;", f!(chm_remove)),
+            m("size", "()I", f!(chm_size)),
+            m("mappingCount", "()J", f!(chm_mapping_count)),
+            m("isEmpty", "()Z", f!(chm_is_empty)),
+            m("clear", "()V", f!(chm_clear)),
+            m(
+                "computeIfAbsent",
+                "(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;",
+                f!(chm_compute_if_absent),
+            ),
+            m(
+                "compute",
+                "(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+                f!(chm_compute),
+            ),
+            m(
+                "merge",
+                "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
+                f!(chm_merge),
+            ),
+            m("forEach", "(Ljava/util/function/BiConsumer;)V", f!(chm_for_each)),
+            m("keySet", "()Ljava/util/Set;", f!(hm_key_set)),
+            m("values", "()Ljava/util/Collection;", f!(hm_values)),
+            m("entrySet", "()Ljava/util/Set;", f!(hm_entry_set)),
+            m("toString", "()Ljava/lang/String;", f!(chm_to_string)),
+            m("equals", "(Ljava/lang/Object;)Z", f!(chm_equals)),
+            m("hashCode", "()I", f!(chm_hash)),
+            s("newKeySet", "()Ljava/util/Set;", f!(chm_new_key_set)),
+        ],
+    )]
 }
 fn view(class: &str, m: u64) -> u64 {
     let v = new_of(class, 16);

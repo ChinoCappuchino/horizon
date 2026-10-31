@@ -182,6 +182,9 @@ extern "C" fn host_missing() {
 pub struct Native {
     module: JITModule,
     exports: HashMap<String, FuncId>,
+    /// Each class's init function (its `<clinit>`, once, after its
+    /// superclass's), by class name.
+    class_inits: HashMap<String, FuncId>,
     /// Methods that compile to a trap, with why.
     pub unsupported: Vec<(String, String)>,
     /// Instructions compiled as stops (code outside the compiled classes or
@@ -1710,9 +1713,11 @@ impl Native {
         let main = heap.context();
         rt::install_context(&main);
         let exports = funcs;
+        let class_inits = inits.clone();
         Ok(Native {
             module,
             exports,
+            class_inits,
             unsupported,
             main,
             heap,
@@ -1752,6 +1757,16 @@ impl Native {
 
     pub fn heap(&self) -> &heap::Heap {
         &self.heap
+    }
+
+    /// The machine code of class `name`'s init function, if it has one: it
+    /// takes a thread's context. (Compiled code initializes the classes it
+    /// uses; a call into the code from outside does it first with this.)
+    pub fn class_init(&self, name: &str) -> Option<*const u8> {
+        Some(
+            self.module
+                .get_finalized_function(*self.class_inits.get(name)?),
+        )
     }
 
     /// The machine code of an exported method (`Class.name(desc)ret`): it

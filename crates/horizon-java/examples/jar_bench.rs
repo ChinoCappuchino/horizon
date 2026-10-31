@@ -246,6 +246,7 @@ fn main() -> Result<()> {
     let mut imports = false;
     let mut native: Option<String> = None;
     let mut run_native = false;
+    let mut run_main = false;
     let mut native_check = false;
     let mut paths = Vec::new();
     let mut it = inputs.iter();
@@ -262,6 +263,7 @@ fn main() -> Result<()> {
             "--imports" => imports = true,
             "--native" => native = it.next().cloned(),
             "--run-native" => run_native = true,
+            "--run-main" => run_main = true,
             "--native-check" => native_check = true,
             p => paths.push(p.to_owned()),
         }
@@ -293,6 +295,9 @@ fn main() -> Result<()> {
     }
     if run_native {
         return native_bench(&classes, &bench[1..]);
+    }
+    if run_main {
+        return native_main(&classes, &bench[1..]);
     }
     let started = Instant::now();
     let compiled = compile(&classes).map_err(anyhow)?;
@@ -406,6 +411,58 @@ fn native_bench(classes: &[ClassFile], bench: &[String]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// A program's `main` through the native backend (`--run-main ... --
+/// <Class> [args...]`): its class initialized, `main(String[])` called,
+/// then the program's own threads given HORIZON_RUN_SECONDS (120) to run.
+#[cfg(feature = "native")]
+fn native_main(classes: &[ClassFile], args: &[String]) -> Result<()> {
+    use horizon_java::heap::Context;
+    let [class, rest @ ..] = args else {
+        bail!("usage: ... --run-main ... -- <Class> [args...]");
+    };
+    let started = Instant::now();
+    let native = horizon_java::native::Native::compile(classes).map_err(anyhow)?;
+    eprintln!(
+        "compiled natively in {:.1} s; {} methods trap",
+        started.elapsed().as_secs_f64(),
+        native.unsupported.len()
+    );
+    let ctx = native.context();
+    if let Some(init) = native.class_init(class) {
+        // SAFETY: an init function takes the thread's context.
+        let init: extern "C" fn(*mut Context) = unsafe { std::mem::transmute(init) };
+        init(ctx);
+        if let Some(e) = horizon_java::rt::take_exception() {
+            bail!("{class}'s initializer threw {e}");
+        }
+    }
+    let main = native
+        .function(&format!("{class}.main([Ljava/lang/String;)V"))
+        .ok_or(anyhow("no main(String[])"))?;
+    // SAFETY: main takes the thread's context and a String[].
+    let main: extern "C" fn(*mut Context, i64) = unsafe { std::mem::transmute(main) };
+    let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+    let argv = horizon_java::rt::string_array(&rest);
+    eprintln!("main started");
+    main(ctx, argv as i64);
+    if let Some(e) = horizon_java::rt::take_exception() {
+        eprintln!("main threw {e}");
+    }
+    eprintln!("main returned after {:.1} s", started.elapsed().as_secs_f64());
+    let secs: u64 = std::env::var("HORIZON_RUN_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120);
+    std::thread::sleep(std::time::Duration::from_secs(secs));
+    eprintln!("heap {} MB", native.heap().used() >> 20);
+    Ok(())
+}
+
+#[cfg(not(feature = "native"))]
+fn native_main(_: &[ClassFile], _: &[String]) -> Result<()> {
+    bail!("built without the native backend: --features native")
 }
 
 #[cfg(not(feature = "native"))]
