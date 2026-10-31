@@ -384,7 +384,12 @@ impl Native {
         let timed = std::env::var_os("HORIZON_NATIVE_TIMES").is_some();
         let phase = |what: &str| {
             if timed {
-                eprintln!("{:8.1} s  {what}", started.elapsed().as_secs_f64());
+                // (Resident memory, from /proc on Linux.)
+                let rss_mb = std::fs::read_to_string("/proc/self/statm")
+                    .ok()
+                    .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+                    .map_or(0, |pages| pages * 4096 >> 20);
+                eprintln!("{:8.1} s  {rss_mb:6} MB  {what}", started.elapsed().as_secs_f64());
             }
         };
         let (lambdas, lambda_at, called, created) = prepass(classes);
@@ -984,114 +989,86 @@ impl Native {
         let mut unsupported = Vec::new();
         let mut ctx = module.make_context();
         let mut fctx = FunctionBuilderContext::new();
-        let mut bodies: HashMap<FuncId, (String, cranelift_codegen::ir::Function)> = HashMap::new();
+        // A method body: built from its bytecode, or one that traps saying
+        // why it could not be (then with a clean context).
+        macro_rules! build_method {
+            ($owner:expr, $c:expr, $m:expr) => {{
+                let name = export_name($owner, &$m.name, &$m.descriptor);
+                match funcs.get(&name) {
+                    None => None,
+                    Some(&id) => {
+                        ctx.func.signature = sigs[&name].clone();
+                        let r = {
+                            let b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                            MethodGen::new(&world, &hierarchy, $c, $m, b, &mut module)
+                                .and_then(|g| g.run())
+                        };
+                        if let Err(e) = r {
+                            ctx.func.clear();
+                            fctx = FunctionBuilderContext::new();
+                            let why = rt::stop_reason(format!("{name}, not compiled: {e}"));
+                            unsupported.push((name.clone(), e));
+                            ctx.func.signature = sigs[&name].clone();
+                            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                            let e = b.create_block();
+                            b.append_block_params_for_function_params(e);
+                            b.switch_to_block(e);
+                            b.seal_block(e);
+                            say_and_trap(&mut b, why);
+                            b.finalize(module.target_config());
+                        }
+                        let f = ctx.func.clone();
+                        module.clear_context(&mut ctx);
+                        Some((id, name, f))
+                    }
+                }
+            }};
+        }
+        // Methods are built in two passes. First the small ones (by bytecode
+        // length), which their callers may inline: those stay, read-only.
+        // Then every other method, each compiled by a worker as soon as it
+        // is built and then dropped: the program's code is never all in
+        // memory at once (it was 5 GB of 12 for Create, Sable and NeoForge
+        // with Minecraft).
+        let small = |m: &crate::classfile::Member| {
+            m.code().is_some_and(|c| c.code.len() <= SMALL_BYTECODE)
+        };
+        let mut inlinable: HashMap<FuncId, (String, cranelift_codegen::ir::Function)> =
+            HashMap::new();
+        let mut sizes: HashMap<FuncId, usize> = HashMap::new();
+        // (The small bodies not inlined, to compile; those inlined are
+        // compiled from `inlinable`, with no second copy.)
+        let mut first: Vec<(FuncId, String, cranelift_codegen::ir::Function)> = Vec::new();
+        let mut first_inlinable: Vec<FuncId> = Vec::new();
         for c in classes {
             let owner = c.name().map_err(|e| e.to_string())?;
-            for m in &c.methods {
-                let name = export_name(owner, &m.name, &m.descriptor);
-                let Some(&id) = funcs.get(&name) else {
-                    continue;
-                };
-                ctx.func.signature = sigs[&name].clone();
-                let r = {
-                    let b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-                    MethodGen::new(&world, &hierarchy, c, m, b, &mut module).and_then(|g| g.run())
-                };
-                if let Err(e) = r {
-                    // Start over with a body that traps (and a clean context).
-                    ctx.func.clear();
-                    fctx = FunctionBuilderContext::new();
-                    let why = rt::stop_reason(format!("{name}, not compiled: {e}"));
-                    unsupported.push((name.clone(), e));
-                    ctx.func.signature = sigs[&name].clone();
-                    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-                    let e = b.create_block();
-                    b.append_block_params_for_function_params(e);
-                    b.switch_to_block(e);
-                    b.seal_block(e);
-                    say_and_trap(&mut b, why);
-                    b.finalize(module.target_config());
-                }
-                bodies.insert(id, (name, ctx.func.clone()));
-                module.clear_context(&mut ctx);
-            }
-        }
-        types.catches = world.catches.borrow().clone();
-        phase("method bodies built");
-        // The bits of the classes the code tests against, now all known.
-        let tested = world.tested.borrow().clone();
-        let words = tested.len().div_ceil(64).max(1);
-        for id in 0..types.bit_table.len() {
-            let mut bits = vec![0u64; words].into_boxed_slice();
-            for (&target, &k) in &tested {
-                if types
-                    .ancestors
-                    .get(id)
-                    .is_some_and(|a| a.binary_search(&target).is_ok())
-                {
-                    bits[k as usize / 64] |= 1 << (k % 64);
+            for m in c.methods.iter().filter(|m| small(m)) {
+                if let Some((id, name, f)) = build_method!(owner, c, m) {
+                    let size = hot_size(&f);
+                    if size <= INLINE {
+                        sizes.insert(id, size);
+                        inlinable.insert(id, (name, f));
+                        first_inlinable.push(id);
+                    } else {
+                        first.push((id, name, f));
+                    }
                 }
             }
-            types.bit_table[id] = bits.as_ptr() as u64;
-            types.bits.push(bits);
         }
-        // The lambdas' bridges: captured values and the interface method's
-        // arguments to the target.
-        for (i, l) in lambdas.iter().enumerate() {
-            let Some(id) = bridges[i] else { continue };
-            ctx.func.signature = signature(&module, true, &l.sam).expect("declared");
-            let r = {
-                let b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-                bridge(&world, l, b, &mut module)
-            };
-            if std::env::var_os("HORIZON_NATIVE_TRACE").is_some() {
-                eprintln!(
-                    "bridge {i} ({}.{}): {:?}, entry {:?}",
-                    l.owner,
-                    l.target,
-                    r.as_ref().err(),
-                    ctx.func.layout.entry_block()
-                );
-            }
-            if let Err(e) = r {
-                ctx.func.clear();
-                // The failed builder left its context half used.
-                fctx = FunctionBuilderContext::new();
-                let why = rt::stop_reason(format!(
-                    "lambda {i} -> {}.{}, not compiled: {e}",
-                    l.owner, l.target
-                ));
-                unsupported.push((format!("lambda {i} -> {}.{}", l.owner, l.target), e));
-                ctx.func.signature = signature(&module, true, &l.sam).expect("declared");
-                let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-                let e = b.create_block();
-                b.append_block_params_for_function_params(e);
-                b.switch_to_block(e);
-                b.seal_block(e);
-                say_and_trap(&mut b, why);
-                b.finalize(module.target_config());
-            }
-            bodies.insert(id, (format!("lambda {i}"), ctx.func.clone()));
-            module.clear_context(&mut ctx);
-        }
-        phase("lambda bridges");
-        // Small methods inlined into their callers, then every method defined.
-        let sizes: HashMap<FuncId, usize> = bodies
-            .iter()
-            .map(|(&id, (_, f))| (id, hot_size(f)))
-            .collect();
+        phase("small method bodies built");
         let trace = std::env::var_os("HORIZON_NATIVE_TRACE").is_some();
         // HORIZON_NATIVE_CLIF=<text>: the code of each method whose name has
         // it, after inlining.
         let clif = std::env::var("HORIZON_NATIVE_CLIF").ok();
         // Compiled on every core: each worker inlines and compiles methods
         // with its own context, and this thread puts their code in the
-        // module. A method Cranelift fails on (code it panics on, in a
-        // release build without its verifier) is one not compiled, not the
-        // end: the verifier says why, and a stand-in traps saying so.
+        // module between bodies. A method Cranelift fails on (code it panics
+        // on, in a release build without its verifier) is one not compiled,
+        // not the end: the verifier says why, and a stand-in traps saying so.
         enum Done {
             Code {
                 id: FuncId,
+                name: String,
                 align: u64,
                 bytes: Vec<u8>,
                 relocs: Vec<cranelift_module::ModuleReloc>,
@@ -1099,41 +1076,50 @@ impl Native {
             },
             Failed {
                 id: FuncId,
+                name: String,
+                signature: Signature,
                 why: String,
             },
         }
-        let order: Vec<(&FuncId, &(String, cranelift_codegen::ir::Function))> =
-            bodies.iter().collect();
-        let next = std::sync::atomic::AtomicUsize::new(0);
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
         let isa: &dyn cranelift_codegen::isa::TargetIsa = &*compile_isa;
+        // (Work is bounded: the bodies waiting are a few per worker.
+        // Results are not, so a worker never waits on this thread.)
+        let (work_tx, work_rx) =
+            std::sync::mpsc::sync_channel::<(FuncId, String, cranelift_codegen::ir::Function)>(
+                2 * workers,
+            );
+        let work_rx = std::sync::Mutex::new(work_rx);
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Done>();
         std::thread::scope(|scope| -> Result<(), String> {
-            let (tx, rx) = std::sync::mpsc::sync_channel::<Done>(256);
             for _ in 0..workers {
-                let tx = tx.clone();
-                let (next, order, bodies, sizes, clif) = (&next, &order, &bodies, &sizes, &clif);
+                let tx = done_tx.clone();
+                let (work_rx, inlinable, sizes, clif) = (&work_rx, &inlinable, &sizes, &clif);
                 scope.spawn(move || {
                     let mut ctx = cranelift_codegen::Context::new();
                     let inliner = |caller| Inliner {
-                        bodies,
+                        bodies: inlinable,
                         sizes,
                         caller,
                     };
                     loop {
-                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(&(&id, (name, func))) = order.get(k) else {
+                        let next = work_rx.lock().unwrap().recv();
+                        let Ok((id, name, func)) = next else {
                             break;
                         };
                         if trace {
                             eprintln!("defining {name}");
                         }
+                        let failed = |why: String| Done::Failed {
+                            id,
+                            name: name.clone(),
+                            signature: func.signature.clone(),
+                            why,
+                        };
                         ctx.clear();
                         ctx.func = func.clone();
                         let done = match ctx.inline(inliner(id)) {
-                            Err(e) => Done::Failed {
-                                id,
-                                why: format!("inlining: {e:?}"),
-                            },
+                            Err(e) => failed(format!("inlining: {e:?}")),
                             Ok(_) => {
                                 if clif.as_ref().is_some_and(|f| name.contains(f.as_str())) {
                                     eprintln!("{name}:\n{}", ctx.func.display());
@@ -1168,12 +1154,13 @@ impl Native {
                                 match compiled {
                                     Ok(Ok((align, bytes, relocs, size))) => Done::Code {
                                         id,
+                                        name: name.clone(),
                                         align,
                                         bytes,
                                         relocs,
                                         size,
                                     },
-                                    Ok(Err(why)) => Done::Failed { id, why },
+                                    Ok(Err(why)) => failed(why),
                                     Err(_) => {
                                         ctx.clear();
                                         ctx.func = func.clone();
@@ -1186,7 +1173,7 @@ impl Native {
                                                     |e| e.to_string(),
                                                 );
                                         why.truncate(why.floor_char_boundary(400));
-                                        Done::Failed { id, why }
+                                        failed(why)
                                     }
                                 }
                             }
@@ -1197,44 +1184,140 @@ impl Native {
                     }
                 });
             }
-            drop(tx);
-            for done in rx {
-                match done {
-                    Done::Code {
-                        id,
-                        align,
-                        bytes,
-                        relocs,
-                        size,
-                    } => {
-                        module
-                            .define_function_bytes(id, align, &bytes, &relocs)
-                            .map_err(|e| format!("{}: {e:?}", bodies[&id].0))?;
-                        code_sizes.push((id, size));
-                    }
-                    Done::Failed { id, why: e } => {
-                        let (name, func) = &bodies[&id];
-                        let why = rt::stop_reason(format!("{name}, not compiled: {e}"));
-                        unsupported.push((name.clone(), e));
-                        module.clear_context(&mut ctx);
-                        ctx.func.signature = func.signature.clone();
-                        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-                        let e = b.create_block();
-                        b.append_block_params_for_function_params(e);
-                        b.switch_to_block(e);
-                        b.seal_block(e);
-                        say_and_trap(&mut b, why);
-                        b.finalize(module.target_config());
-                        module
-                            .define_function(id, &mut ctx)
-                            .map_err(|e| format!("{name} (stand-in): {e:?}"))?;
-                        code_sizes.push((
+            drop(done_tx);
+            // A compiled method into the module (or its stand-in).
+            macro_rules! define {
+                ($done:expr) => {
+                    match $done {
+                        Done::Code {
                             id,
-                            ctx.compiled_code().map_or(0, |c| c.code_info().total_size),
-                        ));
-                        module.clear_context(&mut ctx);
+                            name,
+                            align,
+                            bytes,
+                            relocs,
+                            size,
+                        } => {
+                            module
+                                .define_function_bytes(id, align, &bytes, &relocs)
+                                .map_err(|e| format!("{name}: {e:?}"))?;
+                            code_sizes.push((id, size));
+                        }
+                        Done::Failed {
+                            id,
+                            name,
+                            signature,
+                            why: e,
+                        } => {
+                            let why = rt::stop_reason(format!("{name}, not compiled: {e}"));
+                            unsupported.push((name.clone(), e));
+                            module.clear_context(&mut ctx);
+                            ctx.func.signature = signature;
+                            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                            let e = b.create_block();
+                            b.append_block_params_for_function_params(e);
+                            b.switch_to_block(e);
+                            b.seal_block(e);
+                            say_and_trap(&mut b, why);
+                            b.finalize(module.target_config());
+                            module
+                                .define_function(id, &mut ctx)
+                                .map_err(|e| format!("{name} (stand-in): {e:?}"))?;
+                            code_sizes.push((
+                                id,
+                                ctx.compiled_code().map_or(0, |c| c.code_info().total_size),
+                            ));
+                            module.clear_context(&mut ctx);
+                        }
+                    }
+                };
+            }
+            // A body to the workers, and the code that is ready meanwhile.
+            macro_rules! submit {
+                ($item:expr) => {
+                    work_tx.send($item).map_err(|_| "the compile workers stopped")?;
+                    while let Ok(done) = done_rx.try_recv() {
+                        define!(done);
+                    }
+                };
+            }
+            for id in std::mem::take(&mut first_inlinable) {
+                let (name, f) = &inlinable[&id];
+                submit!((id, name.clone(), f.clone()));
+            }
+            for item in std::mem::take(&mut first) {
+                submit!(item);
+            }
+            for c in classes {
+                let owner = c.name().map_err(|e| e.to_string())?;
+                for m in c.methods.iter().filter(|m| !small(m)) {
+                    if let Some(item) = build_method!(owner, c, m) {
+                        submit!(item);
                     }
                 }
+            }
+            types.catches = world.catches.borrow().clone();
+            phase("method bodies built");
+            // The bits of the classes the code tests against, now all known.
+            let tested = world.tested.borrow().clone();
+            let words = tested.len().div_ceil(64).max(1);
+            for id in 0..types.bit_table.len() {
+                let mut bits = vec![0u64; words].into_boxed_slice();
+                for (&target, &k) in &tested {
+                    if types
+                        .ancestors
+                        .get(id)
+                        .is_some_and(|a| a.binary_search(&target).is_ok())
+                    {
+                        bits[k as usize / 64] |= 1 << (k % 64);
+                    }
+                }
+                types.bit_table[id] = bits.as_ptr() as u64;
+                types.bits.push(bits);
+            }
+            // The lambdas' bridges: captured values and the interface method's
+            // arguments to the target.
+            for (i, l) in lambdas.iter().enumerate() {
+                let Some(id) = bridges[i] else { continue };
+                ctx.func.signature = signature(&module, true, &l.sam).expect("declared");
+                let r = {
+                    let b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                    bridge(&world, l, b, &mut module)
+                };
+                if trace {
+                    eprintln!(
+                        "bridge {i} ({}.{}): {:?}, entry {:?}",
+                        l.owner,
+                        l.target,
+                        r.as_ref().err(),
+                        ctx.func.layout.entry_block()
+                    );
+                }
+                if let Err(e) = r {
+                    ctx.func.clear();
+                    // The failed builder left its context half used.
+                    fctx = FunctionBuilderContext::new();
+                    let why = rt::stop_reason(format!(
+                        "lambda {i} -> {}.{}, not compiled: {e}",
+                        l.owner, l.target
+                    ));
+                    unsupported.push((format!("lambda {i} -> {}.{}", l.owner, l.target), e));
+                    ctx.func.signature = signature(&module, true, &l.sam).expect("declared");
+                    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                    let e = b.create_block();
+                    b.append_block_params_for_function_params(e);
+                    b.switch_to_block(e);
+                    b.seal_block(e);
+                    say_and_trap(&mut b, why);
+                    b.finalize(module.target_config());
+                }
+                let f = ctx.func.clone();
+                module.clear_context(&mut ctx);
+                submit!((id, format!("lambda {i}"), f));
+            }
+            phase("lambda bridges");
+            drop(work_tx);
+            for done in done_rx {
+                define!(done);
             }
             Ok(())
         })?;
@@ -1841,6 +1924,9 @@ struct Inliner<'a> {
 }
 
 const INLINE: usize = 40;
+/// Methods with at most this much bytecode are built first and kept, as
+/// callees to inline (one within `INLINE` instructions once built).
+const SMALL_BYTECODE: usize = 80;
 
 impl cranelift_codegen::inline::Inline for Inliner<'_> {
     fn inline(
