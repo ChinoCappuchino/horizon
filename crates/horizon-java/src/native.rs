@@ -1888,6 +1888,15 @@ impl World<'_> {
         answer
     }
 
+    /// Whether `class`'s own method `name desc` is static.
+    fn is_static(&self, class: &str, name: &str, desc: &str) -> bool {
+        self.by_name.get(class).is_some_and(|cf| {
+            cf.methods
+                .iter()
+                .any(|m| m.name == name && m.descriptor == desc && m.access & STATIC != 0)
+        })
+    }
+
     fn resolve(&self, owner: &str, name: &str, desc: &str) -> Option<String> {
         let mut x = Some(owner.to_owned());
         while let Some(c) = x {
@@ -2057,6 +2066,7 @@ fn call_virtual(
             w.by_name
                 .get(c.as_str())
                 .is_some_and(|cf| cf.access & INTERFACE == 0)
+                && !w.is_static(c, name, desc)
         });
     let call = match (direct, w.selectors.get(&key)) {
         (Some(declaring), _) => {
@@ -4484,6 +4494,13 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         }
                     }
                 };
+                // Classes compiled against another version of their parent
+                // (a method of it made static, or not): the JVM's
+                // IncompatibleClassChangeError.
+                if self.w.is_static(&declaring, &name, &desc) != (op == 0xB8) {
+                    self.stop(format!("call to {owner}.{name}{desc}, static in one class and not the other"));
+                    return Ok(true);
+                }
                 if op == 0xB8 {
                     self.init(&declaring);
                 } else {
@@ -4522,6 +4539,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                             .by_name
                             .get(c.as_str())
                             .is_some_and(|cf| cf.access & INTERFACE == 0)
+                            && !self.w.is_static(c, &name, &desc)
                     });
                 match (direct, self.w.selectors.get(&key)) {
                     (Some(declaring), _) => {
