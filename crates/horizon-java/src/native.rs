@@ -344,6 +344,34 @@ impl Native {
         let hierarchy = Classes::new(classes);
         let mut names: Vec<&str> = by_name.keys().copied().collect();
         names.sort_unstable();
+        // Class ids in preorder of the superclass tree: a class's subclasses
+        // follow it, so the classes that respond to a method are a few runs
+        // of ids, which the dispatch table packs closely and quickly.
+        names = {
+            let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+            let mut roots = Vec::new();
+            for &n in &names {
+                match by_name[n].super_name().ok().flatten().filter(|s| by_name.contains_key(s)) {
+                    Some(s) => children.entry(s).or_default().push(n),
+                    None => roots.push(n),
+                }
+            }
+            let mut out = Vec::with_capacity(names.len());
+            let mut seen: HashSet<&str> = HashSet::new();
+            let mut stack: Vec<&str> = roots.into_iter().rev().collect();
+            while let Some(n) = stack.pop() {
+                if !seen.insert(n) {
+                    continue;
+                }
+                out.push(n);
+                if let Some(c) = children.get(n) {
+                    stack.extend(c.iter().rev());
+                }
+            }
+            // (A class in a superclass cycle, which no valid program has.)
+            out.extend(names.iter().filter(|n| !seen.contains(*n)));
+            out
+        };
         let mut ids: HashMap<&str, u32> = names
             .iter()
             .enumerate()
@@ -351,7 +379,16 @@ impl Native {
             .collect();
         let superclass = |c: &str| -> Option<&str> { by_name.get(c)?.super_name().ok().flatten() };
 
+        // HORIZON_NATIVE_TIMES=1: how long each phase takes.
+        let started = std::time::Instant::now();
+        let timed = std::env::var_os("HORIZON_NATIVE_TIMES").is_some();
+        let phase = |what: &str| {
+            if timed {
+                eprintln!("{:8.1} s  {what}", started.elapsed().as_secs_f64());
+            }
+        };
         let (lambdas, lambda_at, called, created) = prepass(classes);
+        phase("prepass");
         // The built-in classes (rt.rs), and the JDK's exception classes (all
         // with Throwable's fields), unless the program has its own.
         let mut builtin_list = rt::builtins();
@@ -369,6 +406,7 @@ impl Native {
         builtin_list.retain(|b| !by_name.contains_key(b.name));
         let builtin: HashMap<&'static str, &rt::Builtin> =
             builtin_list.iter().map(|b| (b.name, b)).collect();
+        phase("built-ins");
         // Virtual selectors: every instance method that dispatches, every
         // method called virtually, every lambda's interface method.
         let mut selectors: BTreeMap<(String, String), usize> = BTreeMap::new();
@@ -427,6 +465,7 @@ impl Native {
         let builtin_size: HashMap<&str, i32> =
             builtin_list.iter().map(|b| (b.name, b.size)).collect();
 
+        phase("selectors and implementations");
         // Layouts.
         let mut layouts: HashMap<String, Layout> = HashMap::new();
         let mut vtables: Vec<Vec<u64>> = Vec::new();
@@ -520,6 +559,7 @@ impl Native {
             );
         }
         let builtins: Vec<&str> = builtin_list.iter().map(|b| b.name).collect();
+        phase("layouts");
         // Ancestors by name, for catch clauses.
         let mut names_of: Vec<HashSet<String>> =
             vec![HashSet::new(); builtin_base + builtins.len()];
@@ -561,6 +601,7 @@ impl Native {
         }
         let names_by_id = names_of.clone();
 
+        phase("ancestors");
         // The global dispatch table (row displacement): selector `s` of a
         // class with id `c` is entry `c + offsets[s]`, two words: its method
         // and `s + 1` (so the runtime can tell an entry is that selector's).
@@ -624,16 +665,29 @@ impl Native {
         for s in order {
             let cids = &by_selector[s];
             let Some(&lowest) = cids.first() else { continue };
-            let mut offset = first_free as i64 - i64::from(lowest);
-            loop {
+            // (Ids ascend, so `lowest` is the first: only offsets that put
+            // it on a free slot are tried. After a few misses the selector
+            // goes past the end, where everything is free: the table is a
+            // little larger, and placing stays linear.)
+            let mut p = first_free;
+            let mut tries = 0;
+            let offset = loop {
+                while taken.get(p) == Some(&true) {
+                    p += 1;
+                }
+                let offset = p as i64 - i64::from(lowest);
+                if tries == 2000 {
+                    break taken.len().max(p) as i64 - i64::from(lowest);
+                }
                 if cids
                     .iter()
                     .all(|&c| taken.get((i64::from(c) + offset) as usize) != Some(&true))
                 {
-                    break;
+                    break offset;
                 }
-                offset += 1;
-            }
+                tries += 1;
+                p += 1;
+            };
             for &c in cids {
                 let at = (i64::from(c) + offset) as usize;
                 if at >= taken.len() {
@@ -658,6 +712,7 @@ impl Native {
                 taken.len() * 16 >> 20
             );
         }
+        phase("dispatch table placed");
         // The type tables the compiled code tests against (their address
         // is baked into it).
         let mut types = Box::new(TypeTables {
@@ -746,6 +801,7 @@ impl Native {
         // context (this one's made at the end).
         let heap = Box::new(heap::Heap::reserve(heap::RESERVE));
 
+        phase("type tables, statics");
         // Declare every method.
         let mut funcs: HashMap<String, FuncId> = HashMap::new();
         let mut sigs: HashMap<String, Signature> = HashMap::new();
@@ -831,6 +887,7 @@ impl Native {
         for b in &builtins {
             class_names[ids[b] as usize] = (*b).to_owned();
         }
+        phase("methods declared, init functions");
         // A Class object for each class: [Class vtable][id][its name].
         let string_vt = layouts["java/lang/String"].vtable as u64;
         let class_vt = layouts["java/lang/Class"].vtable as u64;
@@ -846,7 +903,53 @@ impl Native {
             class_boxes.push(s);
             class_boxes.push(c);
         }
+        // Who declares what, found once: the questions below are asked for
+        // every call site, and scanning every class each time made the
+        // compile grow with the square of the program.
+        let index = {
+            let mut with_code: HashMap<&str, HashSet<(&str, &str)>> = HashMap::new();
+            let mut declarers: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
+            for (&class, cf) in &by_name {
+                for m in &cf.methods {
+                    let key = (m.name.as_str(), m.descriptor.as_str());
+                    if m.code().is_some() {
+                        with_code.entry(class).or_default().insert(key);
+                    }
+                    if m.access & ABSTRACT == 0 {
+                        declarers.entry(key).or_default().push(class);
+                    }
+                }
+            }
+            let library = builtin
+                .values()
+                .flat_map(|b| b.methods.iter().filter(|m| !m.is_static).map(|m| (m.name, m.desc)))
+                .collect();
+            let mut under: HashMap<&str, Vec<(&str, usize)>> = HashMap::new();
+            for (c, &n) in &created {
+                let Some(cf) = by_name.get(c.as_str()) else {
+                    continue;
+                };
+                if cf.access & (INTERFACE | ABSTRACT) != 0 {
+                    continue;
+                }
+                let mut x = Some(c.as_str());
+                while let Some(a) = x {
+                    let Some(acf) = by_name.get(a) else {
+                        break;
+                    };
+                    under.entry(a).or_default().push((c.as_str(), n));
+                    x = acf.super_name().ok().flatten();
+                }
+            }
+            MethodIndex {
+                with_code,
+                declarers,
+                library,
+                under,
+            }
+        };
         let world = World {
+            index: &index,
             by_name: &by_name,
             ids: &ids,
             layouts: &layouts,
@@ -881,7 +984,6 @@ impl Native {
             other_classes: std::cell::RefCell::new(Vec::new()),
             stops: std::cell::RefCell::new(HashMap::new()),
             nothrow: std::cell::RefCell::new(HashMap::new()),
-            created: &created,
             guards: std::cell::RefCell::new(HashMap::new()),
         };
         let mut unsupported = Vec::new();
@@ -920,6 +1022,7 @@ impl Native {
             }
         }
         types.catches = world.catches.borrow().clone();
+        phase("method bodies built");
         // The bits of the classes the code tests against, now all known.
         let tested = world.tested.borrow().clone();
         let words = tested.len().div_ceil(64).max(1);
@@ -976,6 +1079,7 @@ impl Native {
             bodies.insert(id, (format!("lambda {i}"), ctx.func.clone()));
             module.clear_context(&mut ctx);
         }
+        phase("lambda bridges");
         // Small methods inlined into their callers, then every method defined.
         let sizes: HashMap<FuncId, usize> = bodies
             .iter()
@@ -1139,6 +1243,7 @@ impl Native {
             }
             Ok(())
         })?;
+        phase("methods compiled");
         // The init functions.
         for (class, &id) in &inits {
             ctx.func.signature.params = vec![AbiParam::new(types::I64)];
@@ -1818,7 +1923,21 @@ fn raw_signature(module: &JITModule, instance: bool, desc: &str) -> Option<Signa
 }
 
 /// What every method's code generation reads.
+/// Who declares which method (see `Native::compile`).
+struct MethodIndex<'a> {
+    /// Each class's methods with code, by name and descriptor.
+    with_code: HashMap<&'a str, HashSet<(&'a str, &'a str)>>,
+    /// The classes declaring a method that is not abstract.
+    declarers: HashMap<(&'a str, &'a str), Vec<&'a str>>,
+    /// The runtime library's instance methods.
+    library: HashSet<(&'static str, &'static str)>,
+    /// Each class's concrete classes with `new` sites (itself and its
+    /// subclasses), and how many sites.
+    under: HashMap<&'a str, Vec<(&'a str, usize)>>,
+}
+
 struct World<'a> {
+    index: &'a MethodIndex<'a>,
     by_name: &'a HashMap<&'a str, &'a ClassFile>,
     ids: &'a HashMap<&'a str, u32>,
     layouts: &'a HashMap<String, Layout>,
@@ -1870,7 +1989,6 @@ struct World<'a> {
     /// Methods that cannot throw (`World::cannot_throw`), by export name.
     nothrow: std::cell::RefCell<HashMap<String, bool>>,
     /// How many places create each class.
-    created: &'a HashMap<String, usize>,
     /// The implementations a virtual call tries first (`World::guards`).
     guards: std::cell::RefCell<HashMap<(String, String), Vec<String>>>,
 }
@@ -1979,28 +2097,26 @@ impl World<'_> {
         if let Some(g) = self.guards.borrow().get(&key) {
             return g.clone();
         }
+        // Each instance method with code of that name, weighted by the
+        // `new` sites of the classes that reach it.
         let mut weight: HashMap<String, usize> = HashMap::new();
-        for (class, &n) in self.created {
-            let Some(cf) = self.by_name.get(class.as_str()) else {
-                continue;
-            };
-            if cf.access & (INTERFACE | ABSTRACT) != 0 {
+        let declarers = self.index.declarers.get(&(name, desc)).map_or(&[][..], |v| v);
+        for &d in declarers {
+            let instance = self.by_name.get(d).is_some_and(|cf| {
+                cf.methods.iter().any(|m| {
+                    m.name == name
+                        && m.descriptor == desc
+                        && m.access & (STATIC | ABSTRACT) == 0
+                        && m.code().is_some()
+                })
+            });
+            if !instance || !self.funcs.contains_key(&export_name(d, name, desc)) {
                 continue;
             }
-            // An instance method with code (not a static one of that name).
-            if let Some(declaring) = self.resolve(class, name, desc)
-                && self
-                    .funcs
-                    .contains_key(&export_name(&declaring, name, desc))
-                && self.by_name.get(declaring.as_str()).is_some_and(|d| {
-                    d.methods.iter().any(|m| {
-                        m.name == name
-                            && m.descriptor == desc
-                            && m.access & (STATIC | ABSTRACT) == 0
-                    })
-                })
-            {
-                *weight.entry(declaring).or_default() += n;
+            for &(c, n) in self.index.under.get(d).map_or(&[][..], |v| v) {
+                if self.resolve(c, name, desc).as_deref() == Some(d) {
+                    *weight.entry(d.to_owned()).or_default() += n;
+                }
             }
         }
         let mut ranked: Vec<(String, usize)> = weight.into_iter().collect();
@@ -2021,18 +2137,13 @@ impl World<'_> {
         if let Some(&known) = self.nothrow.borrow().get(&key) {
             return known;
         }
-        let in_library = self.builtin.values().any(|b| {
-            b.methods
-                .iter()
-                .any(|m| !m.is_static && m.name == name && m.desc == desc)
-        });
+        let in_library = self.index.library.contains(&(name, desc));
         let answer = !in_library
-            && self.by_name.iter().all(|(class, cf)| {
-                cf.methods
-                    .iter()
-                    .filter(|m| m.name == name && m.descriptor == desc && m.access & ABSTRACT == 0)
-                    .all(|_| self.cannot_throw(class, name, desc))
-            });
+            && self
+                .index
+                .declarers
+                .get(&(name, desc))
+                .is_none_or(|v| v.iter().all(|class| self.cannot_throw(class, name, desc)));
         self.nothrow.borrow_mut().insert(key, answer);
         answer
     }
@@ -2047,17 +2158,18 @@ impl World<'_> {
     }
 
     fn resolve(&self, owner: &str, name: &str, desc: &str) -> Option<String> {
-        let mut x = Some(owner.to_owned());
+        let mut x = Some(owner);
         while let Some(c) = x {
-            let cf = self.by_name.get(c.as_str())?;
-            if cf
-                .methods
-                .iter()
-                .any(|m| m.name == name && m.descriptor == desc && m.code().is_some())
+            let cf = self.by_name.get(c)?;
+            if self
+                .index
+                .with_code
+                .get(c)
+                .is_some_and(|m| m.contains(&(name, desc)))
             {
-                return Some(c);
+                return Some(c.to_owned());
             }
-            x = cf.super_name().ok().flatten().map(str::to_owned);
+            x = cf.super_name().ok().flatten();
         }
         None
     }
