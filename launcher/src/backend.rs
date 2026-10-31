@@ -3962,11 +3962,9 @@ mod tests {
             Some("v2026.10.13".into())
         );
         assert!(is_prepared("v2026.10.13.1"));
-        assert!(
-            resources_at(&versions.join("v2026.10.13.1"))
-                .join("worldgen/biomes.json")
-                .exists()
-        );
+        assert!(resources_at(&versions.join("v2026.10.13.1"))
+            .join("worldgen/biomes.json")
+            .exists());
         let left: Vec<_> = fs::read_dir(versions.join("v2026.10.13.1/.local/horizon-client"))
             .unwrap()
             .flatten()
@@ -4311,11 +4309,9 @@ mod tests {
                 "v0.2.2: The sounds",
             ]
         );
-        assert!(
-            resources_at(&versions.join("v0.2.2"))
-                .join(RESOURCES_MANIFEST)
-                .exists()
-        );
+        assert!(resources_at(&versions.join("v0.2.2"))
+            .join(RESOURCES_MANIFEST)
+            .exists());
         assert_eq!(
             asset("v0.2.2", &format!("{background}/panorama_0.png")).as_deref(),
             Some(&placeholder[..])

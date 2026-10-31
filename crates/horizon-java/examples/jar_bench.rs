@@ -434,7 +434,9 @@ fn with_jdk(classes: &mut Vec<ClassFile>, dir: &Path) -> Result<()> {
         .into_iter()
         .filter_map(|c| Some((c.name().ok()?.to_owned(), c)))
         .collect();
-    let runtime: HashSet<&str> = horizon_java::native::runtime_classes().into_iter().collect();
+    let runtime: HashSet<&str> = horizon_java::native::runtime_classes()
+        .into_iter()
+        .collect();
     let refs = |c: &ClassFile| -> Vec<String> {
         c.constants
             .iter()
@@ -473,7 +475,11 @@ fn with_jdk(classes: &mut Vec<ClassFile>, dir: &Path) -> Result<()> {
     let mut taken: HashSet<String> = HashSet::new();
     let mut refused: HashSet<String> = HashSet::new();
     while let Some(n) = todo.pop() {
-        if have.contains(&n) || runtime.contains(n.as_str()) || taken.contains(&n) || refused.contains(&n) {
+        if have.contains(&n)
+            || runtime.contains(n.as_str())
+            || taken.contains(&n)
+            || refused.contains(&n)
+        {
             continue;
         }
         if !pool.contains_key(&n) {
@@ -538,7 +544,10 @@ fn native_main(classes: &[ClassFile], args: &[String]) -> Result<()> {
     if let Some(e) = horizon_java::rt::take_exception() {
         eprintln!("main threw {e}");
     }
-    eprintln!("main returned after {:.1} s", started.elapsed().as_secs_f64());
+    eprintln!(
+        "main returned after {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
     let secs: u64 = std::env::var("HORIZON_RUN_SECONDS")
         .ok()
         .and_then(|s| s.parse().ok())

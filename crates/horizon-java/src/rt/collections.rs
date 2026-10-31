@@ -1474,13 +1474,25 @@ locked!(chm_equals, hm_equals, (o: u64) -> i32);
 locked!(chm_put_inner, hm_put_c, (k: u64, v: u64) -> u64);
 locked!(chm_put_if_absent_inner, hm_put_if_absent, (k: u64, v: u64) -> u64);
 extern "C" fn chm_put(m: u64, k: u64, v: u64) -> u64 {
-    if no_nulls(k, v) { chm_put_inner(m, k, v) } else { 0 }
+    if no_nulls(k, v) {
+        chm_put_inner(m, k, v)
+    } else {
+        0
+    }
 }
 extern "C" fn chm_put_if_absent(m: u64, k: u64, v: u64) -> u64 {
-    if no_nulls(k, v) { chm_put_if_absent_inner(m, k, v) } else { 0 }
+    if no_nulls(k, v) {
+        chm_put_if_absent_inner(m, k, v)
+    } else {
+        0
+    }
 }
 extern "C" fn chm_merge(m: u64, k: u64, v: u64, f: u64) -> u64 {
-    if no_nulls(k, v) { chm_merge_inner(m, k, v, f) } else { 0 }
+    if no_nulls(k, v) {
+        chm_merge_inner(m, k, v, f)
+    } else {
+        0
+    }
 }
 extern "C" fn chm_init_cap_load(m: u64, cap: i32, _load: f32) {
     hm_init_cap(m, cap);
@@ -1531,10 +1543,18 @@ pub(super) fn concurrent_builtins() -> Vec<Builtin> {
             m("get", "(Ljava/lang/Object;)Ljava/lang/Object;", f!(chm_get)),
             m("getOrDefault", O2, f!(chm_get_or_default)),
             m("containsKey", "(Ljava/lang/Object;)Z", f!(chm_contains_key)),
-            m("containsValue", "(Ljava/lang/Object;)Z", f!(chm_contains_value)),
+            m(
+                "containsValue",
+                "(Ljava/lang/Object;)Z",
+                f!(chm_contains_value),
+            ),
             m("put", O2, f!(chm_put)),
             m("putIfAbsent", O2, f!(chm_put_if_absent)),
-            m("remove", "(Ljava/lang/Object;)Ljava/lang/Object;", f!(chm_remove)),
+            m(
+                "remove",
+                "(Ljava/lang/Object;)Ljava/lang/Object;",
+                f!(chm_remove),
+            ),
             m("size", "()I", f!(chm_size)),
             m("mappingCount", "()J", f!(chm_mapping_count)),
             m("isEmpty", "()Z", f!(chm_is_empty)),
@@ -1554,7 +1574,11 @@ pub(super) fn concurrent_builtins() -> Vec<Builtin> {
                 "(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;",
                 f!(chm_merge),
             ),
-            m("forEach", "(Ljava/util/function/BiConsumer;)V", f!(chm_for_each)),
+            m(
+                "forEach",
+                "(Ljava/util/function/BiConsumer;)V",
+                f!(chm_for_each),
+            ),
             m("keySet", "()Ljava/util/Set;", f!(hm_key_set)),
             m("values", "()Ljava/util/Collection;", f!(hm_values)),
             m("entrySet", "()Ljava/util/Set;", f!(hm_entry_set)),
@@ -2429,7 +2453,10 @@ fn range_ok(a: u64, from: i32, to: i32) -> bool {
     } else if from < 0 || to as usize > len(a) {
         throw(
             "java/lang/ArrayIndexOutOfBoundsException",
-            Some(&format!("Array index out of range: {}", if from < 0 { from } else { to })),
+            Some(&format!(
+                "Array index out of range: {}",
+                if from < 0 { from } else { to }
+            )),
         );
         false
     } else {
@@ -2542,21 +2569,48 @@ macro_rules! array_kind {
                 return 0;
             }
             (0..len(a)).fold(1i32, |h, i| {
-                h.wrapping_mul(31).wrapping_add(($elem_hash)(prim::<$t>(a, i)))
+                h.wrapping_mul(31)
+                    .wrapping_add(($elem_hash)(prim::<$t>(a, i)))
             })
         }
     };
 }
 // (The narrow kinds come in as ints; elements are read at their own width.)
-array_kind!(arrays_fill_long, arrays_fill_long_range, arrays_hash_long, i64,
-    |v: i64| v as u64, |v: i64| (v ^ ((v as u64) >> 32) as i64) as i32);
-array_kind!(arrays_fill_double, arrays_fill_double_range, arrays_hash_double, f64,
-    |v: f64| v.to_bits(), |v: f64| {
-        let b = if v.is_nan() { 0x7ff8_0000_0000_0000u64 } else { v.to_bits() };
+array_kind!(
+    arrays_fill_long,
+    arrays_fill_long_range,
+    arrays_hash_long,
+    i64,
+    |v: i64| v as u64,
+    |v: i64| (v ^ ((v as u64) >> 32) as i64) as i32
+);
+array_kind!(
+    arrays_fill_double,
+    arrays_fill_double_range,
+    arrays_hash_double,
+    f64,
+    |v: f64| v.to_bits(),
+    |v: f64| {
+        let b = if v.is_nan() {
+            0x7ff8_0000_0000_0000u64
+        } else {
+            v.to_bits()
+        };
         (b ^ (b >> 32)) as i32
-    });
-array_kind!(arrays_fill_float, arrays_fill_float_range, arrays_hash_float, f32,
-    |v: f32| u64::from(v.to_bits()), |v: f32| if v.is_nan() { 0x7fc0_0000 } else { v.to_bits() as i32 });
+    }
+);
+array_kind!(
+    arrays_fill_float,
+    arrays_fill_float_range,
+    arrays_hash_float,
+    f32,
+    |v: f32| u64::from(v.to_bits()),
+    |v: f32| if v.is_nan() {
+        0x7fc0_0000
+    } else {
+        v.to_bits() as i32
+    }
+);
 extern "C" fn arrays_fill_narrow(a: u64, v: i32) {
     if a == 0 {
         npe();
@@ -2743,7 +2797,10 @@ fn assignable(a: &str, b: &str) -> bool {
         return false;
     }
     if let Some(cb) = b.strip_prefix('[') {
-        if matches!(a, "java/lang/Object" | "java/lang/Cloneable" | "java/io/Serializable") {
+        if matches!(
+            a,
+            "java/lang/Object" | "java/lang/Cloneable" | "java/io/Serializable"
+        ) {
             return true;
         }
         let Some(ca) = a.strip_prefix('[') else {
@@ -2780,7 +2837,10 @@ fn class_named(name: &str) -> u64 {
         return c;
     }
     static MADE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-    let mut made = MADE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let mut made = MADE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
     *made.entry(name.to_owned()).or_insert_with(|| {
         let c = alloc(24, vt("java/lang/Class"));
         set(c, 16, str_of(&name.replace('/', ".")));
@@ -2829,7 +2889,11 @@ extern "C" fn class_get_superclass(c: u64) -> u64 {
     if id == 0 {
         // An array's superclass is Object; other classes outside the
         // program are not known here.
-        return if class_is_array(c) != 0 { class_named("java/lang/Object") } else { 0 };
+        return if class_is_array(c) != 0 {
+            class_named("java/lang/Object")
+        } else {
+            0
+        };
     }
     if r.interfaces.get(id) == Some(&true) {
         return 0;
@@ -4101,7 +4165,11 @@ pub fn builtins() -> Vec<Builtin> {
                 s("copyOf", "([SI)[S", f!(arrays_copy_of)),
                 s("copyOf", "([CI)[C", f!(arrays_copy_of)),
                 s("copyOf", "([ZI)[Z", f!(arrays_copy_of)),
-                s("copyOfRange", "([Ljava/lang/Object;II)[Ljava/lang/Object;", f!(arrays_copy_of_range)),
+                s(
+                    "copyOfRange",
+                    "([Ljava/lang/Object;II)[Ljava/lang/Object;",
+                    f!(arrays_copy_of_range),
+                ),
                 s("copyOfRange", "([III)[I", f!(arrays_copy_of_range)),
                 s("copyOfRange", "([JII)[J", f!(arrays_copy_of_range)),
                 s("copyOfRange", "([DII)[D", f!(arrays_copy_of_range)),
@@ -4132,7 +4200,11 @@ pub fn builtins() -> Vec<Builtin> {
                 s("fill", "([SIIS)V", f!(arrays_fill_narrow_range)),
                 s("fill", "([CIIC)V", f!(arrays_fill_narrow_range)),
                 s("fill", "([ZIIZ)V", f!(arrays_fill_narrow_range)),
-                s("fill", "([Ljava/lang/Object;IILjava/lang/Object;)V", f!(arrays_fill_objects_range)),
+                s(
+                    "fill",
+                    "([Ljava/lang/Object;IILjava/lang/Object;)V",
+                    f!(arrays_fill_objects_range),
+                ),
                 s("hashCode", "([J)I", f!(arrays_hash_long)),
                 s("hashCode", "([D)I", f!(arrays_hash_double)),
                 s("hashCode", "([F)I", f!(arrays_hash_float)),
@@ -4192,15 +4264,35 @@ pub fn builtins() -> Vec<Builtin> {
                 m("toString", "()Ljava/lang/String;", f!(class_to_string)),
                 m("desiredAssertionStatus", "()Z", f!(class_assertions)),
                 m("isInstance", "(Ljava/lang/Object;)Z", f!(class_is_instance)),
-                m("isAssignableFrom", "(Ljava/lang/Class;)Z", f!(class_is_assignable_from)),
+                m(
+                    "isAssignableFrom",
+                    "(Ljava/lang/Class;)Z",
+                    f!(class_is_assignable_from),
+                ),
                 m("isArray", "()Z", f!(class_is_array)),
                 m("isPrimitive", "()Z", f!(class_is_primitive)),
                 m("isInterface", "()Z", f!(class_is_interface)),
                 m("isEnum", "()Z", f!(class_is_enum)),
-                m("getComponentType", "()Ljava/lang/Class;", f!(class_get_component_type)),
-                m("componentType", "()Ljava/lang/Class;", f!(class_get_component_type)),
-                m("getSuperclass", "()Ljava/lang/Class;", f!(class_get_superclass)),
-                s("forName", "(Ljava/lang/String;)Ljava/lang/Class;", f!(class_for_name)),
+                m(
+                    "getComponentType",
+                    "()Ljava/lang/Class;",
+                    f!(class_get_component_type),
+                ),
+                m(
+                    "componentType",
+                    "()Ljava/lang/Class;",
+                    f!(class_get_component_type),
+                ),
+                m(
+                    "getSuperclass",
+                    "()Ljava/lang/Class;",
+                    f!(class_get_superclass),
+                ),
+                s(
+                    "forName",
+                    "(Ljava/lang/String;)Ljava/lang/Class;",
+                    f!(class_for_name),
+                ),
                 s(
                     "forName",
                     "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;",

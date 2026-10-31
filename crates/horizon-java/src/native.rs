@@ -363,7 +363,12 @@ impl Native {
             let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
             let mut roots = Vec::new();
             for &n in &names {
-                match by_name[n].super_name().ok().flatten().filter(|s| by_name.contains_key(s)) {
+                match by_name[n]
+                    .super_name()
+                    .ok()
+                    .flatten()
+                    .filter(|s| by_name.contains_key(s))
+                {
                     Some(s) => children.entry(s).or_default().push(n),
                     None => roots.push(n),
                 }
@@ -401,7 +406,10 @@ impl Native {
                     .ok()
                     .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
                     .map_or(0, |pages| pages * 4096 >> 20);
-                eprintln!("{:8.1} s  {rss_mb:6} MB  {what}", started.elapsed().as_secs_f64());
+                eprintln!(
+                    "{:8.1} s  {rss_mb:6} MB  {what}",
+                    started.elapsed().as_secs_f64()
+                );
             }
         };
         let (lambdas, lambda_at, called, created) = prepass(classes);
@@ -650,16 +658,20 @@ impl Native {
         let mut opaque: Vec<bool> = vec![false; responders.len()];
         for (id, ancestors) in names_by_id.iter().enumerate() {
             let mut sels: Vec<usize> = Vec::new();
-            opaque[id] = ancestors
-                .iter()
-                .any(|a| !by_name.contains_key(a.as_str()) && builtin.get(a.as_str()).is_none_or(|b| b.is_interface));
+            opaque[id] = ancestors.iter().any(|a| {
+                !by_name.contains_key(a.as_str())
+                    && builtin.get(a.as_str()).is_none_or(|b| b.is_interface)
+            });
             for a in ancestors {
                 if !declared_by.contains_key(a.as_str()) {
                     declared_by.insert(a.as_str(), declared(a));
                 }
                 sels.extend(&declared_by[a.as_str()]);
             }
-            if let Some(i) = id.checked_sub(names.len() + 1).filter(|&i| i < lambdas.len()) {
+            if let Some(i) = id
+                .checked_sub(names.len() + 1)
+                .filter(|&i| i < lambdas.len())
+            {
                 let l = &lambdas[i];
                 sels.extend(selectors.get(&(l.name.clone(), l.sam.clone())));
             }
@@ -685,7 +697,9 @@ impl Native {
         let mut first_free = 0usize;
         for s in order {
             let cids = &by_selector[s];
-            let Some(&lowest) = cids.first() else { continue };
+            let Some(&lowest) = cids.first() else {
+                continue;
+            };
             // (start relative to the first class, length)
             let mut runs: Vec<(usize, usize)> = Vec::new();
             for &c in cids {
@@ -934,7 +948,12 @@ impl Native {
             }
             let library = builtin
                 .values()
-                .flat_map(|b| b.methods.iter().filter(|m| !m.is_static).map(|m| (m.name, m.desc)))
+                .flat_map(|b| {
+                    b.methods
+                        .iter()
+                        .filter(|m| !m.is_static)
+                        .map(|m| (m.name, m.desc))
+                })
                 .collect();
             let mut under: HashMap<&str, Vec<(&str, usize)>> = HashMap::new();
             for (c, &n) in &created {
@@ -1042,9 +1061,8 @@ impl Native {
         // is built and then dropped: the program's code is never all in
         // memory at once (it was 5 GB of 12 for Create, Sable and NeoForge
         // with Minecraft).
-        let small = |m: &crate::classfile::Member| {
-            m.code().is_some_and(|c| c.code.len() <= SMALL_BYTECODE)
-        };
+        let small =
+            |m: &crate::classfile::Member| m.code().is_some_and(|c| c.code.len() <= SMALL_BYTECODE);
         let mut inlinable: HashMap<FuncId, (String, cranelift_codegen::ir::Function)> =
             HashMap::new();
         let mut sizes: HashMap<FuncId, usize> = HashMap::new();
@@ -1136,8 +1154,8 @@ impl Native {
                                 if clif.as_ref().is_some_and(|f| name.contains(f.as_str())) {
                                     eprintln!("{name}:\n{}", ctx.func.display());
                                 }
-                                let compiled = std::panic::catch_unwind(
-                                    std::panic::AssertUnwindSafe(|| {
+                                let compiled =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         let align = ctx
                                             .compile(isa, &mut Default::default())
                                             .map_err(|e| format!("{:?}", e.inner))?
@@ -1161,8 +1179,7 @@ impl Native {
                                             relocs,
                                             code.code_info().total_size,
                                         ))
-                                    }),
-                                );
+                                    }));
                                 match compiled {
                                     Ok(Ok((align, bytes, relocs, size))) => Done::Code {
                                         id,
@@ -1246,7 +1263,9 @@ impl Native {
             // A body to the workers, and the code that is ready meanwhile.
             macro_rules! submit {
                 ($item:expr) => {
-                    work_tx.send($item).map_err(|_| "the compile workers stopped")?;
+                    work_tx
+                        .send($item)
+                        .map_err(|_| "the compile workers stopped")?;
                     while let Ok(done) = done_rx.try_recv() {
                         define!(done);
                     }
@@ -1670,7 +1689,12 @@ impl Native {
         };
         let supers: Vec<u32> = class_names
             .iter()
-            .map(|n| super_of(n).and_then(|s| class_ids.get(s)).copied().unwrap_or(0))
+            .map(|n| {
+                super_of(n)
+                    .and_then(|s| class_ids.get(s))
+                    .copied()
+                    .unwrap_or(0)
+            })
             .collect();
         let interface_flags: Vec<bool> = class_names
             .iter()
@@ -2259,7 +2283,11 @@ impl World<'_> {
         // Each instance method with code of that name, weighted by the
         // `new` sites of the classes that reach it.
         let mut weight: HashMap<String, usize> = HashMap::new();
-        let declarers = self.index.declarers.get(&(name, desc)).map_or(&[][..], |v| v);
+        let declarers = self
+            .index
+            .declarers
+            .get(&(name, desc))
+            .map_or(&[][..], |v| v);
         for &d in declarers {
             let instance = self.by_name.get(d).is_some_and(|cf| {
                 cf.methods.iter().any(|m| {
@@ -2389,7 +2417,9 @@ fn dispatch_entry(b: &mut FunctionBuilder<'_>, w: &World<'_>, obj: Value, sel: u
     let vt = b.ins().load(types::I64, MemFlagsData::trusted(), obj, 0);
     let class_id = b.ins().load(types::I64, MemFlagsData::trusted(), vt, 0);
     let slot = b.ins().imul_imm_s(class_id, 16);
-    let row = b.ins().iconst(types::I64, w.dispatch_at + 16 * w.offsets[sel]);
+    let row = b
+        .ins()
+        .iconst(types::I64, w.dispatch_at + 16 * w.offsets[sel]);
     b.ins().iadd(row, slot)
 }
 
@@ -4918,7 +4948,9 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                 // (a method of it made static, or not): the JVM's
                 // IncompatibleClassChangeError.
                 if self.w.is_static(&declaring, &name, &desc) != (op == 0xB8) {
-                    self.stop(format!("call to {owner}.{name}{desc}, static in one class and not the other"));
+                    self.stop(format!(
+                        "call to {owner}.{name}{desc}, static in one class and not the other"
+                    ));
                     return Ok(true);
                 }
                 if op == 0xB8 {
@@ -4978,14 +5010,22 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                         // the entry is the method's when tagged with it.
                         let fp = match self.w.responds(&owner, sel) {
                             Some(false) => {
-                                self.stop(format!("virtual call to {owner}.{name}{desc}, outside the program"));
+                                self.stop(format!(
+                                    "virtual call to {owner}.{name}{desc}, outside the program"
+                                ));
                                 return Ok(true);
                             }
                             Some(true) => dispatch_fp(&mut self.b, self.w, args[0], sel),
                             None => {
                                 let at = dispatch_entry(&mut self.b, self.w, args[0], sel);
-                                let tag = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 8);
-                                let bad = self.b.ins().icmp_imm_s(IntCC::NotEqual, tag, sel as i64 + 1);
+                                let tag =
+                                    self.b
+                                        .ins()
+                                        .load(types::I64, MemFlagsData::trusted(), at, 8);
+                                let bad =
+                                    self.b
+                                        .ins()
+                                        .icmp_imm_s(IntCC::NotEqual, tag, sel as i64 + 1);
                                 let stop = self.b.create_block();
                                 let on = self.b.create_block();
                                 self.b.set_cold_block(stop);
@@ -4993,7 +5033,9 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                                 self.b.switch_to_block(stop);
                                 self.trap_with(format!("virtual call to {owner}.{name}{desc}, not implemented by the receiver's class"));
                                 self.b.switch_to_block(on);
-                                self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0)
+                                self.b
+                                    .ins()
+                                    .load(types::I64, MemFlagsData::trusted(), at, 0)
                             }
                         };
                         let sig = signature(self.module, true, &desc).ok_or("a bad signature")?;

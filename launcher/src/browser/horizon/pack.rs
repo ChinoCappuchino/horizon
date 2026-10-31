@@ -4,8 +4,8 @@
 //! mods in `home/horizon-mods/`, each downloaded and checked against the index like any
 //! registry mod, turned on or off as the pack says. The pack's overrides (settings, resource
 //! packs, a mod's saved settings) are copied in once, when it is installed.
-use super::{Index, fetch, index, install_version, local, newest};
-use crate::browser::{FileRef, java};
+use super::{fetch, index, install_version, local, newest, Index};
+use crate::browser::{java, FileRef};
 use horizon_mods::{index as idx, modpack::Modpack};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -291,11 +291,9 @@ mod tests {
             "renderDistance:12\n"
         );
         // Not a modpack, and not there.
-        assert!(
-            install_in(&index, true, "coords_hud", &packs, &|_, _| {})
-                .unwrap_err()
-                .contains("not a modpack")
-        );
+        assert!(install_in(&index, true, "coords_hud", &packs, &|_, _| {})
+            .unwrap_err()
+            .contains("not a modpack"));
         assert!(install_in(&index, true, "nope", &packs, &|_, _| {}).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }

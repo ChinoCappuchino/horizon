@@ -21,7 +21,7 @@ mod survival;
 mod worker;
 
 pub use files::clone_or_copy;
-pub use sounds::{BUILT_IN_PACKS, fonts, languages, packs, panorama, sounds};
+pub use sounds::{fonts, languages, packs, panorama, sounds, BUILT_IN_PACKS};
 
 use pyjson::Value;
 use sha2::Digest;
@@ -1493,12 +1493,10 @@ mod tests {
                 read(&reports.join(name)).unwrap()
             );
         }
-        assert!(
-            read_json(&root.join("items.json"))
-                .unwrap()
-                .get("minecraft:stone")
-                .is_some()
-        );
+        assert!(read_json(&root.join("items.json"))
+            .unwrap()
+            .get("minecraft:stone")
+            .is_some());
         assert!(root.join("biome-parameters/overworld.json").is_file());
         for name in ["registries.json", "commands.json", "items.json"] {
             fs::remove_file(root.join(name)).unwrap();

@@ -1162,9 +1162,10 @@ where
             provider: None,
             decorators: Vec::new(),
         };
-        pipeline.decoration = pipeline
-            .data
-            .decoration_for(&source_json, &pipeline.source, preset)?;
+        pipeline.decoration =
+            pipeline
+                .data
+                .decoration_for(&source_json, &pipeline.source, preset)?;
         if with_structures {
             let possible = pipeline
                 .source

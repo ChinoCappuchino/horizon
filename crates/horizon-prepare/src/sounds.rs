@@ -5,7 +5,7 @@
 
 use crate::artifacts::{self, Lock};
 use crate::pyjson::Value;
-use crate::{Log, digest};
+use crate::{digest, Log};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -566,11 +566,9 @@ mod tests {
             lines.borrow_mut().push(l.to_string())
         })
         .unwrap();
-        assert!(
-            fs::read(target.join("assets/pack.mcmeta"))
-                .unwrap()
-                .starts_with(b"{\"language\"")
-        );
+        assert!(fs::read(target.join("assets/pack.mcmeta"))
+            .unwrap()
+            .starts_with(b"{\"language\""));
         assert_eq!(
             fs::read(target.join("assets/minecraft/lang/fr_fr.json")).unwrap(),
             b"{}"
@@ -631,11 +629,10 @@ mod tests {
         fs::write(f.object(1), b"not the sound").unwrap();
         let error = f.run().unwrap_err();
         assert!(error.starts_with("Corrupt asset object"), "{error}");
-        assert!(
-            !f.root
-                .join(".local/horizon-client/9.9/assets/minecraft/sounds/ambient/cave1.ogg")
-                .exists()
-        );
+        assert!(!f
+            .root
+            .join(".local/horizon-client/9.9/assets/minecraft/sounds/ambient/cave1.ogg")
+            .exists());
         fs::remove_file(f.object(1)).unwrap();
         assert!(f.run().unwrap_err().starts_with("Missing asset object"));
     }
@@ -673,18 +670,14 @@ mod tests {
             .join(f.objects[FIRST_FACE].0);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"placeholder").unwrap();
-        assert!(
-            panorama(&f.root, Some(&f.minecraft), &|_| {})
-                .unwrap_err()
-                .starts_with("Corrupt asset object")
-        );
+        assert!(panorama(&f.root, Some(&f.minecraft), &|_| {})
+            .unwrap_err()
+            .starts_with("Corrupt asset object"));
         assert_eq!(fs::read(path).unwrap(), b"placeholder");
         fs::remove_file(f.object(FIRST_FACE)).unwrap();
-        assert!(
-            panorama(&f.root, Some(&f.minecraft), &|_| {})
-                .unwrap_err()
-                .starts_with("Missing asset object")
-        );
+        assert!(panorama(&f.root, Some(&f.minecraft), &|_| {})
+            .unwrap_err()
+            .starts_with("Missing asset object"));
     }
 
     #[test]
@@ -800,11 +793,9 @@ mod tests {
         for (name, data) in &f.objects[FIRST_PACK..FIRST_FACE] {
             assert_eq!(&fs::read(target.join("assets").join(name)).unwrap(), data);
         }
-        assert!(
-            target
-                .join("assets/minecraft/resourcepacks/programmer_art.zip")
-                .is_file()
-        );
+        assert!(target
+            .join("assets/minecraft/resourcepacks/programmer_art.zip")
+            .is_file());
         assert_eq!(
             *lines.borrow(),
             ["Built-in pack assets ready: 2 files, 0.0 MB"]
@@ -863,12 +854,10 @@ mod tests {
             lines.borrow_mut().push(line.to_string())
         });
         assert_eq!(lines.borrow().len(), 4);
-        assert!(
-            lines
-                .borrow()
-                .iter()
-                .all(|line| line.contains("assets ready"))
-        );
+        assert!(lines
+            .borrow()
+            .iter()
+            .all(|line| line.contains("assets ready")));
         assets
             .copy(is_sound, "Sound", &["minecraft/sounds.json"], &|_| {})
             .unwrap();

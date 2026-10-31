@@ -1323,7 +1323,11 @@ extern "C" fn throwable_init_cause(t: u64, c: u64) {
 /// `Throwable` detail is the cause too.
 extern "C" fn assertion_init_object(t: u64, d: u64) {
     let m = if d == 0 { str_of("null") } else { to_string(d) };
-    let c = if instance_of(d, "java/lang/Throwable") { d } else { 0 };
+    let c = if instance_of(d, "java/lang/Throwable") {
+        d
+    } else {
+        0
+    };
     throwable_init_message_cause(t, m, c);
 }
 extern "C" fn assertion_init_bool(t: u64, d: i32) {
@@ -1348,13 +1352,21 @@ extern "C" fn assertion_init_double(t: u64, d: f64) {
 pub fn exception_methods(class: &str) -> Vec<Method> {
     match class {
         "java/lang/AssertionError" => vec![
-            m("<init>", "(Ljava/lang/Object;)V", assertion_init_object as *const () as usize),
+            m(
+                "<init>",
+                "(Ljava/lang/Object;)V",
+                assertion_init_object as *const () as usize,
+            ),
             m("<init>", "(Z)V", assertion_init_bool as *const () as usize),
             m("<init>", "(C)V", assertion_init_char as *const () as usize),
             m("<init>", "(I)V", assertion_init_int as *const () as usize),
             m("<init>", "(J)V", assertion_init_long as *const () as usize),
             m("<init>", "(F)V", assertion_init_float as *const () as usize),
-            m("<init>", "(D)V", assertion_init_double as *const () as usize),
+            m(
+                "<init>",
+                "(D)V",
+                assertion_init_double as *const () as usize,
+            ),
         ],
         _ => Vec::new(),
     }
@@ -1531,7 +1543,11 @@ pub fn builtins() -> Vec<Builtin> {
                     object_equals as *const () as usize,
                 ),
                 m("hashCode", "()I", identity_hash as *const () as usize),
-                m("clone", "()Ljava/lang/Object;", object_clone as *const () as usize),
+                m(
+                    "clone",
+                    "()Ljava/lang/Object;",
+                    object_clone as *const () as usize,
+                ),
                 m(
                     "toString",
                     "()Ljava/lang/String;",
@@ -1855,8 +1871,16 @@ pub fn builtins() -> Vec<Builtin> {
                     "(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/String;",
                     objects_to_string_or as *const () as usize,
                 ),
-                s("isNull", "(Ljava/lang/Object;)Z", objects_is_null as *const () as usize),
-                s("nonNull", "(Ljava/lang/Object;)Z", objects_non_null as *const () as usize),
+                s(
+                    "isNull",
+                    "(Ljava/lang/Object;)Z",
+                    objects_is_null as *const () as usize,
+                ),
+                s(
+                    "nonNull",
+                    "(Ljava/lang/Object;)Z",
+                    objects_non_null as *const () as usize,
+                ),
                 s(
                     "requireNonNullElse",
                     "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
@@ -1986,20 +2010,48 @@ pub fn builtins() -> Vec<Builtin> {
             "()Ljava/lang/String;",
             float_to_string as *const () as usize,
         ),
-        m("compareTo", "(Ljava/lang/Float;)I", float_compare_to as *const () as usize),
-        m("compareTo", "(Ljava/lang/Object;)I", float_compare_to as *const () as usize),
+        m(
+            "compareTo",
+            "(Ljava/lang/Float;)I",
+            float_compare_to as *const () as usize,
+        ),
+        m(
+            "compareTo",
+            "(Ljava/lang/Object;)I",
+            float_compare_to as *const () as usize,
+        ),
         m("isNaN", "()Z", float_box_is_nan as *const () as usize),
-        m("isInfinite", "()Z", float_box_is_infinite as *const () as usize),
-        s("floatToIntBits", "(F)I", float_to_int_bits as *const () as usize),
+        m(
+            "isInfinite",
+            "()Z",
+            float_box_is_infinite as *const () as usize,
+        ),
+        s(
+            "floatToIntBits",
+            "(F)I",
+            float_to_int_bits as *const () as usize,
+        ),
         s("compare", "(FF)I", float_compare as *const () as usize),
-        s("isInfinite", "(F)Z", float_is_infinite as *const () as usize),
+        s(
+            "isInfinite",
+            "(F)Z",
+            float_is_infinite as *const () as usize,
+        ),
         s("isFinite", "(F)Z", float_is_finite as *const () as usize),
         s("sum", "(FF)F", float_sum as *const () as usize),
         s("max", "(FF)F", float_max as *const () as usize),
         s("min", "(FF)F", float_min as *const () as usize),
         s("hashCode", "(F)I", float_hash_static as *const () as usize),
-        s("toString", "(F)Ljava/lang/String;", float_static_to_string as *const () as usize),
-        s("parseFloat", "(Ljava/lang/String;)F", parse_float as *const () as usize),
+        s(
+            "toString",
+            "(F)Ljava/lang/String;",
+            float_static_to_string as *const () as usize,
+        ),
+        s(
+            "parseFloat",
+            "(Ljava/lang/String;)F",
+            parse_float as *const () as usize,
+        ),
         s(
             "valueOf",
             "(Ljava/lang/String;)Ljava/lang/Float;",
@@ -2034,19 +2086,43 @@ pub fn builtins() -> Vec<Builtin> {
             "(Ljava/lang/String;)D",
             parse_double as *const () as usize,
         ),
-        m("compareTo", "(Ljava/lang/Double;)I", double_compare_to as *const () as usize),
-        m("compareTo", "(Ljava/lang/Object;)I", double_compare_to as *const () as usize),
+        m(
+            "compareTo",
+            "(Ljava/lang/Double;)I",
+            double_compare_to as *const () as usize,
+        ),
+        m(
+            "compareTo",
+            "(Ljava/lang/Object;)I",
+            double_compare_to as *const () as usize,
+        ),
         m("isNaN", "()Z", double_box_is_nan as *const () as usize),
-        m("isInfinite", "()Z", double_box_is_infinite as *const () as usize),
-        s("doubleToLongBits", "(D)J", double_to_long_bits as *const () as usize),
+        m(
+            "isInfinite",
+            "()Z",
+            double_box_is_infinite as *const () as usize,
+        ),
+        s(
+            "doubleToLongBits",
+            "(D)J",
+            double_to_long_bits as *const () as usize,
+        ),
         s("compare", "(DD)I", double_compare as *const () as usize),
-        s("isInfinite", "(D)Z", double_is_infinite as *const () as usize),
+        s(
+            "isInfinite",
+            "(D)Z",
+            double_is_infinite as *const () as usize,
+        ),
         s("isFinite", "(D)Z", double_is_finite as *const () as usize),
         s("sum", "(DD)D", double_sum as *const () as usize),
         s("max", "(DD)D", double_max as *const () as usize),
         s("min", "(DD)D", double_min as *const () as usize),
         s("hashCode", "(D)I", double_hash_static as *const () as usize),
-        s("toString", "(D)Ljava/lang/String;", double_static_to_string as *const () as usize),
+        s(
+            "toString",
+            "(D)Ljava/lang/String;",
+            double_static_to_string as *const () as usize,
+        ),
         s(
             "valueOf",
             "(Ljava/lang/String;)Ljava/lang/Double;",
@@ -2163,7 +2239,10 @@ pub fn builtins() -> Vec<Builtin> {
     // code that uses one buffer on one thread, which is how mods use it).
     if let Some(sb) = out.iter().find(|b| b.name == "java/lang/StringBuilder") {
         let as_buffer = |d: &str| -> &'static str {
-            Box::leak(d.replace("java/lang/StringBuilder", "java/lang/StringBuffer").into_boxed_str())
+            Box::leak(
+                d.replace("java/lang/StringBuilder", "java/lang/StringBuffer")
+                    .into_boxed_str(),
+            )
         };
         let methods = sb
             .methods
@@ -2194,35 +2273,77 @@ pub fn builtins() -> Vec<Builtin> {
         f,
     };
     for (class, extra) in [
-        ("java/lang/Byte", vec![s("compare", "(BB)I", small_compare as *const () as usize)]),
-        ("java/lang/Short", vec![s("compare", "(SS)I", small_compare as *const () as usize)]),
+        (
+            "java/lang/Byte",
+            vec![s("compare", "(BB)I", small_compare as *const () as usize)],
+        ),
+        (
+            "java/lang/Short",
+            vec![s("compare", "(SS)I", small_compare as *const () as usize)],
+        ),
         (
             "java/lang/Integer",
             vec![
-                s("toHexString", "(I)Ljava/lang/String;", int_to_hex as *const () as usize),
-                s("toBinaryString", "(I)Ljava/lang/String;", int_to_binary as *const () as usize),
-                s("toOctalString", "(I)Ljava/lang/String;", int_to_octal as *const () as usize),
+                s(
+                    "toHexString",
+                    "(I)Ljava/lang/String;",
+                    int_to_hex as *const () as usize,
+                ),
+                s(
+                    "toBinaryString",
+                    "(I)Ljava/lang/String;",
+                    int_to_binary as *const () as usize,
+                ),
+                s(
+                    "toOctalString",
+                    "(I)Ljava/lang/String;",
+                    int_to_octal as *const () as usize,
+                ),
             ],
         ),
         (
             "java/lang/Long",
             vec![
-                s("toHexString", "(J)Ljava/lang/String;", long_to_hex as *const () as usize),
-                s("toBinaryString", "(J)Ljava/lang/String;", long_to_binary as *const () as usize),
-                s("toString", "(J)Ljava/lang/String;", long_static_to_string as *const () as usize),
+                s(
+                    "toHexString",
+                    "(J)Ljava/lang/String;",
+                    long_to_hex as *const () as usize,
+                ),
+                s(
+                    "toBinaryString",
+                    "(J)Ljava/lang/String;",
+                    long_to_binary as *const () as usize,
+                ),
+                s(
+                    "toString",
+                    "(J)Ljava/lang/String;",
+                    long_static_to_string as *const () as usize,
+                ),
                 s("hashCode", "(J)I", long_hash_static as *const () as usize),
                 s("sum", "(JJ)J", long_sum as *const () as usize),
                 s("max", "(JJ)J", long_max as *const () as usize),
                 s("min", "(JJ)J", long_min as *const () as usize),
-                s("parseLong", "(Ljava/lang/String;)J", parse_long as *const () as usize),
-                s("parseLong", "(Ljava/lang/String;I)J", parse_long_radix as *const () as usize),
+                s(
+                    "parseLong",
+                    "(Ljava/lang/String;)J",
+                    parse_long as *const () as usize,
+                ),
+                s(
+                    "parseLong",
+                    "(Ljava/lang/String;I)J",
+                    parse_long_radix as *const () as usize,
+                ),
             ],
         ),
     ] {
         if let Some(b) = out.iter_mut().find(|b| b.name == class) {
             // (Only what it does not have yet.)
             for m in extra {
-                if !b.methods.iter().any(|x| x.name == m.name && x.desc == m.desc) {
+                if !b
+                    .methods
+                    .iter()
+                    .any(|x| x.name == m.name && x.desc == m.desc)
+                {
                     b.methods.push(m);
                 }
             }

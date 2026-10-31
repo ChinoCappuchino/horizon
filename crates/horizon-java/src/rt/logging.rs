@@ -59,7 +59,11 @@ fn elements(a: u64) -> Vec<u64> {
         return Vec::new();
     }
     // SAFETY: a reference array: its length, then its elements.
-    unsafe { (0..word(a, A_LEN) as usize).map(|i| word(a, A_DATA + 8 * i)).collect() }
+    unsafe {
+        (0..word(a, A_LEN) as usize)
+            .map(|i| word(a, A_DATA + 8 * i))
+            .collect()
+    }
 }
 
 macro_rules! level {

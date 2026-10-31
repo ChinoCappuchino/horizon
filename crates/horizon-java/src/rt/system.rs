@@ -919,7 +919,11 @@ fn object_text(o: u64) -> String {
     }
 }
 fn string_text(s: u64) -> String {
-    if s == 0 { "null".to_owned() } else { String::from_utf16_lossy(text(s)) }
+    if s == 0 {
+        "null".to_owned()
+    } else {
+        String::from_utf16_lossy(text(s))
+    }
 }
 extern "C" fn ps_println(p: u64) {
     emit(p, "", true);
