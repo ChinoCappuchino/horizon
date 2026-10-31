@@ -1069,6 +1069,179 @@ extern "C" fn parse_double(s: u64) -> f64 {
     }
 }
 
+// ---- Float and Double ----------------------------------------------------------
+// (From the java.lang.Float and java.lang.Double API documentation.)
+
+/// `floatToIntBits`: the bits, every NaN as the canonical one.
+fn float_bits(f: f32) -> i32 {
+    if f.is_nan() {
+        0x7fc0_0000
+    } else {
+        f.to_bits() as i32
+    }
+}
+/// `doubleToLongBits`: the bits, every NaN as the canonical one.
+fn double_bits(d: f64) -> i64 {
+    if d.is_nan() {
+        0x7ff8_0000_0000_0000
+    } else {
+        d.to_bits() as i64
+    }
+}
+/// `compare`: -0.0 below 0.0, NaN above all and equal to itself.
+fn double_order(a: f64, b: f64) -> i32 {
+    if a < b {
+        -1
+    } else if a > b {
+        1
+    } else {
+        double_bits(a).cmp(&double_bits(b)) as i32
+    }
+}
+/// `Math.max`: NaN if either is, 0.0 above -0.0.
+fn java_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == 0.0 && b == 0.0 {
+        if a.is_sign_negative() { b } else { a }
+    } else if a >= b {
+        a
+    } else {
+        b
+    }
+}
+/// `Math.min`: NaN if either is, -0.0 below 0.0.
+fn java_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else if a == 0.0 && b == 0.0 {
+        if a.is_sign_negative() { a } else { b }
+    } else if a <= b {
+        a
+    } else {
+        b
+    }
+}
+extern "C" fn float_to_int_bits(f: f32) -> i32 {
+    float_bits(f)
+}
+extern "C" fn double_to_long_bits(d: f64) -> i64 {
+    double_bits(d)
+}
+extern "C" fn float_compare(a: f32, b: f32) -> i32 {
+    // (Widening is exact, and keeps the order and NaN.)
+    double_order(f64::from(a), f64::from(b))
+}
+extern "C" fn double_compare(a: f64, b: f64) -> i32 {
+    double_order(a, b)
+}
+extern "C" fn float_is_infinite(f: f32) -> i32 {
+    i32::from(f.is_infinite())
+}
+extern "C" fn float_is_finite(f: f32) -> i32 {
+    i32::from(f.is_finite())
+}
+extern "C" fn double_is_infinite(d: f64) -> i32 {
+    i32::from(d.is_infinite())
+}
+extern "C" fn double_is_finite(d: f64) -> i32 {
+    i32::from(d.is_finite())
+}
+extern "C" fn float_sum(a: f32, b: f32) -> f32 {
+    a + b
+}
+extern "C" fn double_sum(a: f64, b: f64) -> f64 {
+    a + b
+}
+extern "C" fn float_max(a: f32, b: f32) -> f32 {
+    java_max(f64::from(a), f64::from(b)) as f32
+}
+extern "C" fn float_min(a: f32, b: f32) -> f32 {
+    java_min(f64::from(a), f64::from(b)) as f32
+}
+extern "C" fn double_max(a: f64, b: f64) -> f64 {
+    java_max(a, b)
+}
+extern "C" fn double_min(a: f64, b: f64) -> f64 {
+    java_min(a, b)
+}
+extern "C" fn float_hash_static(f: f32) -> i32 {
+    float_bits(f)
+}
+extern "C" fn double_hash_static(d: f64) -> i32 {
+    let v = double_bits(d) as u64;
+    (v ^ (v >> 32)) as i32
+}
+extern "C" fn float_static_to_string(f: f32) -> u64 {
+    str_of(&java_float(f))
+}
+extern "C" fn double_static_to_string(d: f64) -> u64 {
+    str_of(&java_double(d))
+}
+/// The text of a `parseFloat`/`parseDouble` argument (the JDK trims
+/// spaces and control characters and takes a type suffix), or a thrown
+/// exception.
+fn float_text(s: u64) -> Option<(String, String)> {
+    if s == 0 {
+        throw("java/lang/NullPointerException", None);
+        return None;
+    }
+    let text = String::from_utf16_lossy(units(s));
+    let t = text.trim_matches(|c: char| c <= ' ');
+    let t = t.strip_suffix(['d', 'D', 'f', 'F']).unwrap_or(t).to_owned();
+    Some((text, t))
+}
+fn bad_number(text: &str) {
+    throw(
+        "java/lang/NumberFormatException",
+        Some(&format!("For input string: \"{text}\"")),
+    );
+}
+extern "C" fn parse_float(s: u64) -> f32 {
+    let Some((text, t)) = float_text(s) else {
+        return 0.0;
+    };
+    // (Straight to float: no double rounding.)
+    t.parse::<f32>().unwrap_or_else(|_| {
+        bad_number(&text);
+        0.0
+    })
+}
+extern "C" fn float_value_of_string(s: u64) -> u64 {
+    let f = parse_float(s);
+    if pending() { 0 } else { float_value_of(f) }
+}
+extern "C" fn double_value_of_string(s: u64) -> u64 {
+    let d = parse_double(s);
+    if pending() { 0 } else { double_value_of(d) }
+}
+extern "C" fn float_compare_to(b: u64, o: u64) -> i32 {
+    if o == 0 {
+        throw("java/lang/NullPointerException", None);
+        return 0;
+    }
+    float_compare(box_float(b), box_float(o))
+}
+extern "C" fn double_compare_to(b: u64, o: u64) -> i32 {
+    if o == 0 {
+        throw("java/lang/NullPointerException", None);
+        return 0;
+    }
+    double_order(box_double(b), box_double(o))
+}
+extern "C" fn float_box_is_nan(b: u64) -> i32 {
+    i32::from(box_float(b).is_nan())
+}
+extern "C" fn float_box_is_infinite(b: u64) -> i32 {
+    i32::from(box_float(b).is_infinite())
+}
+extern "C" fn double_box_is_nan(b: u64) -> i32 {
+    i32::from(box_double(b).is_nan())
+}
+extern "C" fn double_box_is_infinite(b: u64) -> i32 {
+    i32::from(box_double(b).is_infinite())
+}
+
 // ---- Throwable ----------------------------------------------------------------
 
 extern "C" fn throwable_init(_t: u64) {}
@@ -1609,6 +1782,25 @@ pub fn builtins() -> Vec<Builtin> {
             "()Ljava/lang/String;",
             float_to_string as *const () as usize,
         ),
+        m("compareTo", "(Ljava/lang/Float;)I", float_compare_to as *const () as usize),
+        m("compareTo", "(Ljava/lang/Object;)I", float_compare_to as *const () as usize),
+        m("isNaN", "()Z", float_box_is_nan as *const () as usize),
+        m("isInfinite", "()Z", float_box_is_infinite as *const () as usize),
+        s("floatToIntBits", "(F)I", float_to_int_bits as *const () as usize),
+        s("compare", "(FF)I", float_compare as *const () as usize),
+        s("isInfinite", "(F)Z", float_is_infinite as *const () as usize),
+        s("isFinite", "(F)Z", float_is_finite as *const () as usize),
+        s("sum", "(FF)F", float_sum as *const () as usize),
+        s("max", "(FF)F", float_max as *const () as usize),
+        s("min", "(FF)F", float_min as *const () as usize),
+        s("hashCode", "(F)I", float_hash_static as *const () as usize),
+        s("toString", "(F)Ljava/lang/String;", float_static_to_string as *const () as usize),
+        s("parseFloat", "(Ljava/lang/String;)F", parse_float as *const () as usize),
+        s(
+            "valueOf",
+            "(Ljava/lang/String;)Ljava/lang/Float;",
+            float_value_of_string as *const () as usize,
+        ),
     ]);
     let mut double = number(
         double_as_int as *const () as usize,
@@ -1637,6 +1829,24 @@ pub fn builtins() -> Vec<Builtin> {
             "parseDouble",
             "(Ljava/lang/String;)D",
             parse_double as *const () as usize,
+        ),
+        m("compareTo", "(Ljava/lang/Double;)I", double_compare_to as *const () as usize),
+        m("compareTo", "(Ljava/lang/Object;)I", double_compare_to as *const () as usize),
+        m("isNaN", "()Z", double_box_is_nan as *const () as usize),
+        m("isInfinite", "()Z", double_box_is_infinite as *const () as usize),
+        s("doubleToLongBits", "(D)J", double_to_long_bits as *const () as usize),
+        s("compare", "(DD)I", double_compare as *const () as usize),
+        s("isInfinite", "(D)Z", double_is_infinite as *const () as usize),
+        s("isFinite", "(D)Z", double_is_finite as *const () as usize),
+        s("sum", "(DD)D", double_sum as *const () as usize),
+        s("max", "(DD)D", double_max as *const () as usize),
+        s("min", "(DD)D", double_min as *const () as usize),
+        s("hashCode", "(D)I", double_hash_static as *const () as usize),
+        s("toString", "(D)Ljava/lang/String;", double_static_to_string as *const () as usize),
+        s(
+            "valueOf",
+            "(Ljava/lang/String;)Ljava/lang/Double;",
+            double_value_of_string as *const () as usize,
         ),
     ]);
     let small = |of: usize, as_int: &'static str| {

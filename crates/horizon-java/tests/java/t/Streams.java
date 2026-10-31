@@ -199,4 +199,41 @@ public class Streams {
         if (sum == 6 && !b.isEmpty() && new Below(0).isEmpty()) bits |= 8;
         return bits;
     }
+
+    public static int floatChecks() {
+        int bits = 0;
+        // (Not constants: javac leaves the calls alone.)
+        double z = bits;
+        float zf = bits;
+        if (Double.compare(-0.0, z) == -1 && Double.compare(z, -0.0) == 1
+                && Double.compare(Double.NaN, Double.NaN) == 0
+                && Double.compare(Double.NaN, Double.POSITIVE_INFINITY) == 1
+                && Float.compare(1f, 2f) == -1) bits |= 1;
+        if (Float.floatToIntBits(Float.intBitsToFloat(0x7fc00001)) == 0x7fc00000
+                && Double.doubleToLongBits(z / z) == 0x7ff8000000000000L
+                && Float.floatToIntBits(1.5f) == 0x3fc00000) bits |= 2;
+        if (1 / Double.max(-0.0, z) == Double.POSITIVE_INFINITY
+                && 1 / Double.min(-0.0, z) == Double.NEGATIVE_INFINITY
+                && Double.isNaN(Double.max(1, Double.NaN))
+                && Float.min(1f, 2f) == 1f && Double.sum(1.5, 2.25) == 3.75) bits |= 4;
+        if (Double.hashCode(1.5) == Double.valueOf(1.5).hashCode()
+                && Float.hashCode(2.5f) == Float.valueOf(2.5f).hashCode()
+                && Double.hashCode(1.5) == 1073217536) bits |= 8;
+        if (Double.toString(1.0).equals("1.0") && Float.toString(0.1f).equals("0.1")
+                && Double.toString(1e10).equals("1.0E10")
+                && Double.toString(Double.NaN).equals("NaN")) bits |= 16;
+        boolean thrown = false;
+        try {
+            Double.parseDouble("x");
+        } catch (NumberFormatException e) {
+            thrown = true;
+        }
+        if (Float.parseFloat(" 2.5f ") == 2.5f && Double.valueOf("3.25").doubleValue() == 3.25
+                && Float.valueOf("1.5").floatValue() == 1.5f && thrown) bits |= 32;
+        if (Double.valueOf(1.0).compareTo(2.0) < 0 && Float.valueOf(Float.NaN).isNaN()
+                && Double.valueOf(Double.POSITIVE_INFINITY).isInfinite()
+                && Double.isFinite(1.0) && !Float.isFinite(Float.NEGATIVE_INFINITY)
+                && Float.isInfinite(1 / zf)) bits |= 64;
+        return bits;
+    }
 }
