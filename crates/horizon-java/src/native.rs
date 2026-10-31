@@ -308,6 +308,8 @@ impl Native {
             .map_err(|e| e.to_string())?
             .finish(settings::Flags::new(flags))
             .map_err(|e| e.to_string())?;
+        // (The methods' workers compile with it while the module is busy.)
+        let compile_isa = isa.clone();
         let mut jb = JITBuilder::with_isa(isa, default_libcall_names());
         // All code in one reserved region: a call between two methods is a
         // 32-bit relative jump, which separate allocations (around the 4 GiB
@@ -971,65 +973,163 @@ impl Native {
             .map(|(&id, (_, f))| (id, hot_size(f)))
             .collect();
         let trace = std::env::var_os("HORIZON_NATIVE_TRACE").is_some();
-        for (&id, (name, func)) in &bodies {
-            if trace {
-                eprintln!("defining {name}");
-            }
-            ctx.func = func.clone();
-            ctx.inline(Inliner {
-                bodies: &bodies,
-                sizes: &sizes,
-                caller: id,
-            })
-            .map_err(|e| format!("{name}: inlining: {e:?}"))?;
-            // HORIZON_NATIVE_CLIF=<text>: the code of each method whose name
-            // has it, after inlining.
-            if let Ok(filter) = std::env::var("HORIZON_NATIVE_CLIF")
-                && name.contains(&filter)
-            {
-                eprintln!("{name}:\n{}", ctx.func.display());
-            }
-            // A method Cranelift fails on (code it panics on, in a release
-            // build without its verifier) is one not compiled, not the end:
-            // the verifier says why, and a stand-in traps saying so.
-            let defined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                module.define_function(id, &mut ctx)
-            }));
-            if defined.is_err() {
-                module.clear_context(&mut ctx);
-                ctx.func = func.clone();
-                let _ = ctx.inline(Inliner {
-                    bodies: &bodies,
-                    sizes: &sizes,
-                    caller: id,
-                });
-                let mut e = cranelift_codegen::verify_function(&ctx.func, module.isa())
-                    .err()
-                    .map_or_else(|| "a compiler panic".to_owned(), |e| e.to_string());
-                e.truncate(e.floor_char_boundary(400));
-                let why = rt::stop_reason(format!("{name}, not compiled: {e}"));
-                unsupported.push((name.clone(), e));
-                module.clear_context(&mut ctx);
-                ctx.func.signature = func.signature.clone();
-                let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
-                let e = b.create_block();
-                b.append_block_params_for_function_params(e);
-                b.switch_to_block(e);
-                b.seal_block(e);
-                say_and_trap(&mut b, why);
-                b.finalize(module.target_config());
-                module
-                    .define_function(id, &mut ctx)
-                    .map_err(|e| format!("{name} (stand-in): {e:?}"))?;
-            } else if let Ok(Err(e)) = defined {
-                return Err(format!("{name}: {e:?}"));
-            }
-            code_sizes.push((
-                id,
-                ctx.compiled_code().map_or(0, |c| c.code_info().total_size),
-            ));
-            module.clear_context(&mut ctx);
+        // HORIZON_NATIVE_CLIF=<text>: the code of each method whose name has
+        // it, after inlining.
+        let clif = std::env::var("HORIZON_NATIVE_CLIF").ok();
+        // Compiled on every core: each worker inlines and compiles methods
+        // with its own context, and this thread puts their code in the
+        // module. A method Cranelift fails on (code it panics on, in a
+        // release build without its verifier) is one not compiled, not the
+        // end: the verifier says why, and a stand-in traps saying so.
+        enum Done {
+            Code {
+                id: FuncId,
+                align: u64,
+                bytes: Vec<u8>,
+                relocs: Vec<cranelift_module::ModuleReloc>,
+                size: u32,
+            },
+            Failed {
+                id: FuncId,
+                why: String,
+            },
         }
+        let order: Vec<(&FuncId, &(String, cranelift_codegen::ir::Function))> =
+            bodies.iter().collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let isa: &dyn cranelift_codegen::isa::TargetIsa = &*compile_isa;
+        std::thread::scope(|scope| -> Result<(), String> {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Done>(256);
+            for _ in 0..workers {
+                let tx = tx.clone();
+                let (next, order, bodies, sizes, clif) = (&next, &order, &bodies, &sizes, &clif);
+                scope.spawn(move || {
+                    let mut ctx = cranelift_codegen::Context::new();
+                    let inliner = |caller| Inliner {
+                        bodies,
+                        sizes,
+                        caller,
+                    };
+                    loop {
+                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(&id, (name, func))) = order.get(k) else {
+                            break;
+                        };
+                        if trace {
+                            eprintln!("defining {name}");
+                        }
+                        ctx.clear();
+                        ctx.func = func.clone();
+                        let done = match ctx.inline(inliner(id)) {
+                            Err(e) => Done::Failed {
+                                id,
+                                why: format!("inlining: {e:?}"),
+                            },
+                            Ok(_) => {
+                                if clif.as_ref().is_some_and(|f| name.contains(f.as_str())) {
+                                    eprintln!("{name}:\n{}", ctx.func.display());
+                                }
+                                let compiled = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                        let align = ctx
+                                            .compile(isa, &mut Default::default())
+                                            .map_err(|e| format!("{:?}", e.inner))?
+                                            .buffer
+                                            .alignment
+                                            as u64;
+                                        let code = ctx.compiled_code().expect("compiled");
+                                        let relocs = code
+                                            .buffer
+                                            .relocs()
+                                            .iter()
+                                            .map(|r| {
+                                                cranelift_module::ModuleReloc::from_mach_reloc(
+                                                    r, &ctx.func, id,
+                                                )
+                                            })
+                                            .collect();
+                                        Ok::<_, String>((
+                                            align,
+                                            code.code_buffer().to_vec(),
+                                            relocs,
+                                            code.code_info().total_size,
+                                        ))
+                                    }),
+                                );
+                                match compiled {
+                                    Ok(Ok((align, bytes, relocs, size))) => Done::Code {
+                                        id,
+                                        align,
+                                        bytes,
+                                        relocs,
+                                        size,
+                                    },
+                                    Ok(Err(why)) => Done::Failed { id, why },
+                                    Err(_) => {
+                                        ctx.clear();
+                                        ctx.func = func.clone();
+                                        let _ = ctx.inline(inliner(id));
+                                        let mut why =
+                                            cranelift_codegen::verify_function(&ctx.func, isa)
+                                                .err()
+                                                .map_or_else(
+                                                    || "a compiler panic".to_owned(),
+                                                    |e| e.to_string(),
+                                                );
+                                        why.truncate(why.floor_char_boundary(400));
+                                        Done::Failed { id, why }
+                                    }
+                                }
+                            }
+                        };
+                        if tx.send(done).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(tx);
+            for done in rx {
+                match done {
+                    Done::Code {
+                        id,
+                        align,
+                        bytes,
+                        relocs,
+                        size,
+                    } => {
+                        module
+                            .define_function_bytes(id, align, &bytes, &relocs)
+                            .map_err(|e| format!("{}: {e:?}", bodies[&id].0))?;
+                        code_sizes.push((id, size));
+                    }
+                    Done::Failed { id, why: e } => {
+                        let (name, func) = &bodies[&id];
+                        let why = rt::stop_reason(format!("{name}, not compiled: {e}"));
+                        unsupported.push((name.clone(), e));
+                        module.clear_context(&mut ctx);
+                        ctx.func.signature = func.signature.clone();
+                        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                        let e = b.create_block();
+                        b.append_block_params_for_function_params(e);
+                        b.switch_to_block(e);
+                        b.seal_block(e);
+                        say_and_trap(&mut b, why);
+                        b.finalize(module.target_config());
+                        module
+                            .define_function(id, &mut ctx)
+                            .map_err(|e| format!("{name} (stand-in): {e:?}"))?;
+                        code_sizes.push((
+                            id,
+                            ctx.compiled_code().map_or(0, |c| c.code_info().total_size),
+                        ));
+                        module.clear_context(&mut ctx);
+                    }
+                }
+            }
+            Ok(())
+        })?;
         // The init functions.
         for (class, &id) in &inits {
             ctx.func.signature.params = vec![AbiParam::new(types::I64)];
