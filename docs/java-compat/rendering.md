@@ -1,7 +1,7 @@
 # Java mod compatibility: rendering
 
-Status: proposal (research council, 2026-10-31). The owner decisions in
-section 6 are open.
+Status: accepted (research council and owner, 2026-10-31). One decision in
+section 6 is still open.
 
 ## 1. Problem
 
@@ -116,6 +116,7 @@ Veil and Flywheel use dynamically.
 
 ### 3.4 Raw OpenGL
 
+(Owner decision 1 in section 6: GL calls are an adapter of the IR.)
 GL emulation is not the main path. A scoped layer can follow later as an
 escape hatch for raw-GL code: GL 3.3 core plus selected 4.x, LWJGL classes
 as runtime natives, a Gallium-style state tracker and the shader pipeline
@@ -153,19 +154,25 @@ where they can't.
 | 8 | Shader-pack parity for every IR material | mod geometry correct under an Iris pack |
 | 9 | Scoped GL layer | raw-GL mods (minimaps, HUDs) |
 
-## 6. Open owner decisions
+## 6. Owner decisions (2026-10-31)
 
-1. Raw-GL mods: unsupported, `Immediate` recording only, or the scoped GL
-   layer of 3.4 later?
-2. Flywheel: the fallback path plus de-animation, or a native Flywheel
-   adapter? Proposal: decide from the milestone 3 benchmark.
-3. Mod materials: Iris `gbuffers` stages only, or Horizon's own pack stages
-   too?
-4. The render-intent IR as the rendering target of every version step of the
-   bridge (1.12.2 block-entity renderers, 26.x `SubmitNodeCollector`).
-   Proposal: yes.
-5. glslang is a C++ build dependency (it also affects Android/GLES). Accept
-   it, or keep naga only and accept that more mod shaders fail?
+1. Raw OpenGL is one more adapter of the IR, not a separate path. The GL
+   calls of all mods lower into the same IR. The IR is then the single
+   source of truth for what is drawn, and Horizon's backend batches and
+   orders the work of all mods together. GL state that the IR cannot
+   express goes through `GraphNode`. This replaces the separate GL layer
+   of 3.4 and milestone 9.
+2. Flywheel: native is the goal. The order of the work depends on what the
+   milestones show. The fallback path with de-animation (milestones 2 and
+   3) is a step on the way.
+3. Mod materials target both Iris `gbuffers` stages and Horizon's own pack
+   stages. A material is data passed to the active pack. Resource packs can
+   define material types (PBR, surface roughness and others), and the
+   shaders handle them.
+4. The IR is the rendering target of every version step of the bridge,
+   where this is not too complex.
+5. Open: glslang is a C++ build dependency (it also affects Android/GLES).
+   Accept it, or use naga only and accept that more mod shaders fail?
 
 ## 7. Clean room
 
