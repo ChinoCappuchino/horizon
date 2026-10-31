@@ -438,6 +438,15 @@ fn native_check_report(classes: &[ClassFile]) -> Result<()> {
     for (w, n) in why.iter().take(15) {
         println!("  {n:>6}  {w}");
     }
+    // HORIZON_BENCH_UNCOMPILED=<file>: each method not compiled, and why.
+    if let Some(path) = std::env::var_os("HORIZON_BENCH_UNCOMPILED") {
+        let list: String = native
+            .unsupported
+            .iter()
+            .map(|(name, w)| format!("{name}\t{}\n", w.replace('\n', " ")))
+            .collect();
+        std::fs::write(path, list)?;
+    }
     // HORIZON_BENCH_STOPS=<text>: each stop whose place or reason has it.
     if let Ok(filter) = std::env::var("HORIZON_BENCH_STOPS") {
         for why in horizon_java::rt::stop_reasons() {

@@ -989,9 +989,41 @@ impl Native {
             {
                 eprintln!("{name}:\n{}", ctx.func.display());
             }
-            module
-                .define_function(id, &mut ctx)
-                .map_err(|e| format!("{name}: {e:?}"))?;
+            // A method Cranelift fails on (code it panics on, in a release
+            // build without its verifier) is one not compiled, not the end:
+            // the verifier says why, and a stand-in traps saying so.
+            let defined = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                module.define_function(id, &mut ctx)
+            }));
+            if defined.is_err() {
+                module.clear_context(&mut ctx);
+                ctx.func = func.clone();
+                let _ = ctx.inline(Inliner {
+                    bodies: &bodies,
+                    sizes: &sizes,
+                    caller: id,
+                });
+                let mut e = cranelift_codegen::verify_function(&ctx.func, module.isa())
+                    .err()
+                    .map_or_else(|| "a compiler panic".to_owned(), |e| e.to_string());
+                e.truncate(e.floor_char_boundary(400));
+                let why = rt::stop_reason(format!("{name}, not compiled: {e}"));
+                unsupported.push((name.clone(), e));
+                module.clear_context(&mut ctx);
+                ctx.func.signature = func.signature.clone();
+                let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+                let e = b.create_block();
+                b.append_block_params_for_function_params(e);
+                b.switch_to_block(e);
+                b.seal_block(e);
+                say_and_trap(&mut b, why);
+                b.finalize(module.target_config());
+                module
+                    .define_function(id, &mut ctx)
+                    .map_err(|e| format!("{name} (stand-in): {e:?}"))?;
+            } else if let Ok(Err(e)) = defined {
+                return Err(format!("{name}: {e:?}"));
+            }
             code_sizes.push((
                 id,
                 ctx.compiled_code().map_or(0, |c| c.code_info().total_size),
