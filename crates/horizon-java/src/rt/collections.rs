@@ -2587,6 +2587,151 @@ extern "C" fn class_to_string(c: u64) -> u64 {
 extern "C" fn class_assertions(_c: u64) -> i32 {
     0
 }
+/// A class's name as the type tables have it (`java/lang/String`, `[I`).
+fn class_slash_name(c: u64) -> String {
+    String::from_utf16_lossy(class_name(c)).replace('.', "/")
+}
+const PRIMITIVES: [&str; 9] = [
+    "boolean", "byte", "char", "short", "int", "long", "float", "double", "void",
+];
+/// Whether a value of class `b` can be assigned to class `a` (names as
+/// the type tables have them).
+fn assignable(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if PRIMITIVES.contains(&a) || PRIMITIVES.contains(&b) {
+        return false;
+    }
+    if let Some(cb) = b.strip_prefix('[') {
+        if matches!(a, "java/lang/Object" | "java/lang/Cloneable" | "java/io/Serializable") {
+            return true;
+        }
+        let Some(ca) = a.strip_prefix('[') else {
+            return false;
+        };
+        return match (ca.as_bytes()[0], cb.as_bytes()[0]) {
+            (b'L', b'L') => assignable(&ca[1..ca.len() - 1], &cb[1..cb.len() - 1]),
+            (b'[', b'[') => assignable(ca, cb),
+            _ => ca == cb,
+        };
+    }
+    if a.starts_with('[') {
+        return false;
+    }
+    if a == "java/lang/Object" {
+        return true;
+    }
+    let r = rt();
+    r.ids
+        .get(b)
+        .and_then(|&id| r.ancestors.get(id as usize))
+        .is_some_and(|anc| anc.contains(a))
+}
+/// The Class object of a class by name (`java/lang/String`, `[I`, `int`):
+/// the program's own, or one made here (the same each time).
+fn class_named(name: &str) -> u64 {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    let r = rt();
+    if let Some(&id) = r.ids.get(name)
+        && let Some(&c) = r.classes.get(id as usize)
+        && c != 0
+    {
+        return c;
+    }
+    static MADE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    let mut made = MADE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    *made.entry(name.to_owned()).or_insert_with(|| {
+        let c = alloc(24, vt("java/lang/Class"));
+        set(c, 16, str_of(&name.replace('/', ".")));
+        c
+    })
+}
+extern "C" fn class_is_assignable_from(c: u64, other: u64) -> i32 {
+    if other == 0 {
+        npe();
+        return 0;
+    }
+    i32::from(c == other || assignable(&class_slash_name(c), &class_slash_name(other)))
+}
+extern "C" fn class_is_array(c: u64) -> i32 {
+    i32::from(class_name(c).first() == Some(&u16::from(b'[')))
+}
+extern "C" fn class_is_primitive(c: u64) -> i32 {
+    i32::from(PRIMITIVES.contains(&class_slash_name(c).as_str()))
+}
+extern "C" fn class_get_component_type(c: u64) -> u64 {
+    let name = class_slash_name(c);
+    let Some(comp) = name.strip_prefix('[') else {
+        return 0;
+    };
+    let of = match comp.as_bytes()[0] {
+        b'L' => comp[1..comp.len() - 1].to_owned(),
+        b'[' => comp.to_owned(),
+        b'Z' => "boolean".into(),
+        b'B' => "byte".into(),
+        b'C' => "char".into(),
+        b'S' => "short".into(),
+        b'I' => "int".into(),
+        b'J' => "long".into(),
+        b'F' => "float".into(),
+        b'D' => "double".into(),
+        _ => return 0,
+    };
+    class_named(&of)
+}
+fn class_id(c: u64) -> usize {
+    field(c, 8) as usize
+}
+extern "C" fn class_get_superclass(c: u64) -> u64 {
+    let r = rt();
+    let id = class_id(c);
+    if id == 0 {
+        // An array's superclass is Object; other classes outside the
+        // program are not known here.
+        return if class_is_array(c) != 0 { class_named("java/lang/Object") } else { 0 };
+    }
+    if r.interfaces.get(id) == Some(&true) {
+        return 0;
+    }
+    match r.supers.get(id) {
+        Some(&s) if s != 0 => r.classes.get(s as usize).copied().unwrap_or(0),
+        _ => 0,
+    }
+}
+extern "C" fn class_is_interface(c: u64) -> i32 {
+    let r = rt();
+    let id = class_id(c);
+    i32::from(if id == 0 {
+        r.outside_interfaces.contains(&class_slash_name(c))
+    } else {
+        r.interfaces.get(id) == Some(&true)
+    })
+}
+extern "C" fn class_is_enum(c: u64) -> i32 {
+    let r = rt();
+    let id = class_id(c);
+    let parent = r.supers.get(id).copied().unwrap_or(0) as usize;
+    i32::from(id != 0 && r.names.get(parent).is_some_and(|n| n == "java/lang/Enum"))
+}
+extern "C" fn class_for_name(name: u64) -> u64 {
+    if name == 0 {
+        npe();
+        return 0;
+    }
+    let text = String::from_utf16_lossy(units(name));
+    let slash = text.replace('.', "/");
+    let r = rt();
+    if slash.starts_with('[') || r.ids.contains_key(&slash) {
+        return class_named(&slash);
+    }
+    throw("java/lang/ClassNotFoundException", Some(&text));
+    0
+}
+extern "C" fn class_for_name_loader(name: u64, _init: i32, _loader: u64) -> u64 {
+    class_for_name(name)
+}
 extern "C" fn class_is_instance(c: u64, o: u64) -> i32 {
     let name = String::from_utf16_lossy(class_name(c)).replace('.', "/");
     instance_of(o, &name) as i32
@@ -3908,6 +4053,20 @@ pub fn builtins() -> Vec<Builtin> {
                 m("toString", "()Ljava/lang/String;", f!(class_to_string)),
                 m("desiredAssertionStatus", "()Z", f!(class_assertions)),
                 m("isInstance", "(Ljava/lang/Object;)Z", f!(class_is_instance)),
+                m("isAssignableFrom", "(Ljava/lang/Class;)Z", f!(class_is_assignable_from)),
+                m("isArray", "()Z", f!(class_is_array)),
+                m("isPrimitive", "()Z", f!(class_is_primitive)),
+                m("isInterface", "()Z", f!(class_is_interface)),
+                m("isEnum", "()Z", f!(class_is_enum)),
+                m("getComponentType", "()Ljava/lang/Class;", f!(class_get_component_type)),
+                m("componentType", "()Ljava/lang/Class;", f!(class_get_component_type)),
+                m("getSuperclass", "()Ljava/lang/Class;", f!(class_get_superclass)),
+                s("forName", "(Ljava/lang/String;)Ljava/lang/Class;", f!(class_for_name)),
+                s(
+                    "forName",
+                    "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;",
+                    f!(class_for_name_loader),
+                ),
             ],
         },
         Builtin {

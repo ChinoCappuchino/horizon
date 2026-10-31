@@ -307,4 +307,35 @@ public class Streams {
                 && Long.parseLong("ff", 16) == 255 && "10000000000".equals(Long.toHexString(1L << 40))) bits |= 128;
         return bits;
     }
+
+    enum Tint { RED, BLUE }
+
+    public static int classChecks() {
+        int bits = 0;
+        if (Cloneable.class.isAssignableFrom(Pair.class) && Object.class.isAssignableFrom(Pair.class)
+                && !Pair.class.isAssignableFrom(Object.class)
+                && Object[].class.isAssignableFrom(String[].class)
+                && !int[].class.isAssignableFrom(long[].class)
+                && Object.class.isAssignableFrom(int[].class)) bits |= 1;
+        if (int[].class.isArray() && !Pair.class.isArray()
+                && "int".equals(int[].class.getComponentType().getName())
+                && int[].class.getComponentType().isPrimitive()
+                && String[].class.getComponentType() == String.class) bits |= 2;
+        if (Pair.class.getSuperclass() == Object.class && Object.class.getSuperclass() == null
+                && Cloneable.class.isInterface() && !Pair.class.isInterface()
+                && Cloneable.class.getSuperclass() == null) bits |= 4;
+        if (Tint.class.isEnum() && !Pair.class.isEnum()) bits |= 8;
+        boolean missing = false;
+        try {
+            Class.forName("no.such.Thing");
+        } catch (ClassNotFoundException e) {
+            missing = true;
+        }
+        try {
+            if (Class.forName("t.Streams$Pair") == Pair.class && missing) bits |= 16;
+        } catch (ClassNotFoundException e) {
+            // stays unset
+        }
+        return bits;
+    }
 }

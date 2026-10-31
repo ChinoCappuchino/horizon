@@ -285,6 +285,21 @@ fn runtime_basics_give_javas_results() {
 }
 
 #[test]
+fn class_reflection_basics_give_javas_results() {
+    let Some(native) = native_ops() else { return };
+    let f = native.function("t/Streams.classChecks()I").unwrap();
+    // SAFETY: as above.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    let bits = f(native.context());
+    assert_eq!(
+        bits,
+        (1 << 5) - 1,
+        "failed checks: {:#b}",
+        !bits & ((1 << 5) - 1)
+    );
+}
+
+#[test]
 fn bitsets_give_javas_results() {
     let Some(native) = native_ops() else { return };
     let f = native.function("t/Streams.bitsetChecks()I").unwrap();

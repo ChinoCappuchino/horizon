@@ -75,6 +75,13 @@ pub struct Rt {
     pub offsets: Vec<i64>,
     /// Each class id's object size in bytes (0: not known here).
     pub sizes: Vec<u32>,
+    /// Each class's id by name (`java/lang/String`), each class id's
+    /// superclass (0: none), and whether it is an interface.
+    pub ids: HashMap<String, u32>,
+    pub supers: Vec<u32>,
+    pub interfaces: Vec<bool>,
+    /// Interfaces outside the program by name (those its classes implement).
+    pub outside_interfaces: HashSet<String>,
     /// Each class id's `Class` object.
     pub classes: Vec<u64>,
     /// Each class id's ancestors by name (itself, superclasses, interfaces).

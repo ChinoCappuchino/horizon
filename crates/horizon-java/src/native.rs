@@ -1458,6 +1458,32 @@ impl Native {
         let mut boxes = Vec::new();
         let cache = rt::make_caches(&builtin_vtables, &mut boxes);
         let sel = |n: &str, d: &str| selectors.get(&(n.to_owned(), d.to_owned())).copied();
+        let class_ids: HashMap<String, u32> = class_names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.is_empty() && !n.contains("$$Lambda"))
+            .map(|(i, n)| (n.clone(), i as u32))
+            .collect();
+        let super_of = |n: &str| -> Option<&str> {
+            if n.contains("$$Lambda") {
+                return Some(OBJECT);
+            }
+            match by_name.get(n) {
+                Some(cf) => cf.super_name().ok().flatten(),
+                None => builtin.get(n).and_then(|b| b.super_name),
+            }
+        };
+        let supers: Vec<u32> = class_names
+            .iter()
+            .map(|n| super_of(n).and_then(|s| class_ids.get(s)).copied().unwrap_or(0))
+            .collect();
+        let interface_flags: Vec<bool> = class_names
+            .iter()
+            .map(|n| match by_name.get(n.as_str()) {
+                Some(cf) => cf.access & INTERFACE != 0,
+                None => builtin.get(n.as_str()).is_some_and(|b| b.is_interface),
+            })
+            .collect();
         let sizes: Vec<u32> = class_names
             .iter()
             .map(|n| layouts.get(n.as_str()).map_or(0, |l| l.size.max(0) as u32))
@@ -1476,6 +1502,15 @@ impl Native {
             dispatch,
             offsets: offsets.clone(),
             sizes,
+            ids: class_ids,
+            supers,
+            interfaces: interface_flags,
+            outside_interfaces: classes
+                .iter()
+                .flat_map(|c| c.interfaces.iter().filter_map(|&i| c.class_name(i).ok()))
+                .filter(|i| !by_name.contains_key(*i))
+                .map(str::to_owned)
+                .collect(),
             classes: class_objects,
             ancestors: names_by_id,
             enum_values: names
