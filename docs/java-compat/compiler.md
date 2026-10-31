@@ -236,6 +236,17 @@ Target versions (decision 2026-10-29, owner):
    1.12.2 and 1.8.
 3. Then the versions between them.
 
+Modpack mode (decision 2026-10-31, owner). A modpack runs on the vanilla of
+its own game version, compiled natively with its loader and mods, before the
+bridge to the newest version exists: the mods' Mixins then apply to the code
+they were written for (Sable changes 131 vanilla classes, Create 54). Horizon
+gives the platform: the launcher, the window, input, audio and, through the
+render-intent IR (rendering.md), the drawing. Memory follows 4.3: values and
+Rust data first, a collector for what remains. Native replacements (4.2) and
+a later conversion to the newest version are open; a 1.21.1 Horizon with the
+pack running is a goal of its own. First target: vanilla 1.21.1's dedicated
+server started natively, then with NeoForge, Create and Sable.
+
 ## 5. Steps
 
 Do the steps in this sequence. Each step keeps all tests correct (Farmer's
