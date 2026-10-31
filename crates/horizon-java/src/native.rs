@@ -659,48 +659,43 @@ impl Native {
         // First fit, the selectors most classes respond to first.
         let mut order: Vec<usize> = (0..selectors.len()).collect();
         order.sort_by_key(|&s| std::cmp::Reverse(by_selector[s].len()));
-        let mut taken: Vec<bool> = Vec::new();
+        // Taken slots as bits. A selector's classes are runs of consecutive
+        // ids (class ids follow the superclass tree), so a place is checked
+        // a run at a time, and a run that meets a taken slot moves the
+        // selector just past it: first fit, without trying every offset.
+        let mut taken = SlotBits::default();
         let mut offsets: Vec<i64> = vec![i64::MIN; selectors.len()];
         let mut first_free = 0usize;
         for s in order {
             let cids = &by_selector[s];
             let Some(&lowest) = cids.first() else { continue };
-            // (Ids ascend, so `lowest` is the first: only offsets that put
-            // it on a free slot are tried. After a few misses the selector
-            // goes past the end, where everything is free: the table is a
-            // little larger, and placing stays linear.)
-            let mut p = first_free;
-            let mut tries = 0;
-            let offset = loop {
-                while taken.get(p) == Some(&true) {
-                    p += 1;
-                }
-                let offset = p as i64 - i64::from(lowest);
-                if tries == 2000 {
-                    break taken.len().max(p) as i64 - i64::from(lowest);
-                }
-                if cids
-                    .iter()
-                    .all(|&c| taken.get((i64::from(c) + offset) as usize) != Some(&true))
-                {
-                    break offset;
-                }
-                tries += 1;
-                p += 1;
-            };
+            // (start relative to the first class, length)
+            let mut runs: Vec<(usize, usize)> = Vec::new();
             for &c in cids {
-                let at = (i64::from(c) + offset) as usize;
-                if at >= taken.len() {
-                    taken.resize(at + 1, false);
+                let rel = (c - lowest) as usize;
+                match runs.last_mut() {
+                    Some((start, len)) if *start + *len == rel => *len += 1,
+                    _ => runs.push((rel, 1)),
                 }
-                taken[at] = true;
             }
-            while taken.get(first_free) == Some(&true) {
-                first_free += 1;
+            let mut p = first_free;
+            'place: loop {
+                for &(start, len) in &runs {
+                    if let Some(q) = taken.first_taken(p + start, p + start + len) {
+                        // (Past the whole taken block, not one slot.)
+                        p = taken.first_free(q) - start;
+                        continue 'place;
+                    }
+                }
+                break;
             }
-            offsets[s] = offset;
+            for &(start, len) in &runs {
+                taken.set_range(p + start, p + start + len);
+            }
+            first_free = taken.first_free(first_free);
+            offsets[s] = p as i64 - i64::from(lowest);
         }
-        let mut dispatch = vec![0u64; 2 * taken.len().max(1)].into_boxed_slice();
+        let mut dispatch = vec![0u64; 2 * taken.len.max(1)].into_boxed_slice();
         let dispatch_at = dispatch.as_ptr() as i64;
         if std::env::var_os("HORIZON_NATIVE_TRACE").is_some() {
             let entries: usize = by_selector.iter().map(Vec::len).sum();
@@ -708,8 +703,8 @@ impl Native {
                 "dispatch table: {} selectors, {} classes, {entries} entries in {} slots ({} MB)",
                 selectors.len(),
                 responders.len(),
-                taken.len(),
-                taken.len() * 16 >> 20
+                taken.len,
+                taken.len * 16 >> 20
             );
         }
         phase("dispatch table placed");
@@ -1923,6 +1918,60 @@ fn raw_signature(module: &JITModule, instance: bool, desc: &str) -> Option<Signa
 }
 
 /// What every method's code generation reads.
+/// The dispatch table's taken slots, as bits.
+#[derive(Default)]
+struct SlotBits {
+    words: Vec<u64>,
+    /// One past the last taken slot.
+    len: usize,
+}
+
+impl SlotBits {
+    /// The first taken slot in `from..to`, if any.
+    fn first_taken(&self, from: usize, to: usize) -> Option<usize> {
+        let mut i = from;
+        while i < to {
+            let w = i / 64;
+            let Some(&word) = self.words.get(w) else {
+                return None;
+            };
+            let bits = word >> (i % 64);
+            if bits != 0 {
+                let at = i + bits.trailing_zeros() as usize;
+                return (at < to).then_some(at);
+            }
+            i = (w + 1) * 64;
+        }
+        None
+    }
+
+    fn set_range(&mut self, from: usize, to: usize) {
+        if to.div_ceil(64) > self.words.len() {
+            self.words.resize(to.div_ceil(64), 0);
+        }
+        for i in from..to {
+            self.words[i / 64] |= 1 << (i % 64);
+        }
+        self.len = self.len.max(to);
+    }
+
+    /// The first free slot from `from` on.
+    fn first_free(&self, from: usize) -> usize {
+        let mut i = from;
+        loop {
+            let w = i / 64;
+            let Some(&word) = self.words.get(w) else {
+                return i;
+            };
+            let free = !word >> (i % 64);
+            if free != 0 {
+                return i + free.trailing_zeros() as usize;
+            }
+            i = (w + 1) * 64;
+        }
+    }
+}
+
 /// Who declares which method (see `Native::compile`).
 struct MethodIndex<'a> {
     /// Each class's methods with code, by name and descriptor.
