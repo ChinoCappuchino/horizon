@@ -3424,12 +3424,18 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
 
     /// Code the prototype does not compile: a stop (a trap), counted by why.
     fn stop(&mut self, why: String) {
+        *self.w.stops.borrow_mut().entry(why.clone()).or_default() += 1;
+        self.trap_with(why);
+    }
+
+    /// A guard's trap: like a stop, but not counted (the code it guards is
+    /// compiled; it traps only on what the program could not have meant).
+    fn trap_with(&mut self, why: String) {
         // Reached, it says where and why before the trap.
         let id = rt::stop_reason(format!(
             "{}.{}{}: {why}",
             self.owner, self.method.name, self.method.descriptor
         ));
-        *self.w.stops.borrow_mut().entry(why).or_default() += 1;
         let id = self.b.ins().iconst(types::I32, i64::from(id));
         let _ = self.call_builtin(rt::stopped as *const () as usize, "(I)V", false, &[id]);
         self.b.ins().trap(UNSUPPORTED);
@@ -4515,7 +4521,7 @@ impl<'a, 'b, 'f> MethodGen<'a, 'b, 'f> {
                                 self.b.set_cold_block(stop);
                                 self.b.ins().brif(bad, stop, &[], on, &[]);
                                 self.b.switch_to_block(stop);
-                                self.stop(format!("virtual call to {owner}.{name}{desc}, not implemented by the receiver's class"));
+                                self.trap_with(format!("virtual call to {owner}.{name}{desc}, not implemented by the receiver's class"));
                                 self.b.switch_to_block(on);
                                 self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0)
                             }
