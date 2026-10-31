@@ -248,6 +248,7 @@ fn main() -> Result<()> {
     let mut run_native = false;
     let mut run_main = false;
     let mut native_check = false;
+    let mut jdk: Option<String> = None;
     let mut paths = Vec::new();
     let mut it = inputs.iter();
     while let Some(a) = it.next() {
@@ -265,6 +266,7 @@ fn main() -> Result<()> {
             "--run-native" => run_native = true,
             "--run-main" => run_main = true,
             "--native-check" => native_check = true,
+            "--jdk" => jdk = it.next().cloned(),
             p => paths.push(p.to_owned()),
         }
     }
@@ -287,6 +289,10 @@ fn main() -> Result<()> {
     // implement (a class is never compiled without its supertypes).
     if !only.is_empty() {
         classes = with_supertypes(classes, roots, &only);
+    }
+    #[cfg(feature = "native")]
+    if let Some(dir) = &jdk {
+        with_jdk(&mut classes, Path::new(dir))?;
     }
     // The native backend alone: no WASM compile before it.
     if native_check {
@@ -410,6 +416,88 @@ fn native_bench(classes: &[ClassFile], bench: &[String]) -> Result<()> {
             native.heap().used() >> 20
         );
     }
+    Ok(())
+}
+
+/// `--jdk <dir>`: the JDK's classes (extracted from the player's own Java
+/// runtime) that the program uses and the runtime library has no version
+/// of, with the JDK classes they need in turn. Not one whose superclasses
+/// reach a runtime-library class other than Object: it would use that
+/// class's internals (docs/java-compat/compiler.md 4.4, level 3).
+#[cfg(feature = "native")]
+fn with_jdk(classes: &mut Vec<ClassFile>, dir: &Path) -> Result<()> {
+    use horizon_java::classfile::Constant;
+    use std::collections::{HashMap, HashSet};
+    let mut found = Vec::new();
+    read(dir, &[], &mut found)?;
+    let mut pool: HashMap<String, ClassFile> = found
+        .into_iter()
+        .filter_map(|c| Some((c.name().ok()?.to_owned(), c)))
+        .collect();
+    let runtime: HashSet<&str> = horizon_java::native::runtime_classes().into_iter().collect();
+    let refs = |c: &ClassFile| -> Vec<String> {
+        c.constants
+            .iter()
+            .filter_map(|k| match k {
+                Constant::Class(i) => match c.constants.get(*i as usize) {
+                    Some(Constant::Utf8(n)) => Some(n.trim_start_matches('[').to_owned()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .map(|n| match n.strip_prefix('L') {
+                Some(t) if n.ends_with(';') => t.trim_end_matches(';').to_owned(),
+                _ => n,
+            })
+            .collect()
+    };
+    // Whether a JDK class stands on a runtime-library class (not Object).
+    let on_runtime = |pool: &HashMap<String, ClassFile>, name: &str| -> bool {
+        let mut x = pool.get(name).and_then(|c| c.super_name().ok().flatten());
+        while let Some(s) = x {
+            if s == "java/lang/Object" {
+                return false;
+            }
+            if runtime.contains(s) {
+                return true;
+            }
+            x = pool.get(s).and_then(|c| c.super_name().ok().flatten());
+        }
+        false
+    };
+    let have: HashSet<String> = classes
+        .iter()
+        .filter_map(|c| c.name().ok().map(str::to_owned))
+        .collect();
+    let mut todo: Vec<String> = classes.iter().flat_map(|c| refs(c)).collect();
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut refused: HashSet<String> = HashSet::new();
+    while let Some(n) = todo.pop() {
+        if have.contains(&n) || runtime.contains(n.as_str()) || taken.contains(&n) || refused.contains(&n) {
+            continue;
+        }
+        if !pool.contains_key(&n) {
+            continue;
+        }
+        if on_runtime(&pool, &n) {
+            refused.insert(n);
+            continue;
+        }
+        let c = &pool[&n];
+        todo.extend(refs(c));
+        todo.extend(c.super_name().ok().flatten().map(str::to_owned));
+        taken.insert(n);
+    }
+    let added = taken.len();
+    for n in taken {
+        if let Some(c) = pool.remove(&n) {
+            classes.push(c);
+        }
+    }
+    eprintln!(
+        "JDK classes from the runtime image: {added} compiled, {} left to the runtime library's stops (they stand on its classes)",
+        refused.len()
+    );
     Ok(())
 }
 

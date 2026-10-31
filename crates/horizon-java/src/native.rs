@@ -145,6 +145,15 @@ const JDK_EXCEPTIONS: &[&str] = &[
     "java/util/IllegalFormatException",
 ];
 
+/// The classes the runtime library has (Rust versions, and the JDK
+/// exceptions it knows): a class of the JDK compiled into the program must
+/// not stand on one of them (docs/java-compat/compiler.md 4.4, level 3).
+pub fn runtime_classes() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = rt::builtins().iter().map(|b| b.name).collect();
+    names.extend_from_slice(JDK_EXCEPTIONS);
+    names
+}
+
 /// The program's type tables, for its type tests and catch clauses (the
 /// compiled code passes their address: any thread may test).
 struct TypeTables {
