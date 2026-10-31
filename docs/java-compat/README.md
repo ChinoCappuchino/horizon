@@ -176,8 +176,10 @@ without the hook table.
 ## 5. Related documents
 
 - [plan.md](plan.md): the phases of the work.
-- [AGENT.md](AGENT.md): the procedure for an AI agent (or a person) that adds
-  support for a mod.
+- [AGENTS.md](AGENTS.md): the guide for the next developer (a person or an AI
+  agent): how the system works, the tools, the procedures, the pitfalls and
+  what is missing.
+- [status.md](status.md): what works now, with the numbers.
 - [upstream-proposal.md](upstream-proposal.md): a draft request to the Horizon
   project. Not sent.
 
