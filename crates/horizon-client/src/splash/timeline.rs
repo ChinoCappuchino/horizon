@@ -623,7 +623,7 @@ mod tests {
         assert!(t.finale().is_none());
         run(&mut t, 14.0, |s| ((s / 10.0).min(1.0), s >= 10.0));
         let finale = t.finale().expect("the finale started");
-        assert!(finale >= 10.0 && finale < 12.0, "{finale}");
+        assert!((10.0..12.0).contains(&finale), "{finale}");
         assert!(t.handover(), "the window takes over after the leap");
         let f = t.frame();
         assert_eq!(f.morph, 1.0);
@@ -654,7 +654,7 @@ mod tests {
         // 30 drops at least HURRY_GAP apart, the last one's flight; never
         // before the minimum, and no later: the game is waiting.
         assert!(
-            finale >= MIN_BEFORE_FINALE && finale > 29.0 * HURRY_GAP + HURRY_FLIGHT,
+            finale >= MIN_BEFORE_FINALE.max(29.0 * HURRY_GAP + HURRY_FLIGHT),
             "{finale}"
         );
         assert!(finale < MIN_BEFORE_FINALE + 0.1, "{finale}");

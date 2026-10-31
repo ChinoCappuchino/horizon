@@ -721,7 +721,7 @@ impl Gpu {
                 | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
                 _ => return Ok(()),
             },
-            Target::Offscreen { .. } => None,
+            Target::Offscreen => None,
         };
         let view = self.scene.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -1027,7 +1027,7 @@ fn fox_vertices(assets: &Assets, fox: &Fox, out: &mut Vec<Vertex>) {
         &mut verts,
     );
     let light = Vec3::new(-0.35, -0.8, 0.5).normalize();
-    for quad in verts.chunks_exact(4) {
+    for quad in verts.as_chunks::<4>().0 {
         let n = quad[0].normal;
         let n = Vec3::new(f32::from(n[0]), f32::from(n[1]), f32::from(n[2])) / 127.0;
         let shade = 0.62 + 0.38 * n.dot(light).max(0.0);

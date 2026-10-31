@@ -53,7 +53,7 @@ impl Providers {
             .filter(|(_, m)| m.worldgen.is_some() || m.capabilities.contains(&Capability::Worldgen))
             .map(|(_, m)| Contributor::of(m))
             .collect();
-        let claims = ModClaims::new(&contributors, &here);
+        let claims = ModClaims::claims(&contributors, &here);
         // By mod id: the order mods decorate in, never the folder's.
         let mut mods: Vec<(PathBuf, Manifest)> = on
             .into_iter()
@@ -220,7 +220,7 @@ struct ModClaims {
     owners: HashMap<String, String>,
 }
 impl ModClaims {
-    fn new(contributors: &[Contributor], game: &Path) -> Option<Arc<dyn FeatureClaims>> {
+    fn claims(contributors: &[Contributor], game: &Path) -> Option<Arc<dyn FeatureClaims>> {
         if !contributors.iter().any(|c| {
             c.section
                 .claims
@@ -385,7 +385,7 @@ mod tests {
         .unwrap();
         let game = std::env::temp_dir().join(format!("horizon-claims-{}", std::process::id()));
         std::fs::create_dir_all(&game).unwrap();
-        let claims = ModClaims::new(&[Contributor::of(&manifest)], &game).expect("claims");
+        let claims = ModClaims::claims(&[Contributor::of(&manifest)], &game).expect("claims");
         let at = |preset: &str, feature: &str| {
             claims.decide(preset, "minecraft:plains", &[], feature, &[])
         };
@@ -417,7 +417,7 @@ mod tests {
         let rules = game.join(horizon_mods::worldgen::RULES);
         std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
         std::fs::write(&rules, "[claims.\"farview/geology_ores\"]\nallow = false\n").unwrap();
-        let denied = ModClaims::new(&[Contributor::of(&manifest)], &game).expect("claims");
+        let denied = ModClaims::claims(&[Contributor::of(&manifest)], &game).expect("claims");
         assert_eq!(
             denied.decide(
                 "farview:earth",

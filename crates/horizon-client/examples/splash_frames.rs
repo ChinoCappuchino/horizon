@@ -58,7 +58,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dt = 1.0 / 60.0;
     for target in at {
         if target < 0.0 {
-            for (i, heading) in [0.0f32, 1.5708, 3.1416, -1.5708].into_iter().enumerate() {
+            for (i, heading) in [
+                0.0f32,
+                std::f32::consts::FRAC_PI_2,
+                std::f32::consts::PI,
+                -std::f32::consts::FRAC_PI_2,
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let frame = Frame {
                     balls: Vec::new(),
                     morph: 0.0,
@@ -148,7 +156,7 @@ fn replay_trace(
         gpu.draw(&frame, &look, assets)?;
         let rgba = gpu.read()?;
         let mut img = Vec::with_capacity(rgba.len() / 4 * 3);
-        for (px, b) in rgba.chunks_exact(4).zip(bg.chunks_exact(3)) {
+        for (px, b) in rgba.as_chunks::<4>().0.iter().zip(bg.as_chunks::<3>().0) {
             let a = f32::from(px[3]) / 255.0;
             for c in 0..3 {
                 img.push((f32::from(px[c]) + f32::from(b[c]) * (1.0 - a)).min(255.0) as u8);
@@ -205,7 +213,7 @@ fn save(
     {
         // Over a dark blue desktop gradient.
         let mut img = Vec::with_capacity(rgba.len() / 4 * 3);
-        for (i, px) in rgba.chunks_exact(4).enumerate() {
+        for (i, px) in rgba.as_chunks::<4>().0.iter().enumerate() {
             let y = (i as u32 / size.0) as f32 / size.1 as f32;
             let bg = [18.0 + 20.0 * y, 28.0 + 24.0 * y, 44.0 + 30.0 * y];
             let a = f32::from(px[3]) / 255.0;

@@ -315,13 +315,13 @@ impl ApplicationHandler for Setup {
     }
 
     fn window_event(&mut self, _: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        if let Some(s) = self.splash.as_mut().filter(|s| s.id() == id) {
-            if matches!(
+        if let Some(s) = self.splash.as_mut().filter(|s| s.id() == id)
+            && matches!(
                 event,
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
-            ) {
-                s.resized();
-            }
+            )
+        {
+            s.resized();
         }
     }
 

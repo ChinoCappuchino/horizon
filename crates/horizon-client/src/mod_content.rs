@@ -765,14 +765,14 @@ impl<'a> Plan<'a> {
         let shapes = own.shapes(i);
         match rows {
             Rows::Facts => {
-                if let J::Arr(cells) = row {
-                    if cells.len() > 4 {
-                        cells[3] = J::Str(own.describe(&b.decl.id, i));
-                        cells[4] = J::Obj(vec![
-                            ("properties".into(), own.properties_json(i)),
-                            ("id".into(), J::Str(b.decl.id.clone())),
-                        ]);
-                    }
+                if let J::Arr(cells) = row
+                    && cells.len() > 4
+                {
+                    cells[3] = J::Str(own.describe(&b.decl.id, i));
+                    cells[4] = J::Obj(vec![
+                        ("properties".into(), own.properties_json(i)),
+                        ("id".into(), J::Str(b.decl.id.clone())),
+                    ]);
                 }
             }
             Rows::Gameplay => {

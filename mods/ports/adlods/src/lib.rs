@@ -110,7 +110,7 @@ impl Deposits {
     /// The positions of the deposit `d` starting in chunk (ox, oz), if one does.
     fn planned(&self, d: &Deposit, ox: i32, oz: i32) -> Option<Vec<(i32, i32, i32)>> {
         let mut r = chunk_random(self.seed, d.salt, ox, oz);
-        if r.next() % d.rarity != 0 {
+        if !r.next().is_multiple_of(d.rarity) {
             return None;
         }
         let cx = f64::from(ox * 16) + r.unit() * 16.0;

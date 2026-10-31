@@ -54,11 +54,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 *bootstraps.entry(format!("{owner}.{method}")).or_default() += 1;
                             }
                         }
-                    } else if let Ok((owner, member, descriptor)) = class.member_ref(index) {
-                        if owner.starts_with("java/") {
-                            *jdk.entry(format!("{owner}.{member}{descriptor}"))
-                                .or_default() += 1;
-                        }
+                    } else if let Ok((owner, member, descriptor)) = class.member_ref(index)
+                        && owner.starts_with("java/")
+                    {
+                        *jdk.entry(format!("{owner}.{member}{descriptor}"))
+                            .or_default() += 1;
                     }
                 }
             }

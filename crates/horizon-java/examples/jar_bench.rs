@@ -290,9 +290,11 @@ fn main() -> Result<()> {
     if !only.is_empty() {
         classes = with_supertypes(classes, roots, &only);
     }
-    #[cfg(feature = "native")]
     if let Some(dir) = &jdk {
+        #[cfg(feature = "native")]
         with_jdk(&mut classes, Path::new(dir))?;
+        #[cfg(not(feature = "native"))]
+        bail!("--jdk {dir}: built without the native backend (--features native)");
     }
     // The native backend alone: no WASM compile before it.
     if native_check {
