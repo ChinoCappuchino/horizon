@@ -2143,6 +2143,33 @@ pub fn builtins() -> Vec<Builtin> {
     if let Some(object) = out.iter_mut().find(|b| b.name == "java/lang/Object") {
         object.methods.extend(threads::object_methods());
     }
+    // StringBuffer: StringBuilder's methods (its locking is not needed by
+    // code that uses one buffer on one thread, which is how mods use it).
+    if let Some(sb) = out.iter().find(|b| b.name == "java/lang/StringBuilder") {
+        let as_buffer = |d: &str| -> &'static str {
+            Box::leak(d.replace("java/lang/StringBuilder", "java/lang/StringBuffer").into_boxed_str())
+        };
+        let methods = sb
+            .methods
+            .iter()
+            .map(|m| Method {
+                name: m.name,
+                desc: as_buffer(m.desc),
+                is_static: m.is_static,
+                f: m.f,
+            })
+            .collect();
+        let buffer = Builtin {
+            name: "java/lang/StringBuffer",
+            super_name: sb.super_name,
+            interfaces: sb.interfaces,
+            size: sb.size,
+            is_final: true,
+            is_interface: false,
+            methods,
+        };
+        out.push(buffer);
+    }
     // The boxes' other statics.
     let s = |name, desc, f: usize| Method {
         name,

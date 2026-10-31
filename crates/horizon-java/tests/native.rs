@@ -278,9 +278,9 @@ fn runtime_basics_give_javas_results() {
     let bits = f(native.context());
     assert_eq!(
         bits,
-        (1 << 8) - 1,
+        (1 << 9) - 1,
         "failed checks: {:#b}",
-        !bits & ((1 << 8) - 1)
+        !bits & ((1 << 9) - 1)
     );
 }
 

@@ -305,6 +305,9 @@ public class Streams {
                 && "ff".equals(Integer.toHexString(255)) && "ffffffff".equals(Integer.toHexString(-1))
                 && "101".equals(Integer.toBinaryString(5)) && Long.parseLong("-123") == -123L
                 && Long.parseLong("ff", 16) == 255 && "10000000000".equals(Long.toHexString(1L << 40))) bits |= 128;
+        StringBuffer sb = new StringBuffer();
+        sb.append("ab").append('c').append(12);
+        if ("abc12".equals(sb.toString()) && sb.length() == 5) bits |= 256;
         return bits;
     }
 
