@@ -1,7 +1,6 @@
 # Java mod compatibility: rendering
 
-Status: accepted (research council and owner, 2026-10-31). One decision in
-section 6 is still open.
+Status: accepted (research council and owner, 2026-10-31).
 
 ## 1. Problem
 
@@ -171,8 +170,8 @@ where they can't.
    shaders handle them.
 4. The IR is the rendering target of every version step of the bridge,
    where this is not too complex.
-5. Open: glslang is a C++ build dependency (it also affects Android/GLES).
-   Accept it, or use naga only and accept that more mod shaders fail?
+5. glslang is included. An Android build can leave it out or use a
+   replacement.
 
 ## 7. Clean room
 

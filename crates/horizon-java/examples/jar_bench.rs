@@ -447,6 +447,13 @@ fn native_check_report(classes: &[ClassFile]) -> Result<()> {
             .collect();
         std::fs::write(path, list)?;
     }
+    // HORIZON_BENCH_STOP_KEYS=<file>: each reason for a stop, and how many.
+    if let Some(path) = std::env::var_os("HORIZON_BENCH_STOP_KEYS") {
+        let mut keys: Vec<_> = native.stops.iter().collect();
+        keys.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+        let list: String = keys.iter().map(|(w, n)| format!("{n}\t{w}\n")).collect();
+        std::fs::write(path, list)?;
+    }
     // HORIZON_BENCH_STOPS=<text>: each stop whose place or reason has it.
     if let Ok(filter) = std::env::var("HORIZON_BENCH_STOPS") {
         for why in horizon_java::rt::stop_reasons() {
