@@ -171,7 +171,7 @@ pub struct GeneratorData {
     /// Dimension types beyond vanilla's (`dimension_types.json`, from mods'
     /// `data/<ns>/dimension_type/`): id → the type's JSON text.
     dimension_types: BTreeMap<String, String>,
-    /// Climate regions (fork `afterwinter`, `climate_regions.json`): by the
+    /// Climate regions (fork `NeuHorizon`, `climate_regions.json`): by the
     /// preset whose biomes they split, each region's (id, weight, quantized
     /// parameter list), in id order.
     climate_regions: BTreeMap<String, Vec<(String, u32, String)>>,
@@ -195,7 +195,7 @@ pub struct GeneratorData {
     /// Concentric ring positions by seed and dimension generator (see
     /// `rings_for`), most recent last.
     ring_cache: Mutex<Vec<RingCacheEntry>>,
-    /// What the mods' claims do to features (fork `afterwinter`, M3g), for
+    /// What the mods' claims do to features (fork `NeuHorizon`, M3g), for
     /// the generators built after it is set.
     feature_claims: std::sync::RwLock<Option<Arc<dyn super::generator_decoration::FeatureClaims>>>,
     /// Placed-feature decoration by biome source (see `decoration_for`),
@@ -223,7 +223,7 @@ fn read_optional_bundle(dir: &Path, name: &str) -> Result<Option<Bundle>, Genera
         Ok(None)
     }
 }
-/// Climate regions by the preset they split (fork `afterwinter`): each file
+/// Climate regions by the preset they split (fork `NeuHorizon`): each file
 /// `{"preset": id, "weight": n, "biomes": [quantized entries]}`, as the
 /// worldgen probe observes a TerraBlender region. Entries naming a biome
 /// the registry lacks (a mod that is not installed) are left out, and a
@@ -585,7 +585,7 @@ impl GeneratorData {
         source: &ResolvedBiomeSource,
         preset: &str,
     ) -> Result<Option<Arc<super::generator_decoration::Decoration>>, GeneratorError> {
-        // Fork `afterwinter` (M3g): mods' claims decide by preset, so it is
+        // Fork `NeuHorizon` (M3g): mods' claims decide by preset, so it is
         // part of the key.
         let key = format!("{preset}\n{source_json}");
         let slot = {
@@ -747,7 +747,7 @@ impl GeneratorData {
             seed, lists,
         )))
     }
-    /// The mods' claims on features (fork `afterwinter`, M3g): generators
+    /// The mods' claims on features (fork `NeuHorizon`, M3g): generators
     /// built from now on drop or replace the features they take.
     pub fn set_feature_claims(
         &self,
@@ -2950,7 +2950,7 @@ impl OverworldGenerator {
         Self::build_with(data, seed, preset, dimension, structures, None)
     }
     /// [`OverworldGenerator::for_world`] with the terrain and biomes of a
-    /// world-generation mod that provides `preset` (fork `afterwinter`, M3):
+    /// world-generation mod that provides `preset` (fork `NeuHorizon`, M3):
     /// the preset's noise settings still give sea level, default block and
     /// fluid, aquifers off; structures and features run as for any world.
     pub fn with_provider(
@@ -3075,7 +3075,7 @@ impl OverworldGenerator {
     }
     /// Create per-thread state. Workers are cheap; keep one per thread.
     /// World-generation mods that decorate every chunk after vanilla's
-    /// features of each step (fork `afterwinter`, M3g). Before any worker.
+    /// features of each step (fork `NeuHorizon`, M3g). Before any worker.
     pub fn with_decorators(
         mut self,
         decorators: Vec<Arc<dyn super::provider::Decorator>>,
@@ -3612,7 +3612,7 @@ mod tests {
         Some(GeneratorData::load(&root.join("worldgen"), registry).expect("worldgen data"))
     }
 
-    /// Mods' claims on features (fork `afterwinter`, M3g): a generator built
+    /// Mods' claims on features (fork `NeuHorizon`, M3g): a generator built
     /// with claims that take vanilla's iron ores out places no iron ore,
     /// and still places coal; one built before places both.
     #[test]

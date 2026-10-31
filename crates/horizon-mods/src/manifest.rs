@@ -58,7 +58,7 @@ pub struct Manifest {
     /// accepted here, so the manifest keeps loading once it is promoted.
     #[serde(default)]
     pub experimental: Vec<Capability>,
-    /// What the mod does in world generation (fork `afterwinter`,
+    /// What the mod does in world generation (fork `NeuHorizon`,
     /// docs/research/worldgen-hooks.md): the presets and stages of its code
     /// (capability `worldgen`) and its claims, which a content mod may make
     /// too.

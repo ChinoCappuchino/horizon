@@ -316,7 +316,7 @@ struct Options {
     /// Render into a texture instead of the window (`--offscreen`), so a
     /// GPU the display cannot present from can still be benchmarked.
     offscreen: bool,
-    /// `--no-splash`: no startup splash (fork `afterwinter`), whatever the
+    /// `--no-splash`: no startup splash (fork `NeuHorizon`), whatever the
     /// setting says.
     no_splash: bool,
     /// `--width` and `--height` (vanilla's own arguments): the window's
@@ -15284,7 +15284,7 @@ struct Loading {
     menu: startup_menu::StartupMenu,
     error: Option<Box<dyn std::error::Error>>,
     /// The startup splash, until the game window takes over (fork
-    /// `afterwinter`); whether it was tried; where the game window opens.
+    /// `NeuHorizon`); whether it was tried; where the game window opens.
     splash: Option<Box<splash_window::SplashRun>>,
     splash_tried: bool,
     open_at: Option<winit::dpi::PhysicalPosition<i32>>,

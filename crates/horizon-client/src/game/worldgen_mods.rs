@@ -1,4 +1,4 @@
-//! World-generation mods for the world being opened (fork `afterwinter`,
+//! World-generation mods for the world being opened (fork `NeuHorizon`,
 //! docs/research/worldgen-hooks.md, M3c): the enabled mod whose manifest
 //! lists a world's preset becomes its generator's terrain provider. Its
 //! shared cells of the layers it saves are kept with the world, in

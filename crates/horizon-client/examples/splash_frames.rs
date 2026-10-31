@@ -1,6 +1,6 @@
 //! Renders frames of the startup splash offscreen, as PNGs over a dark
 //! desktop, for checking its look without opening windows (fork
-//! `afterwinter`):
+//! `NeuHorizon`):
 //!
 //!     splash_frames <prepared resources> <out dir> [--mods N] [--load SECONDS]
 //!         [--size W H] [--at SECONDS]...

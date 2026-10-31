@@ -1,4 +1,4 @@
-//! Drawing the startup splash (fork `afterwinter`): its own small wgpu
+//! Drawing the startup splash (fork `NeuHorizon`): its own small wgpu
 //! device, a window surface with a transparent background (or an offscreen
 //! target for tests and previews), the liquid's signed-distance pass, and
 //! quads for the fox, the text and the bar.

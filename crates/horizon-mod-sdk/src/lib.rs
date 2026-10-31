@@ -448,7 +448,7 @@ macro_rules! export_server_mod {
 }
 
 /// World-generation mods (capability `worldgen`, manifest `api = "0.3"`,
-/// `side = "server"`, experimental; fork `afterwinter`,
+/// `side = "server"`, experimental; fork `NeuHorizon`,
 /// docs/research/worldgen-hooks.md): a type implementing
 /// [`WorldgenMod`](worldgen::WorldgenMod), exported with
 /// [`export_worldgen_mod!`]. The game makes several instances of it, each

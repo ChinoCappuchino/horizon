@@ -124,7 +124,7 @@ pub fn component_nbt(v: &Value) -> Tag {
 
 /// A dimension type as this world has it: vanilla's, with the Overworld as
 /// high as the world's chunk column (a world-generation mod's dimension type
-/// may make it taller; fork `afterwinter`).
+/// may make it taller; fork `NeuHorizon`).
 pub fn dimension_type(name: &str) -> horizon_protocol::registry::DimensionType {
     let mut d = horizon_protocol::registry::DimensionType::vanilla(name);
     if name == "minecraft:overworld" {
@@ -145,7 +145,7 @@ impl SyncData {
             let path = key.trim_start_matches("minecraft:");
             let mut found = BTreeMap::new();
             if *key == "minecraft:worldgen/biome" {
-                // Every namespace's biomes (fork `afterwinter`: mods' too).
+                // Every namespace's biomes (fork `NeuHorizon`: mods' too).
                 for (name, file) in crate::biome::biome_files(resources) {
                     if let Some(v) = std::fs::read(&file)
                         .ok()

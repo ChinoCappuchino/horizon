@@ -1,6 +1,6 @@
 # Java mod compatibility: status
 
-Status of 2026-10-31. Fork branch `afterwinter`. Writing standard: ASD-STE100
+Status of 2026-10-31. Fork branch `NeuHorizon`. Writing standard: ASD-STE100
 (see [README.md](README.md#writing-rules-for-these-documents)).
 
 ## 1. Summary

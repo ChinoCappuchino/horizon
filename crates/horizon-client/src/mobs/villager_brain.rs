@@ -797,7 +797,7 @@ pub fn golem_detected(m: &mut Mob, now: i64) {
 
 pub use crate::poi_sections::Poi;
 /// `PoiType.maxTickets` and `validRange`, a job site's from its profession's
-/// POI type (fork `afterwinter`: mods' professions bring their own).
+/// POI type (fork `NeuHorizon`: mods' professions bring their own).
 trait PoiSite {
     fn tickets(self) -> usize;
     fn range(self) -> i32;

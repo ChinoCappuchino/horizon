@@ -51,7 +51,7 @@ index = ["dep:sha2", "dep:minisign-verify", "dep:horizon-shader-api", "dep:wasmp
 name = "sandbox"
 required-features = ["runtime", "pack"]
 
-# World-generation mods in the sandbox (capability `worldgen`, fork `afterwinter`).
+# World-generation mods in the sandbox (capability `worldgen`, fork `NeuHorizon`).
 [[test]]
 name = "worldgen"
 required-features = ["runtime", "pack"]

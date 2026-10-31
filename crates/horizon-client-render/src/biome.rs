@@ -243,7 +243,7 @@ pub fn biome_file(root: &Path, id: &str) -> std::path::PathBuf {
     root.join(format!("data/{ns}/worldgen/biome/{path}.json"))
 }
 /// Every `data/<ns>/worldgen/biome/<path>.json` under `root`: (id, file),
-/// sorted by id as a registry is (fork `afterwinter`: mods' biomes too).
+/// sorted by id as a registry is (fork `NeuHorizon`: mods' biomes too).
 pub fn biome_files(root: &Path) -> Vec<(String, std::path::PathBuf)> {
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {

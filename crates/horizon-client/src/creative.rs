@@ -199,7 +199,7 @@ impl Creative {
         creative.add_mod_items(root);
         Ok(creative)
     }
-    /// The content mods' items (fork `afterwinter`), after vanilla's in the
+    /// The content mods' items (fork `NeuHorizon`), after vanilla's in the
     /// search tab: their code, which would place them in tabs of their own,
     /// does not run here. In each mod's namespace, by id.
     fn add_mod_items(&mut self, root: &Path) {

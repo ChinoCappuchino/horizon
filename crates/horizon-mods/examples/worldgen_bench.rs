@@ -1,5 +1,5 @@
 //! Terrain throughput of a world-generation mod (capability `worldgen`, fork
-//! `afterwinter`): its `terrain` call over a square of chunks, one
+//! `NeuHorizon`): its `terrain` call over a square of chunks, one
 //! [`Worker`] per thread as the generator will run it, in chunks a second.
 //! It measures the mod in the sandbox alone, before the game's own stages
 //! (the comparison with an in-process Java fill bench).

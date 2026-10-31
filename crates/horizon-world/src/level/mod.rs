@@ -507,7 +507,7 @@ pub struct Behaviours {
     dynamic: HashMap<BlockStateId, crate::dynamic_support::DynamicSupport>,
     occlusion_cache: Mutex<HashMap<(i32, i32, u8), bool>>,
     growth: growth::Growth,
-    /// Mods' code for their blocks (fork `afterwinter`), once set.
+    /// Mods' code for their blocks (fork `NeuHorizon`), once set.
     code: std::sync::RwLock<Option<Arc<dyn code::BlockCode>>>,
 }
 

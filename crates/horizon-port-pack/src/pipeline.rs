@@ -493,7 +493,7 @@ pub fn port(
         log("no portable mod has its jar: nothing to carry over".into());
     } else {
         carry(work, resources, &only, log)?;
-        // Fork `afterwinter`: the content the mods register from their code
+        // Fork `NeuHorizon`: the content the mods register from their code
         // (docs/java-compat/plan.md), through the Java compiler.
         if let Some(resources) = resources {
             match translate(work, resources, &only, log) {

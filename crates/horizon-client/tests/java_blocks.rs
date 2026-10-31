@@ -1,4 +1,4 @@
-//! A NeoForge mod's block runs its own code in the game (fork `afterwinter`,
+//! A NeoForge mod's block runs its own code in the game (fork `NeuHorizon`,
 //! docs/java-compat/plan.md, phase 0, step 4): Farmer's Delight, from its
 //! jar, translated into a content mod, its session installed as the block
 //! code hook; a player uses an apple pie through the game's own use path,

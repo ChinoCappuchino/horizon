@@ -352,7 +352,7 @@ impl Game<'_> {
         reg.effects.sort();
         reg.enchantments = list("data/minecraft/enchantment");
         reg.structures = list("data/minecraft/worldgen/structure");
-        // Every namespace's biomes (fork `afterwinter`: mods' too).
+        // Every namespace's biomes (fork `NeuHorizon`: mods' too).
         reg.biomes = horizon_client::biome::biome_files(&root)
             .into_iter()
             .map(|(name, _)| name)

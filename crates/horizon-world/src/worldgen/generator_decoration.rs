@@ -118,7 +118,7 @@ fn possible_biomes(source: &ResolvedBiomeSource) -> Vec<String> {
         .collect()
 }
 /// What a mod's claim does to a feature a biome would place (fork
-/// `afterwinter`, M3g, docs/research/worldgen-hooks.md "Claims").
+/// `NeuHorizon`, M3g, docs/research/worldgen-hooks.md "Claims").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeatureDecision {
     Keep,
@@ -140,7 +140,7 @@ pub trait FeatureClaims: Send + Sync {
 }
 
 /// Which of vanilla's features vanilla's own biomes place before which, in
-/// each step (fork `afterwinter`). A mod's biome lists vanilla's features in
+/// each step (fork `NeuHorizon`). A mod's biome lists vanilla's features in
 /// the order vanilla's helpers gave them in the version it was made for; where
 /// the game's vanilla moved one (26.3 places pumpkins before sugar cane, 1.21.1
 /// after), vanilla's feature sorter would find the two orders a cycle and
@@ -687,7 +687,7 @@ impl Decoration {
 }
 
 /// The decorating mods' part of feature step `step` of `center` (fork
-/// `afterwinter`, M3g): each one's blocks, set as a feature sets them (within
+/// `NeuHorizon`, M3g): each one's blocks, set as a feature sets them (within
 /// the write zone). How many failed.
 fn run_decorators(
     decorators: &mut [Result<Box<dyn super::provider::DecoratorWorker>, String>],

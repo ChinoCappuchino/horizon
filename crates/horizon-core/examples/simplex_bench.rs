@@ -1,5 +1,5 @@
 //! Times Horizon's 2D simplex noise on the samples of the fork's Java
-//! benchmark (fork `afterwinter`, vanilla feasibility): n x n samples at
+//! benchmark (fork `NeuHorizon`, vanilla feasibility): n x n samples at
 //! (x * 0.137, z * 0.091), seed 42, five passes.
 //!
 //!     simplex_bench <n>

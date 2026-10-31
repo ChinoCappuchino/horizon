@@ -1,7 +1,7 @@
 # Horizon fork devkit for the test laptop
 
 For the Nobara laptop (`nobara-pc`, Ryzen 5 5500U), which benchmarks the fork against FarView's
-and the Afterwinter pack's own suites. Branch `afterwinter`; nothing here is pushed upstream.
+and the Afterwinter pack's own suites. Branch `NeuHorizon`; nothing here is pushed upstream.
 
 ## 1. Get the code and build
 

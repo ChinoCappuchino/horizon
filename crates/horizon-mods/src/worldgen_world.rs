@@ -1,5 +1,5 @@
 //! A world-generation mod as horizon-world's terrain provider (feature
-//! `world`; fork `afterwinter`, docs/research/worldgen-hooks.md, M3): the
+//! `world`; fork `NeuHorizon`, docs/research/worldgen-hooks.md, M3): the
 //! generator asks [`ModTerrain`] for a chunk's biomes and land, and each of
 //! its threads gets its own instance of the mod.
 use crate::worldgen_runtime::{

@@ -1,4 +1,4 @@
-//! World-generation mods (capability `worldgen`, fork `afterwinter`,
+//! World-generation mods (capability `worldgen`, fork `NeuHorizon`,
 //! docs/research/worldgen-hooks.md) in the sandbox: the stand-in mod in
 //! `tests/worldgen_guest` answers every stage, misbehaves on request, and
 //! its claims settle against another mod's. Needs `rustup target add

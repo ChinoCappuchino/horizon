@@ -60,7 +60,7 @@ pub const FUNCTIONS: [(&str, u32); 52] = [
     ("recipes.place", 6),
     ("recipes.give", 6),
     ("render.set-far-terrain", 7),
-    // Fork `afterwinter` only: world-generation mods (docs/research/worldgen-hooks.md).
+    // Fork `NeuHorizon` only: world-generation mods (docs/research/worldgen-hooks.md).
     ("worldgen.state-id", 8),
     ("worldgen.biome-id", 8),
     ("worldgen.region-block", 8),

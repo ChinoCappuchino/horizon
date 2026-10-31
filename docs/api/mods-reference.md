@@ -781,7 +781,7 @@ An argument's value, parsed as its kind says.
 
 Access: capability `worldgen`.
 
-Capability `worldgen`, world-generation mods only (manifest `api = "0.3"`, `side = "server"`, experimental; fork `afterwinter`, docs/research/worldgen-hooks.md): what such a mod reads while the game asks it for its part of a chunk. Block states and biomes travel as numbers the game hands out once; every answer is checked before it is used.
+Capability `worldgen`, world-generation mods only (manifest `api = "0.3"`, `side = "server"`, experimental; fork `NeuHorizon`, docs/research/worldgen-hooks.md): what such a mod reads while the game asks it for its part of a chunk. Block states and biomes travel as numbers the game hands out once; every answer is checked before it is used.
 
 | Function | Signature | What it does |
 | --- | --- | --- |

@@ -1,5 +1,5 @@
 //! Runs a static benchmark method of compiled Java code and times it, to
-//! compare the compiler's output with the JVM (fork `afterwinter`, vanilla
+//! compare the compiler's output with the JVM (fork `NeuHorizon`, vanilla
 //! feasibility: docs/java-compat/plan.md). Structure only: no code is read;
 //! the classes are compiled as they are and the host answers the JDK calls
 //! a benchmark needs (math, `Object`), failing by name on any other.

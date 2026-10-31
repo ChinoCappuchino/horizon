@@ -1,4 +1,4 @@
-//! Large Ore Deposits for Horizon (fork `afterwinter`, M3g): a clean-room
+//! Large Ore Deposits for Horizon (fork `NeuHorizon`, M3g): a clean-room
 //! port. What each deposit is made of, where and how rare comes from the
 //! pack's own config files (tools/adlods_port.py, built in); how deposits are
 //! placed is Horizon's own, matched to what the mod does on NeoForge 1.21.1

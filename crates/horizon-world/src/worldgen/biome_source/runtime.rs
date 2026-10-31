@@ -52,7 +52,7 @@ pub enum ResolvedBiomeSource {
     Checkerboard(CheckerboardBiomeSource<String>),
     End(EndBiomeSource<String>),
     MultiNoise(MultiNoiseBiomeSource),
-    /// Fork `afterwinter`: multi-noise lists split by climate regions.
+    /// Fork `NeuHorizon`: multi-noise lists split by climate regions.
     Regions(ClimateRegions),
 }
 impl BiomeSourceDefinition {

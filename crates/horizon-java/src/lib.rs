@@ -1,4 +1,4 @@
-//! Java mod compatibility (fork `afterwinter`, docs/java-compat/README.md):
+//! Java mod compatibility (fork `NeuHorizon`, docs/java-compat/README.md):
 //! the compiler's front end. It reads JVM class files (`classfile`) and
 //! decodes their bytecode (`bytecode`), from any Java version mods were built
 //! with (Java 6 for Minecraft 1.7.10 to Java 21 for 1.21.1).

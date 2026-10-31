@@ -1,5 +1,5 @@
 //! Terrain and biomes from elsewhere: a world-generation mod's, for the
-//! presets it provides (fork `afterwinter`, docs/research/worldgen-hooks.md,
+//! presets it provides (fork `NeuHorizon`, docs/research/worldgen-hooks.md,
 //! M3). The generator asks a [`TerrainProvider`] for a chunk's biomes and
 //! land instead of sampling its noise router. The land is final: no
 //! aquifers, surface rules or carvers run over it (a provider makes its own
@@ -12,7 +12,7 @@ use horizon_core::position::ChunkPos;
 pub const KEEP_BIOME: u32 = u32::MAX;
 
 /// A provider for one world and dimension, shared by the generator's threads.
-/// A world-generation mod's part in decoration (fork `afterwinter`, M3g):
+/// A world-generation mod's part in decoration (fork `NeuHorizon`, M3g):
 /// after vanilla's features of each step, the blocks the mod sets around
 /// the chunk being decorated. Any world, not only a mod's own preset.
 pub trait Decorator: Send + Sync {

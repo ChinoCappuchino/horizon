@@ -1,6 +1,6 @@
 # Java mod compatibility: overview
 
-Status: design and proof of concept, fork `afterwinter`, 2026-10-29.
+Status: design and proof of concept, fork `NeuHorizon`, 2026-10-29.
 Writing standard: ASD-STE100 (Simplified Technical English) rules. See
 [Writing rules](#writing-rules-for-these-documents).
 

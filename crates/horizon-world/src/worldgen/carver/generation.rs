@@ -55,7 +55,7 @@ impl WorldCarver {
 /// supported; tagged sets and live registry reloads remain separate work.
 pub struct CarverCatalog {
     definitions: BTreeMap<String, Arc<WorldCarver>>,
-    /// Mods' carvers of a type written in Java (fork `afterwinter`): left out
+    /// Mods' carvers of a type written in Java (fork `NeuHorizon`): left out
     /// of every biome's carvers, as a feature the game cannot run is.
     unsupported: BTreeSet<String>,
 }

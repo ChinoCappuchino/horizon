@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Large Ore Deposits' deposits, from a pack's own config files, for Horizon's port of the mod
-(mods/ports/adlods, fork `afterwinter`, M3g).
+(mods/ports/adlods, fork `NeuHorizon`, M3g).
 
     adlods_port.py <pack config/adlods> <prepared resources> <out deposits.json>
 

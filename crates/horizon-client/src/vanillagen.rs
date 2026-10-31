@@ -192,7 +192,7 @@ impl VanillaTerrain {
         )
     }
     /// [`VanillaTerrain::for_world`] where `providers` may supply a
-    /// world-generation mod's terrain for the preset (fork `afterwinter`,
+    /// world-generation mod's terrain for the preset (fork `NeuHorizon`,
     /// M3c), opened with the world's `settings` (its `horizon:preset_settings`).
     #[allow(clippy::too_many_arguments)]
     pub fn for_world_with(

@@ -3549,7 +3549,7 @@ impl Renderer {
     }
     fn draw_frame(&mut self, frame: &Frame) -> Result<bool> {
         // A world whose column is taller or shorter than the last one's
-        // (fork `afterwinter`: a world-generation mod's dimension type).
+        // (fork `NeuHorizon`: a world-generation mod's dimension type).
         let sections = crate::chunk::sections() as i32;
         if self.occlusion.sections() != sections {
             self.occlusion = occlusion::Occlusion::new(crate::chunk::MIN_Y, sections);

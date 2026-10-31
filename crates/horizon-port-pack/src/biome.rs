@@ -1,4 +1,4 @@
-//! Mods' biomes, carried over (fork `afterwinter`, docs/research/climate-regions.md):
+//! Mods' biomes, carried over (fork `NeuHorizon`, docs/research/climate-regions.md):
 //! a 1.21.1 biome file in 26.3's shape. 1.21.1 keeps a biome's look and
 //! sounds in `effects` as integers and its mobs in `spawners`; 26.3 moves
 //! most of them into `attributes` (colours as `#rrggbb`), keeps only the

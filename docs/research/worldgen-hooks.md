@@ -1,6 +1,6 @@
 # World-generation hooks for mods (fork proposal, gap W)
 
-Status: proposal on the `afterwinter` fork branch, 2026-10-27. Gap **W** of the code-mods plan
+Status: proposal on the `NeuHorizon` fork branch, 2026-10-27. Gap **W** of the code-mods plan
 (#1189): "dimension types, chunk generators, portals, structure code; worldgen JSON carries, code
 missing". Upstream ranks W late because few ATM10 mods need it. The Afterwinter pack (NeoForge
 1.21.1) is built around a world-generation mod (Farview), with Biomes O' Plenty, TerraBlender,

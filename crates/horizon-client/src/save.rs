@@ -885,7 +885,7 @@ pub struct LevelShape {
 }
 impl LevelShape {
     /// The Overworld of the open world: vanilla's 384, or its dimension
-    /// type's height (fork `afterwinter`).
+    /// type's height (fork `NeuHorizon`).
     pub fn overworld() -> Self {
         Self {
             sky_light: true,

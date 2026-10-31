@@ -1,4 +1,4 @@
-//! The options of a world-generation mod's preset (fork `afterwinter`,
+//! The options of a world-generation mod's preset (fork `NeuHorizon`,
 //! docs/research/worldgen-hooks.md, M3c), over Create New World as the
 //! superflat editor is: one row per `[[worldgen.settings]]` entry of the
 //! mod's manifest, a cycling button for choices and a slider for numbers.

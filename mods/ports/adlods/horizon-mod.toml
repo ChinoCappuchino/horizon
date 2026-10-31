@@ -3,7 +3,7 @@ name = "Large Ore Deposits"
 version = "0.1.0"
 api = "0.3"
 side = "server"
-description = "Horizon's port of Large Ore Deposits (fork afterwinter): large ore deposits from the pack's own configs, placed as observed on NeoForge 1.21.1."
+description = "Horizon's port of Large Ore Deposits (fork NeuHorizon): large ore deposits from the pack's own configs, placed as observed on NeoForge 1.21.1."
 capabilities = ["worldgen"]
 experimental = ["worldgen"]
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Fork `afterwinter`: docs/java-compat/README.md.
+# Fork `NeuHorizon`: docs/java-compat/README.md.
 """What the pack's Mixins patch, from constant pools: each Mixin class's likely target (the game
 class descriptors it names), grouped by the area of the game and by the jar's role."""
 import json, re, sys, zipfile, collections

@@ -1,4 +1,4 @@
-//! Running world-generation mods (capability `worldgen`; fork `afterwinter`,
+//! Running world-generation mods (capability `worldgen`; fork `NeuHorizon`,
 //! docs/research/worldgen-hooks.md). Such a mod runs apart from the game's
 //! and the server's hooks: the generator makes a [`Worker`] per generation
 //! thread from a [`WorldgenMod`], each its own instance opened for one world

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Java mod compatibility (fork afterwinter): the NeoForge and Minecraft classes a compiled NeoForge mod registers its content with, written as a Horizon content mod"
+description = "Java mod compatibility (fork NeuHorizon): the NeoForge and Minecraft classes a compiled NeoForge mod registers its content with, written as a Horizon content mod"
 
 [dependencies]
 horizon-core = { path = "../horizon-core" }

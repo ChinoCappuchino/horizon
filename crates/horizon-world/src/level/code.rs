@@ -1,4 +1,4 @@
-//! Block behaviour from mods' own code (fork `afterwinter`,
+//! Block behaviour from mods' own code (fork `NeuHorizon`,
 //! docs/java-compat/README.md): a compiled NeoForge mod's block runs its
 //! `useWithoutItem` (and, later, its other overrides) here, before the game
 //! class's behaviour its template gives. The mod's code acts through

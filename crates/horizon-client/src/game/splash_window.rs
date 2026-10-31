@@ -1,4 +1,4 @@
-//! The startup splash's window (fork `afterwinter`; `horizon_client::splash`):
+//! The startup splash's window (fork `NeuHorizon`; `horizon_client::splash`):
 //! transparent, undecorated and click-through over the whole screen, on top
 //! until the game window takes over where the splash's pool turned into it.
 use horizon_client::splash::{

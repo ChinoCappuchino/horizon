@@ -112,7 +112,7 @@ pub struct Extras {
     pub agent_control: bool,
     /// "Playing Horizon" on the player's Discord profile (`discord_presence`; on by default).
     pub discord_presence: bool,
-    /// The startup splash (fork `afterwinter`, `splash`): `full`, `still`
+    /// The startup splash (fork `NeuHorizon`, `splash`): `full`, `still`
     /// (no motion: the pool, the stage line and the bar) or `off`.
     pub startup_splash: String,
 }

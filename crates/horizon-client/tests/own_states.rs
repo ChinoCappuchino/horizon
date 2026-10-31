@@ -1,4 +1,4 @@
-//! A content mod's block with its own states (fork `afterwinter`,
+//! A content mod's block with its own states (fork `NeuHorizon`,
 //! docs/mods.md): a cooking pot with `facing` and `support`, its own shapes,
 //! over the prepared 26.3 root. Every loader takes the overlay, and each
 //! state has its properties, facts and shapes. Needs HORIZON_TEST_RESOURCES

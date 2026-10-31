@@ -1,4 +1,4 @@
-# The startup splash (fork `afterwinter`)
+# The startup splash (fork `NeuHorizon`)
 
 Before the game window opens, Horizon shows its loading as liquid: each mod that loads is a drop that flies in from a screen edge and merges into an ember
 pool, vanilla's snow fox (the game's own model and the player's own texture) laps it, and when the

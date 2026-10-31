@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 pub mod block_entity;
 
 pub const MIN_Y: i32 = -64;
-/// The tallest overworld a world may have (fork `afterwinter`: a
+/// The tallest overworld a world may have (fork `NeuHorizon`: a
 /// world-generation mod's dimension type, up to 2048 high from `MIN_Y`), and
 /// its sections: what static per-section tables and masks hold.
 pub const MAX_HEIGHT: i32 = 2048;
@@ -40,7 +40,7 @@ pub fn set_height(height: i32) -> i32 {
 }
 
 /// Bits of the biomes' global palette: 7 for vanilla's 67 biomes, more when
-/// mods add biomes past 128 (fork `afterwinter`). Set with the biome table,
+/// mods add biomes past 128 (fork `NeuHorizon`). Set with the biome table,
 /// before the first chunk.
 static BIOME_BITS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(7);
 

@@ -1,4 +1,4 @@
-//! The startup splash's motion (fork `afterwinter`): what is where at a
+//! The startup splash's motion (fork `NeuHorizon`): what is where at a
 //! moment, from the loading's progress. Drawing is `super::gpu`'s.
 //!
 //! Every mod that loads (or, without mods, every loading stage) is a drop:

@@ -1,4 +1,4 @@
-//! The startup splash during the setup (fork `afterwinter`):
+//! The startup splash during the setup (fork `NeuHorizon`):
 //! `horizon-client --setup-splash [--jar PATH] -- COMMAND ARGS...` runs the
 //! setup (installing, preparing the resources, porting the pack, then the
 //! game) and shows its progress with the splash: a drop for each step of

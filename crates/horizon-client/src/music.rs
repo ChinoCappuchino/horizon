@@ -176,7 +176,7 @@ impl MusicTables {
         };
         Self {
             dimensions: read("dimension_type"),
-            // Every namespace's biomes (fork `afterwinter`: mods' too).
+            // Every namespace's biomes (fork `NeuHorizon`: mods' too).
             biomes: crate::biome::biome_files(root)
                 .into_iter()
                 .filter_map(|(name, path)| {

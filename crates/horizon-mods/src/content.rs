@@ -107,7 +107,7 @@ struct BlockFile {
     item_components: serde_json::Map<String, serde_json::Value>,
 }
 
-/// A block's own states (fork `afterwinter`), in place of its template's:
+/// A block's own states (fork `NeuHorizon`), in place of its template's:
 /// the template then gives each state's other facts (behaviour, sounds,
 /// hardness...), from its default state. States go as Minecraft's
 /// `StateDefinition` makes them: properties by name, the last one changing
@@ -232,7 +232,7 @@ struct ItemFile {
     template: String,
     max_stack_size: Option<u8>,
     rarity: Option<Rarity>,
-    /// Item components set over the template's (fork `afterwinter`), as
+    /// Item components set over the template's (fork `NeuHorizon`), as
     /// the game's item data writes them: `{"minecraft:food": {...}}`.
     #[serde(default)]
     components: serde_json::Map<String, serde_json::Value>,
@@ -399,7 +399,7 @@ impl Content {
     /// Where content may go, and the declarations.
     fn check(&mut self, manifest: &Manifest) -> Result<(), String> {
         let id = manifest.id.as_str();
-        // A world-generation mod (fork `afterwinter`) may ship its world
+        // A world-generation mod (fork `NeuHorizon`) may ship its world
         // generation's data without registries: presets, dimension types,
         // worldgen registries, structure templates and worldgen tags.
         let worldgen_only = manifest.capabilities.contains(&Capability::Worldgen)

@@ -1,4 +1,4 @@
-//! Java mod compatibility (fork `afterwinter`, docs/java-compat/README.md):
+//! Java mod compatibility (fork `NeuHorizon`, docs/java-compat/README.md):
 //! the NeoForge and Minecraft classes a compiled NeoForge mod registers its
 //! content with. The mod runs from its original jar, through
 //! `horizon-java`'s compiler; what it registers (blocks with their states,

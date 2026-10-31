@@ -886,7 +886,7 @@ fn a_replacing_mod_tag_reaches_the_root() {
 }
 
 /// A world-generation mod (code, and data without `registries`; fork
-/// `afterwinter`) adds its world preset and its dimension type, and the
+/// `NeuHorizon`) adds its world preset and its dimension type, and the
 /// generator's data has both, beside vanilla's.
 #[test]
 #[ignore = "full content root: CI and pr_ready run it"]
@@ -947,7 +947,7 @@ fn a_worldgen_mods_preset_and_dimension_type_reach_the_generator() {
     fs::remove_dir_all(&scratch).unwrap();
 }
 
-/// A mod's biomes (fork `afterwinter`, docs/research/climate-regions.md): a
+/// A mod's biomes (fork `NeuHorizon`, docs/research/climate-regions.md): a
 /// biome, a carver of a type written in Java (left out of the biome's
 /// carvers), a biome tag naming the biome (the generator refuses a tag naming
 /// a biome it lacks) and a climate region placing it reach the generator, which then places the mod's biome in some regions and

@@ -120,7 +120,7 @@ pub enum Mode {
         flat: flat::State,
     },
     /// A world-generation mod's preset options over Create New World (fork
-    /// `afterwinter`), as the superflat editor is.
+    /// `NeuHorizon`), as the superflat editor is.
     CreatePreset {
         name: String,
         seed: String,

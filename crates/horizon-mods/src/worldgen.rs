@@ -1,4 +1,4 @@
-//! World-generation mods' declarations (fork `afterwinter`,
+//! World-generation mods' declarations (fork `NeuHorizon`,
 //! docs/research/worldgen-hooks.md): the manifest's `[worldgen]` section,
 //! the claims by which one mod replaces, removes or reserves what others
 //! add, the pack author's `config/horizon/worldgen-rules.toml`, and the

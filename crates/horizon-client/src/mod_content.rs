@@ -12,7 +12,7 @@
 //! - each mod's own `assets/` and `data/` files;
 //! - additions to tags merged into the tag files and bundles.
 //!
-//! A block may declare its own states instead (fork `afterwinter`,
+//! A block may declare its own states instead (fork `NeuHorizon`,
 //! [`horizon_mods::content::BlockStates`]): each state then gets the
 //! template's default row, with its own id, properties and declared shapes
 //! (new entries in the shape tables), and the model, render and rotation
@@ -1275,7 +1275,7 @@ const BIOME_TAGS: &str = "worldgen/biome_tags.json";
 /// Worldgen registries a content mod may add to, and the bundle the
 /// worldgen loader reads each from (id → the file's text): what structure
 /// mods hold, and the world presets of world-generation mods (fork
-/// `afterwinter`: a preset whose terrain a mod provides; mods' biomes and
+/// `NeuHorizon`: a preset whose terrain a mod provides; mods' biomes and
 /// their carvers, which climate regions place, docs/research/climate-regions.md).
 /// Noise and density functions change the terrain and are not read from mods.
 const WORLDGEN_BUNDLES: [(&str, &str); 10] = [
@@ -1297,7 +1297,7 @@ pub const PRESET_SETTINGS: &str = "worldgen/preset_settings.json";
 /// for their presets' heights: a bundle the prepared resources don't have.
 const DIMENSION_TYPES: &str = "worldgen/dimension_types.json";
 /// Mods' climate regions (`data/<ns>/worldgen/horizon_climate_region/`, fork
-/// `afterwinter`, docs/research/climate-regions.md): a bundle vanilla lacks.
+/// `NeuHorizon`, docs/research/climate-regions.md): a bundle vanilla lacks.
 const CLIMATE_REGIONS: &str = "worldgen/climate_regions.json";
 
 /// A mod file that adds to a worldgen bundle: (bundle, id).

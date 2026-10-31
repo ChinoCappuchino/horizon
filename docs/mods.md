@@ -466,7 +466,7 @@ none.
     "top": "carve", "bottom": "none", "rigid_junctions": true, "inflate": true } }
 ```
 
-#### Blocks with their own states (fork `afterwinter`)
+#### Blocks with their own states (fork `NeuHorizon`)
 
 A block can declare its own states instead of copying its template's: the
 template then gives every state's other facts (behaviour, sounds, hardness,
@@ -498,7 +498,7 @@ values and swap `axis` `x`/`z`. Give the block its own
 `assets/<ns>/blockstates/<path>.json` for these properties; without one
 every state uses the template's model. At most 4096 states a block.
 
-#### Villager professions (fork `afterwinter`)
+#### Villager professions (fork `NeuHorizon`)
 
 Professions and their job sites are registries, not a fixed list: the
 game's fifteen keep their places and a mod adds its own. A job site is a
@@ -627,9 +627,9 @@ items or block states yet, and `^` coordinates; in-frame single player's chat
 box lists server mods' commands by name only (the server still parses their
 arguments).
 
-### World-generation mods (fork `afterwinter`, experimental)
+### World-generation mods (fork `NeuHorizon`, experimental)
 
-On the `afterwinter` fork only: a server mod with capability `worldgen`
+On the `NeuHorizon` fork only: a server mod with capability `worldgen`
 (`experimental = ["worldgen"]`) builds against the world
 `horizon-worldgen-mod` (`horizon_mod_sdk::worldgen`) and takes part in
 generating new worlds: biomes, the land of the presets it provides,

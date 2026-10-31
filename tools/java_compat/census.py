@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Fork `afterwinter`: docs/java-compat/README.md.
+# Fork `NeuHorizon`: docs/java-compat/README.md.
 """API census of mod jars, from class files' constant pools only (no code read): which Minecraft and
 NeoForge classes, methods and fields each mod refers to, and its Mixins.  census.py <mods dir> <out.json>"""
 import json, struct, sys, zipfile, collections

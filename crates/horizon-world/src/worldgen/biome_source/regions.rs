@@ -1,4 +1,4 @@
-//! Climate regions (fork `afterwinter`, docs/research/climate-regions.md): a
+//! Climate regions (fork `NeuHorizon`, docs/research/climate-regions.md): a
 //! world's multi-noise biomes split between weighted parameter lists, as
 //! TerraBlender does for the mods that use it. Each region is a full list (a
 //! biome for every climate); every position belongs to one region, and that

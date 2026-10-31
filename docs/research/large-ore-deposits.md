@@ -1,7 +1,7 @@
 # Large Ore Deposits: what it does, as observed, and Horizon's port
 
 Large Ore Deposits (`adlods`, 9.1.7.0 for NeoForge 1.21.1) adds large, rare ore deposits on top of
-vanilla's veins. Horizon's port (`mods/ports/adlods`, fork `afterwinter`, M3g) is clean room: its
+vanilla's veins. Horizon's port (`mods/ports/adlods`, fork `NeuHorizon`, M3g) is clean room: its
 code is not read. What each deposit is made of comes from the pack's own config files; how deposits
 are placed comes from observation on NeoForge.
 
