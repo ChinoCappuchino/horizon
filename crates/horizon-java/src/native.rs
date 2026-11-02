@@ -463,7 +463,7 @@ impl Native {
         }
         for b in &builtin_list {
             for m in &b.methods {
-                if !m.is_static && m.name != "<init>" {
+                if !m.is_static && m.name != "<init>" && m.f != 0 {
                     let n = selectors.len();
                     selectors
                         .entry((m.name.to_owned(), m.desc.to_owned()))
@@ -489,7 +489,7 @@ impl Native {
         }
         for b in &builtin_list {
             for m in &b.methods {
-                if !m.is_static && m.name != "<init>" {
+                if !m.is_static && m.name != "<init>" && m.f != 0 {
                     *implementations
                         .entry((m.name.to_owned(), m.desc.to_owned()))
                         .or_default() += 1;
@@ -960,7 +960,7 @@ impl Native {
                 .flat_map(|b| {
                     b.methods
                         .iter()
-                        .filter(|m| !m.is_static)
+                        .filter(|m| !m.is_static && m.f != 0)
                         .map(|m| (m.name, m.desc))
                 })
                 .collect();
@@ -1427,7 +1427,7 @@ impl Native {
         // callers pass the thread's context first, which they don't take.
         let mut thunks: HashMap<(usize, &'static str), FuncId> = HashMap::new();
         for b in &builtin_list {
-            for m in b.methods.iter().filter(|m| !m.is_static) {
+            for m in b.methods.iter().filter(|m| !m.is_static && m.f != 0) {
                 if thunks.contains_key(&(m.f, m.desc)) {
                     continue;
                 }
@@ -1548,7 +1548,7 @@ impl Native {
                     }
                     b.methods
                         .iter()
-                        .find(|m| !m.is_static && m.name == name && m.desc == desc)
+                        .find(|m| !m.is_static && m.f != 0 && m.name == name && m.desc == desc)
                         .map(thunk)
                 })
             };
@@ -1561,7 +1561,7 @@ impl Native {
                 if let Some(m) = b
                     .methods
                     .iter()
-                    .find(|m| !m.is_static && m.name == name && m.desc == desc)
+                    .find(|m| !m.is_static && m.f != 0 && m.name == name && m.desc == desc)
                 {
                     return Some(thunk(m));
                 }
@@ -2387,7 +2387,7 @@ impl World<'_> {
                 fin = b.is_final;
                 first = false;
             }
-            if let Some(m) = b.methods.iter().find(|m| m.name == name && m.desc == desc) {
+            if let Some(m) = b.methods.iter().find(|m| m.f != 0 && m.name == name && m.desc == desc) {
                 return Some((m.f, m.is_static, fin));
             }
             y = b.super_name;

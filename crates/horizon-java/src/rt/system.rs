@@ -899,6 +899,33 @@ extern "C" fn boolean_true() -> u64 {
 extern "C" fn boolean_false() -> u64 {
     super::bool_value_of(0)
 }
+extern "C" fn boolean_type() -> u64 {
+    super::collections::class_named("boolean")
+}
+extern "C" fn byte_type() -> u64 {
+    super::collections::class_named("byte")
+}
+extern "C" fn char_type() -> u64 {
+    super::collections::class_named("char")
+}
+extern "C" fn short_type() -> u64 {
+    super::collections::class_named("short")
+}
+extern "C" fn int_type() -> u64 {
+    super::collections::class_named("int")
+}
+extern "C" fn long_type() -> u64 {
+    super::collections::class_named("long")
+}
+extern "C" fn float_type() -> u64 {
+    super::collections::class_named("float")
+}
+extern "C" fn double_type() -> u64 {
+    super::collections::class_named("double")
+}
+extern "C" fn void_type() -> u64 {
+    super::collections::class_named("void")
+}
 fn emit(p: u64, s: &str, line: bool) {
     use std::io::Write;
     // SAFETY: a PrintStream: its target at 8.
@@ -1071,6 +1098,15 @@ pub fn static_getter(owner: &str, name: &str) -> Option<(usize, &'static str)> {
         ("java/lang/System", "err") => (f(system_err), "()Ljava/io/PrintStream;"),
         ("java/lang/Boolean", "TRUE") => (f(boolean_true), "()Ljava/lang/Boolean;"),
         ("java/lang/Boolean", "FALSE") => (f(boolean_false), "()Ljava/lang/Boolean;"),
+        ("java/lang/Boolean", "TYPE") => (f(boolean_type), "()Ljava/lang/Class;"),
+        ("java/lang/Byte", "TYPE") => (f(byte_type), "()Ljava/lang/Class;"),
+        ("java/lang/Character", "TYPE") => (f(char_type), "()Ljava/lang/Class;"),
+        ("java/lang/Short", "TYPE") => (f(short_type), "()Ljava/lang/Class;"),
+        ("java/lang/Integer", "TYPE") => (f(int_type), "()Ljava/lang/Class;"),
+        ("java/lang/Long", "TYPE") => (f(long_type), "()Ljava/lang/Class;"),
+        ("java/lang/Float", "TYPE") => (f(float_type), "()Ljava/lang/Class;"),
+        ("java/lang/Double", "TYPE") => (f(double_type), "()Ljava/lang/Class;"),
+        ("java/lang/Void", "TYPE") => (f(void_type), "()Ljava/lang/Class;"),
         _ => return None,
     })
 }

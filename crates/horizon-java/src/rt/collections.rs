@@ -96,7 +96,7 @@ fn call0(o: u64, nd: &str) -> u64 {
         }
     }
 }
-fn call0_i(o: u64, nd: &str) -> i32 {
+pub(super) fn call0_i(o: u64, nd: &str) -> i32 {
     match method(o, nd) {
         Some(f) => {
             // SAFETY: as above.
@@ -2826,7 +2826,7 @@ fn assignable(a: &str, b: &str) -> bool {
 }
 /// The Class object of a class by name (`java/lang/String`, `[I`, `int`):
 /// the program's own, or one made here (the same each time).
-fn class_named(name: &str) -> u64 {
+pub(super) fn class_named(name: &str) -> u64 {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     let r = rt();
@@ -2835,6 +2835,13 @@ fn class_named(name: &str) -> u64 {
         && c != 0
     {
         return c;
+    }
+    if let Some(&p) = PRIMITIVES.iter().find(|&&p| p == name) {
+        return once(p, || {
+            let c = alloc(24, vt("java/lang/Class"));
+            set(c, 16, str_of(p));
+            c
+        });
     }
     static MADE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     let mut made = MADE
