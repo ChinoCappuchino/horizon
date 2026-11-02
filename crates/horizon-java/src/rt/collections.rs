@@ -2751,6 +2751,52 @@ extern "C" fn math_clamp(v: i64, lo: i32, hi: i32) -> i32 {
 //
 // A Class: [vtable][class id][name (a String, with dots)].
 
+extern "C" fn math_add_exact(a: i32, b: i32) -> i32 {
+    match a.checked_add(b) {
+        Some(v) => v,
+        None => {
+            throw("java/lang/ArithmeticException", Some("integer overflow"));
+            0
+        }
+    }
+}
+extern "C" fn math_add_exact_l(a: i64, b: i64) -> i64 {
+    match a.checked_add(b) {
+        Some(v) => v,
+        None => {
+            throw("java/lang/ArithmeticException", Some("long overflow"));
+            0
+        }
+    }
+}
+extern "C" fn math_multiply_exact(a: i32, b: i32) -> i32 {
+    match a.checked_mul(b) {
+        Some(v) => v,
+        None => {
+            throw("java/lang/ArithmeticException", Some("integer overflow"));
+            0
+        }
+    }
+}
+extern "C" fn math_multiply_exact_li(a: i64, b: i32) -> i64 {
+    match a.checked_mul(i64::from(b)) {
+        Some(v) => v,
+        None => {
+            throw("java/lang/ArithmeticException", Some("long overflow"));
+            0
+        }
+    }
+}
+extern "C" fn math_multiply_exact_l(a: i64, b: i64) -> i64 {
+    match a.checked_mul(b) {
+        Some(v) => v,
+        None => {
+            throw("java/lang/ArithmeticException", Some("long overflow"));
+            0
+        }
+    }
+}
+
 fn class_name<'a>(c: u64) -> &'a [u16] {
     units(field(c, 16))
 }
@@ -4252,6 +4298,11 @@ pub fn builtins() -> Vec<Builtin> {
                 s("pow", "(DD)D", f!(math_pow)),
                 s("atan2", "(DD)D", f!(math_atan2)),
                 s("clamp", "(JII)I", f!(math_clamp)),
+                s("addExact", "(II)I", f!(math_add_exact)),
+                s("addExact", "(JJ)J", f!(math_add_exact_l)),
+                s("multiplyExact", "(II)I", f!(math_multiply_exact)),
+                s("multiplyExact", "(JI)J", f!(math_multiply_exact_li)),
+                s("multiplyExact", "(JJ)J", f!(math_multiply_exact_l)),
             ],
         },
         Builtin {

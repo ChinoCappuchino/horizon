@@ -477,9 +477,9 @@ fn big_integer_and_number_subclasses_give_javas_results() {
     let bits = f(native.context());
     assert_eq!(
         bits,
-        (1 << 5) - 1,
+        (1 << 6) - 1,
         "failed BigInteger checks: {:#b}",
-        !bits & ((1 << 5) - 1)
+        !bits & ((1 << 6) - 1)
     );
 }
 
