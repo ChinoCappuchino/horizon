@@ -972,6 +972,12 @@ extern "C" fn double_as_float(b: u64) -> f32 {
 extern "C" fn small_as_int(b: u64) -> i32 {
     box_int(b)
 }
+extern "C" fn number_byte_value(n: u64) -> i32 {
+    collections::call0_i(n, "intValue ()I") as i8 as i32
+}
+extern "C" fn number_short_value(n: u64) -> i32 {
+    collections::call0_i(n, "intValue ()I") as i16 as i32
+}
 extern "C" fn box_equals(b: u64, o: u64) -> i32 {
     // SAFETY: both objects' headers.
     (o != 0 && unsafe { word(b, 0) == word(o, 0) } && value(b) == value(o)) as i32
@@ -1078,6 +1084,30 @@ extern "C" fn int_static_to_string(i: i32) -> u64 {
 }
 extern "C" fn int_hash_static(i: i32) -> i32 {
     i
+}
+extern "C" fn int_leading_zeros(i: i32) -> i32 {
+    i.leading_zeros() as i32
+}
+extern "C" fn int_trailing_zeros(i: i32) -> i32 {
+    i.trailing_zeros() as i32
+}
+extern "C" fn int_bit_count(i: i32) -> i32 {
+    i.count_ones() as i32
+}
+extern "C" fn int_signum(i: i32) -> i32 {
+    i.signum()
+}
+extern "C" fn long_leading_zeros(i: i64) -> i32 {
+    i.leading_zeros() as i32
+}
+extern "C" fn long_trailing_zeros(i: i64) -> i32 {
+    i.trailing_zeros() as i32
+}
+extern "C" fn long_bit_count(i: i64) -> i32 {
+    i.count_ones() as i32
+}
+extern "C" fn long_signum(i: i64) -> i32 {
+    i.signum() as i32
 }
 extern "C" fn parse_int(s: u64) -> i32 {
     parse_int_radix(s, 10)
@@ -1766,7 +1796,19 @@ pub fn builtins() -> Vec<Builtin> {
             size: 8,
             is_final: false,
             is_interface: false,
-            methods: vec![],
+            methods: vec![
+                m("<init>", "()V", object_init as *const () as usize),
+                m("intValue", "()I", 0),
+                m("longValue", "()J", 0),
+                m("floatValue", "()F", 0),
+                m("doubleValue", "()D", 0),
+                m("byteValue", "()B", number_byte_value as *const () as usize),
+                m(
+                    "shortValue",
+                    "()S",
+                    number_short_value as *const () as usize,
+                ),
+            ],
         },
         Builtin {
             name: "java/lang/Record",
@@ -1942,6 +1984,18 @@ pub fn builtins() -> Vec<Builtin> {
         ),
         s("hashCode", "(I)I", int_hash_static as *const () as usize),
         s(
+            "numberOfLeadingZeros",
+            "(I)I",
+            int_leading_zeros as *const () as usize,
+        ),
+        s(
+            "numberOfTrailingZeros",
+            "(I)I",
+            int_trailing_zeros as *const () as usize,
+        ),
+        s("bitCount", "(I)I", int_bit_count as *const () as usize),
+        s("signum", "(I)I", int_signum as *const () as usize),
+        s(
             "parseInt",
             "(Ljava/lang/String;)I",
             parse_int as *const () as usize,
@@ -1986,6 +2040,18 @@ pub fn builtins() -> Vec<Builtin> {
             long_compare_to as *const () as usize,
         ),
         s("compare", "(JJ)I", long_compare as *const () as usize),
+        s(
+            "numberOfLeadingZeros",
+            "(J)I",
+            long_leading_zeros as *const () as usize,
+        ),
+        s(
+            "numberOfTrailingZeros",
+            "(J)I",
+            long_trailing_zeros as *const () as usize,
+        ),
+        s("bitCount", "(J)I", long_bit_count as *const () as usize),
+        s("signum", "(J)I", long_signum as *const () as usize),
     ]);
     let mut float = number(
         float_as_int as *const () as usize,

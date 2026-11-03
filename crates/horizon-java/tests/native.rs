@@ -339,6 +339,151 @@ fn type_tests_and_catches_work_on_every_thread() {
 }
 
 #[test]
+fn big_integer_and_number_subclasses_give_javas_results() {
+    use horizon_java::classfile::Constant;
+    use std::collections::{HashMap, HashSet};
+
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/java");
+    let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("horizon-java-biginteger");
+    let jdk = out.join("jdk");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&jdk).unwrap();
+
+    let status = Command::new("javac")
+        .args(["--release", "21", "-d"])
+        .arg(&out)
+        .arg(src.join("t/BigIntegerProbe.java"))
+        .status()
+        .expect("javac must be available to validate BigIntegerProbe");
+    assert!(status.success(), "javac failed: {status}");
+
+    let jvm = Command::new("java")
+        .arg("-cp")
+        .arg(&out)
+        .arg("t.BigIntegerProbe")
+        .arg("--dump-jdk")
+        .arg(&jdk)
+        .output()
+        .expect("java must be available to run BigIntegerProbe on the JVM");
+    assert!(
+        jvm.status.success(),
+        "JVM BigIntegerProbe failed: {}",
+        String::from_utf8_lossy(&jvm.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&jvm.stdout).trim(), "42");
+
+    let mut classes = Vec::new();
+    for e in std::fs::read_dir(out.join("t")).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_some_and(|x| x == "class") {
+            classes.push(ClassFile::parse(&std::fs::read(&p).unwrap()).unwrap());
+        }
+    }
+
+    fn read_jdk(dir: &std::path::Path, out: &mut Vec<ClassFile>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                read_jdk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "class") {
+                out.push(ClassFile::parse(&std::fs::read(&p).unwrap()).unwrap());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    read_jdk(&jdk, &mut found);
+    let mut pool: HashMap<String, ClassFile> = found
+        .into_iter()
+        .filter_map(|c| Some((c.name().ok()?.to_owned(), c)))
+        .collect();
+    let runtime: HashSet<&str> = horizon_java::native::runtime_classes()
+        .into_iter()
+        .collect();
+    let on_runtime = |pool: &HashMap<String, ClassFile>, name: &str| -> bool {
+        let mut x = pool.get(name).and_then(|c| c.super_name().ok().flatten());
+        while let Some(s) = x {
+            if matches!(s, "java/lang/Object" | "java/lang/Number") {
+                return false;
+            }
+            if runtime.contains(s) {
+                return true;
+            }
+            x = pool.get(s).and_then(|c| c.super_name().ok().flatten());
+        }
+        false
+    };
+    // Selection rule: Number subclasses in the JDK are accepted; subclasses of
+    // stateful runtime classes remain refused.
+    assert!(!on_runtime(&pool, "java/math/BigInteger"));
+    assert!(!on_runtime(&pool, "java/time/Duration"));
+    assert!(on_runtime(&pool, "java/math/BigInteger$RecursiveOp"));
+    assert!(on_runtime(&pool, "java/util/concurrent/RecursiveTask"));
+    assert!(on_runtime(&pool, "java/util/LinkedHashMap"));
+
+    let refs = |c: &ClassFile| -> Vec<String> {
+        c.constants
+            .iter()
+            .filter_map(|k| match k {
+                Constant::Class(i) => match c.constants.get(*i as usize) {
+                    Some(Constant::Utf8(n)) => Some(n.trim_start_matches('[').to_owned()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .map(|n| match n.strip_prefix('L') {
+                Some(t) if n.ends_with(';') => t.trim_end_matches(';').to_owned(),
+                _ => n,
+            })
+            .collect()
+    };
+    let have: HashSet<String> = classes
+        .iter()
+        .filter_map(|c| c.name().ok().map(str::to_owned))
+        .collect();
+    let mut todo: Vec<String> = classes.iter().flat_map(|c| refs(c)).collect();
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut refused: HashSet<String> = HashSet::new();
+    while let Some(n) = todo.pop() {
+        if have.contains(&n)
+            || runtime.contains(n.as_str())
+            || taken.contains(&n)
+            || refused.contains(&n)
+            || !pool.contains_key(&n)
+        {
+            continue;
+        }
+        if on_runtime(&pool, &n) {
+            refused.insert(n);
+            continue;
+        }
+        let c = &pool[&n];
+        todo.extend(refs(c));
+        todo.extend(c.super_name().ok().flatten().map(str::to_owned));
+        taken.insert(n);
+    }
+    assert!(taken.contains("java/math/BigInteger"));
+    assert!(taken.contains("java/time/Duration"));
+    assert!(refused.contains("java/math/BigInteger$RecursiveOp"));
+    for n in taken {
+        if let Some(c) = pool.remove(&n) {
+            classes.push(c);
+        }
+    }
+
+    let native = Native::compile(&classes).unwrap();
+    let f = native.function("t/BigIntegerProbe.checkAll()I").unwrap();
+    // SAFETY: checkAll takes the thread's context and returns an int bitmask.
+    let f: extern "C" fn(*mut Context) -> i32 = unsafe { std::mem::transmute(f) };
+    let bits = f(native.context());
+    assert_eq!(
+        bits,
+        (1 << 6) - 1,
+        "failed BigInteger checks: {:#b}",
+        !bits & ((1 << 6) - 1)
+    );
+}
+
+#[test]
 fn lambdas_are_instances_of_their_interfaces() {
     let Some(native) = native_ops() else { return };
     let f = native.function("t/NativeOps.lambdaInstanceOf()I").unwrap();

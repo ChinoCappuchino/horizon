@@ -424,8 +424,8 @@ fn native_bench(classes: &[ClassFile], bench: &[String]) -> Result<()> {
 /// `--jdk <dir>`: the JDK's classes (extracted from the player's own Java
 /// runtime) that the program uses and the runtime library has no version
 /// of, with the JDK classes they need in turn. Not one whose superclasses
-/// reach a runtime-library class other than Object: it would use that
-/// class's internals (docs/java-compat/compiler.md 4.4, level 3).
+/// reach a runtime-library class other than Object or Number: it would use
+/// that class's internals (docs/java-compat/compiler.md 4.4, level 3).
 #[cfg(feature = "native")]
 fn with_jdk(classes: &mut Vec<ClassFile>, dir: &Path) -> Result<()> {
     use horizon_java::classfile::Constant;
@@ -455,11 +455,12 @@ fn with_jdk(classes: &mut Vec<ClassFile>, dir: &Path) -> Result<()> {
             })
             .collect()
     };
-    // Whether a JDK class stands on a runtime-library class (not Object).
+    // Whether a JDK class stands on a runtime-library class (not Object or
+    // Number, which have no fields on either side).
     let on_runtime = |pool: &HashMap<String, ClassFile>, name: &str| -> bool {
         let mut x = pool.get(name).and_then(|c| c.super_name().ok().flatten());
         while let Some(s) = x {
-            if s == "java/lang/Object" {
+            if matches!(s, "java/lang/Object" | "java/lang/Number") {
                 return false;
             }
             if runtime.contains(s) {
